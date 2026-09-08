@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from config import settings
+from core.llm.types import is_rejected_call
 from db import models as db
 
 logger = logging.getLogger("pernix.reflect")
@@ -696,6 +697,8 @@ def _commands_run_section(attempt_msgs: list[dict]) -> str:
         except (ValueError, TypeError):
             continue
         for tc in calls or []:
+            if is_rejected_call(tc):
+                continue  # the gate refused it — nothing ran
             fn = tc.get("function") or tc
             name = fn.get("name") or ""
             if name not in _SHELL_TOOLS:

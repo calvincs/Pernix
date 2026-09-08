@@ -25,6 +25,7 @@ import re
 from typing import Any
 
 from config import settings
+from core.llm.types import is_rejected_call
 from db import models as db
 
 logger = logging.getLogger("pernix.refine")
@@ -244,6 +245,8 @@ def _build_tool_summary(messages: list[dict]) -> dict[str, dict[str, Any]]:
             if not isinstance(calls, list):
                 continue
             for call in calls:
+                if is_rejected_call(call):
+                    continue  # refused at admission, so it never ran
                 fn = (call or {}).get("function") or {}
                 tname = fn.get("name")
                 tid = (call or {}).get("id")

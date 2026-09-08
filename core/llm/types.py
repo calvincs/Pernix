@@ -96,6 +96,18 @@ class HealthStatus:
     models_available: int = 0
 
 
+# Marker key stamped by the agent's admission gate onto a tool call it refused
+# to execute. The refused call is still persisted on the assistant row, so its
+# rejection tool-role row has a parent and survives orphan filtering into the
+# next request; readers that count executed work skip it by this key.
+REJECTED_CALL_KEY = "_rejected"
+
+
+def is_rejected_call(tc) -> bool:
+    """True if the admission gate refused this persisted call (it never ran)."""
+    return isinstance(tc, dict) and bool(tc.get(REJECTED_CALL_KEY))
+
+
 def extract_tool_call_fields(tc: dict) -> tuple[str, str, str]:
     """Extract (id, name, arguments) from either flat or nested tool call format.
 

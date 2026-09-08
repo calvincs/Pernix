@@ -26,6 +26,7 @@ from core.llm.providers.salvage import salvage_tool_calls
 from core.llm.router import OPENAI_FORMAT_PROVIDERS
 from core.llm.semaphore import PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
 from core.llm.stream_ladder import stream_with_failover
+from core.llm.types import REJECTED_CALL_KEY, is_rejected_call
 from core.tools.executor import execute_tool_round
 from core.tools.registry import get_registry
 from db import models as db
@@ -78,7 +79,7 @@ def _prior_turn_tool_names(session_id: str, lookback: int = 40) -> set[str]:
         except (json.JSONDecodeError, TypeError):
             continue
         for tc in (tcs if isinstance(tcs, list) else []):
-            if not isinstance(tc, dict):
+            if not isinstance(tc, dict) or is_rejected_call(tc):
                 continue
             name = tc.get("name") or tc.get("function", {}).get("name", "")
             if name:
@@ -441,6 +442,37 @@ def _summarize_args(args: dict, max_value_len: int = 200) -> dict:
     return summary
 
 
+# A refused call's raw argument text is echoed back to the model verbatim up to
+# this many characters — long enough to recognise the mistake, short enough that
+# a megabyte of malformed JSON can't ride into every later request.
+_REJECTED_ARGS_CAP = 1000
+
+
+def _rejected_call_args(raw) -> str:
+    """A refused call's arguments as a JSON *object* string.
+
+    The refused call is persisted on the assistant row so its rejection has a
+    parent (see `_ToolCallGate`), and every provider adapter expects an object
+    there — Ollama json.loads() it and OpenAI-format backends render it into
+    the chat template. `42`, `[]` and `{not json` all have to become one, so
+    anything that isn't already an object travels as `_raw_arguments`.
+    """
+    if isinstance(raw, dict):
+        return json.dumps(raw)
+    if isinstance(raw, str):
+        if not raw.strip():
+            return "{}"
+        try:
+            if isinstance(json.loads(raw), dict):
+                return raw
+        except (json.JSONDecodeError, ValueError):
+            pass
+        text = raw
+    else:
+        text = "" if raw is None else str(raw)
+    return json.dumps({"_raw_arguments": text[:_REJECTED_ARGS_CAP]})
+
+
 # Tools where semantic dedup is applied (expensive/LLM-wrapping tools)
 _SEMANTIC_DEDUP_TOOLS = {"call_model"}
 
@@ -757,13 +789,20 @@ class _ToolCallGate:
     Dedup precedes validation because a duplicate of a *bad* call should be
     answered by the dedup stub, not produce two identical error messages.
 
-    Every rejection writes a tool-role message (the model's only channel back
-    — a role=system note gets stripped by normalize_for_openrouter and by
-    Ollama's one-system rule), emits the matching tool.call event so the UI
-    shows what the agent was told, records the failure for stuck detection,
-    and drops the call. Nothing reaches the executor unvalidated, and the
-    assistant message the caller persists carries only what survived, so the
-    transcript never gains an orphaned tool_call id.
+    Every rejection answers the model with a tool-role message (its only
+    channel back — a role=system note gets stripped by normalize_for_openrouter
+    and by Ollama's one-system rule), emits the matching tool.call event so the
+    UI shows what the agent was told, records the failure for stuck detection,
+    and drops the call. Nothing reaches the executor unvalidated.
+
+    Those tool-role rows are queued rather than written, because they need a
+    parent. The caller persists the assistant row with EVERY proposed call —
+    admitted and refused alike — and then calls `flush_rejections()`. Listing
+    only the survivors left each rejection an orphan, and `exclude_orphans`
+    duly deleted the model's own corrective feedback from the next request:
+    the agent re-made the same invalid call having never been told why the
+    last one failed. A refused call carries `REJECTED_CALL_KEY` so no reader
+    downstream counts it as work that ran.
     """
 
     def __init__(self, *, registry, session: AgentSession, save_turn_msg, stuck, tool_failures: dict[str, list[str]]):
@@ -777,6 +816,10 @@ class _ToolCallGate:
         # call id → correction notes (alias rewrites, coercions, dropped
         # params). Reset per admit(); read back by _record_round_results.
         self._notes: dict[str, list[str]] = {}
+        # This round's calls in the model's own order, and the refusals waiting
+        # for the assistant row to be written. Both reset per admit().
+        self._proposed: list[dict] = []
+        self._rejected: list[dict] = []
 
     async def admit(self, calls: list[dict], active_tools: list[str]) -> tuple[list[dict], dict[str, list[str]]]:
         """Return (executable calls, correction notes keyed by tool_call id).
@@ -787,12 +830,53 @@ class _ToolCallGate:
         eventual tool result so the model sees its call was corrected — a
         mid-conversation role=system note would be stripped by provider
         normalization, tool-role messages survive.
+
+        Refusals are queued, not written: the caller persists the assistant row
+        (`proposed_calls`) first, then calls `flush_rejections()`.
         """
         self._notes: dict[str, list[str]] = {}
+        self._proposed = list(calls)
+        self._rejected = []
         unique = await self._dedup(calls)
         unique = await self._semantic_dedup(unique)
         valid = await self._correct_names(unique, active_tools)
         return await self._parse_and_validate(valid), self._notes
+
+    @property
+    def proposed_calls(self) -> list[dict]:
+        """Every call this round proposed, in the model's order.
+
+        Admitted and refused alike — the assistant row persists all of them so
+        each refusal's tool-role answer has a parent and reaches the next
+        request instead of being filtered out as an orphan.
+        """
+        return list(self._proposed)
+
+    async def flush_rejections(self) -> None:
+        """Write one tool-role row per refused call. Call AFTER the assistant row.
+
+        Order is the point. These rows used to be written inside admit(), which
+        put them *ahead* of the assistant row that names their call ids, and
+        `normalize_for_openrouter` drops a tool message it has not yet seen an
+        assistant tool_call for — so even a paired rejection would have been
+        stripped on the way out.
+        """
+        for entry in self._rejected:
+            await self._save("tool", entry["message"], tool_call_id=entry["tc"]["id"])
+        self._rejected = []
+
+    def _refuse(self, tc: dict, message: str) -> None:
+        """Queue the model's answer for a call that will not execute.
+
+        Stamps the call so downstream readers can tell it never ran, gives it
+        an id if the provider sent none (an unanswerable tool_call breaks the
+        next request), and normalises its arguments to an object.
+        """
+        if not tc.get("id"):
+            tc["id"] = f"rejected_{len(self._rejected)}_{_hash_args(tc.get('arguments', ''))}"
+        tc[REJECTED_CALL_KEY] = True
+        tc["arguments"] = _rejected_call_args(tc.get("arguments", ""))
+        self._rejected.append({"tc": tc, "message": message})
 
     def _note(self, tc: dict, text: str) -> None:
         self._notes.setdefault(tc.get("id", ""), []).append(text)
@@ -850,7 +934,7 @@ class _ToolCallGate:
         for tc in calls:
             key = f"{tc['name']}:{_hash_args(tc.get('arguments', ''))}"
             if key in seen:
-                await self._save("tool", "(duplicate call — see previous result)", tool_call_id=tc.get("id", ""))
+                self._refuse(tc, "(duplicate call — see previous result)")
                 continue
             seen.add(key)
             # Non-idempotent tools (repl — a repeated `next(pages)` MUST run
@@ -860,15 +944,14 @@ class _ToolCallGate:
             idempotent = getattr(tool_def, "idempotent", True) if tool_def else True
             if key in self._cross_round and tc["name"] not in _CROSS_ROUND_DEDUP_EXCLUDED and idempotent:
                 prior_round, prior_result = self._cross_round[key]
-                await self._save(
-                    "tool",
+                self._refuse(
+                    tc,
                     (
                         f"(already executed in round {prior_round} with identical arguments — "
                         f"prior result: {prior_result}. "
                         "Use this result and do not call again. "
                         "If you believe the state has changed, verify with file_read or glob instead.)"
                     ),
-                    tool_call_id=tc.get("id", ""),
                 )
                 continue
             kept.append(tc)
@@ -891,9 +974,7 @@ class _ToolCallGate:
             for tc in group[1:]:
                 if any(_is_near_duplicate_call(tc, k, name) for k in kept):
                     logger.info("Semantic dedup: skipping near-duplicate %s call", name)
-                    await self._save(
-                        "tool", "(near-duplicate call — see previous result)", tool_call_id=tc.get("id", "")
-                    )
+                    self._refuse(tc, "(near-duplicate call — see previous result)")
                 else:
                     kept.append(tc)
             out.extend(kept)
@@ -1017,8 +1098,13 @@ class _ToolCallGate:
         return parsed_calls
 
     async def _reject(self, tc: dict, *, transcript_msg: str, event_msg: str, event_args: dict) -> None:
-        """Refuse one call: tell the model, tell the UI, count it as a failure."""
-        await self._save("tool", transcript_msg, tool_call_id=tc.get("id", ""))
+        """Refuse one call: tell the model, tell the UI, count it as a failure.
+
+        The failure hash is taken before `_refuse` normalises the arguments, so
+        stuck detection still keys on what the model actually sent.
+        """
+        self._tool_failures.setdefault(tc["name"], []).append(_hash_args(tc.get("arguments", "")))
+        self._stuck.mark_failure()
         self._session.emit_event(
             {
                 "type": "tool.call",
@@ -1031,8 +1117,7 @@ class _ToolCallGate:
                 "latency_ms": 0,
             }
         )
-        self._tool_failures.setdefault(tc["name"], []).append(_hash_args(tc.get("arguments", "")))
-        self._stuck.mark_failure()
+        self._refuse(tc, transcript_msg)
 
 
 # ---------------------------------------------------------------------------
@@ -1656,9 +1741,9 @@ async def run_agent(
             _followup_pending = False
             await asyncio.to_thread(_record_followup_outcome, session, session_id, True)
 
-        # NOTE: We save the assistant message AFTER validation below,
-        # so only validated tool_calls end up in the DB (prevents orphans).
-        # The original collected_tool_calls may include hallucinated/malformed calls.
+        # NOTE: We save the assistant message AFTER admission below, so the
+        # row can list every call the model proposed — the refused ones
+        # included, because each refusal's tool-role answer needs a parent.
 
         # Stuck detection
         score, repeats = stuck.evaluate(collected_content, collected_tool_calls, tool_failures, registry)
@@ -1695,18 +1780,26 @@ async def run_agent(
         # Filter, correct and validate before anything executes.
         parsed_calls, notes_by_id = await gate.admit(collected_tool_calls, active_tools)
 
-        # Save assistant message with ONLY validated tool_calls (prevents DB orphans).
+        # Save the assistant message with EVERY proposed call — admitted and
+        # refused. Listing only the admitted ones orphaned each rejection's
+        # tool-role row, and the compiler's `exclude_orphans` then deleted the
+        # gate's corrective feedback from the next request; the model never
+        # learned why its call was thrown away. Refused calls carry
+        # `_rejected` so no reader counts them as executed.
         # Persist round latency so post-hoc diagnosis (which model is slow,
         # which round burned the budget) can read it from the DB without
         # re-deriving from event logs.
         validated_tool_calls = [item["tc"] for item in parsed_calls]
+        proposed_tool_calls = gate.proposed_calls
         _round_latency_ms = int((time.monotonic() - _round_started_at) * 1000)
         await _save_turn_msg(
             "assistant",
             collected_content or "",
-            tool_calls=json.dumps(validated_tool_calls) if validated_tool_calls else None,
+            tool_calls=json.dumps(proposed_tool_calls) if proposed_tool_calls else None,
             latency_ms=_round_latency_ms,
         )
+        # Now that the parent row exists, answer the calls it will never run.
+        await gate.flush_rejections()
         logger.info(
             "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=%d content_chars=%d",
             session_id,

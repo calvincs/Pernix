@@ -272,6 +272,7 @@ def approve_dangerous_tool(
         # user was shown what the agent intends to do.
         import json as _json
 
+        from core.llm.types import is_rejected_call as _is_rejected_call
         from db import models as _db
 
         messages = _db.get_messages(session_id, last=40)
@@ -289,7 +290,10 @@ def approve_dangerous_tool(
                     try:
                         tcs = _json.loads(tool_calls_raw)
                         if isinstance(tcs, list):
-                            found = any(isinstance(tc, dict) and tc.get("name") == "ask_user" for tc in tcs)
+                            found = any(
+                                isinstance(tc, dict) and tc.get("name") == "ask_user" and not _is_rejected_call(tc)
+                                for tc in tcs
+                            )
                     except (ValueError, TypeError):
                         pass
                 # Fallback: content field (legacy or alternative message formats)

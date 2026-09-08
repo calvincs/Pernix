@@ -102,6 +102,9 @@ async def test_an_exact_back_to_back_repeat_still_short_circuits():
     gate.remember_success("bash", call["arguments"], 1, "total 0")
 
     assert await gate._dedup([call]) == []
+    # The stub is queued until the assistant row that names its call id exists
+    # (F05); the loop flushes it right after saving that row.
+    await gate.flush_rejections()
     assert any("already executed in round 1" in c for _, c, _ in saved)
 
 
