@@ -231,6 +231,13 @@ class StuckDetector:
                     args = _json.loads(tc.get("arguments") or "{}")
                 except (ValueError, TypeError):
                     continue
+                # JSON roots may be scalars, lists or null. This signal runs
+                # BEFORE admission, so it is the first code to touch whatever
+                # the model sent — and `.get()` on `null`/`42`/`[]` killed the
+                # turn with a raw AttributeError. Leave the bad call to the
+                # gate, which knows how to refuse it.
+                if not isinstance(args, dict):
+                    continue
                 if name == "bash":
                     # Agents read big files through bash (cat/sed/grep/head),
                     # which the tool-level counters never saw — the ARC sweep
@@ -1045,6 +1052,27 @@ class _ToolCallGate:
                     continue
             else:
                 parsed_args = raw_args if raw_args else {}
+
+            # JSON parses `null`, `42`, `true`, `"path"` and `[]` happily; a
+            # tool argument schema accepts none of them. Everything below —
+            # the required-parameter membership test, _summarize_args, the
+            # type coercion pass — assumes a dict, and outside any try, so a
+            # scalar root ended the whole turn with a TypeError instead of a
+            # repairable tool error. Refuse it the ordinary way.
+            if not isinstance(parsed_args, dict):
+                received = json.dumps(parsed_args, default=str)
+                logger.warning("Tool '%s' arguments are not a JSON object: %s", tc["name"], received[:100])
+                await self._reject(
+                    tc,
+                    transcript_msg=(
+                        f"Error: Tool '{tc['name']}' arguments must be a JSON object; "
+                        f"received: {received[:200]}. Retry with an object mapping "
+                        f"parameter names to values."
+                    ),
+                    event_msg=f"Error: Arguments must be a JSON object; received: {received[:200]}",
+                    event_args={},
+                )
+                continue
 
             tool_def = self._registry.get(tc["name"])
             if tool_def and tool_def.parameters:
