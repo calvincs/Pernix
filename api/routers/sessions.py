@@ -353,12 +353,21 @@ async def cancel_session(session_id: str):
         session.task.cancel()
     else:
         # No running task (e.g. session parked in AWAITING_USER after
-        # ask_user). The CancelledError path won't fire, so transition
-        # explicitly so the state log + SSE event go out.
+        # ask_user, or in AWAITING_WORKERS after await_workers). The
+        # CancelledError path won't fire, so transition explicitly so the
+        # state log + SSE event go out.
         from sessions import state_v2 as sv2
 
         current = sv2._current_state(session)
-        if current == sv2.SessionStateV2.AWAITING_USER:
+        if current == sv2.SessionStateV2.AWAITING_WORKERS:
+            # Detached: the release needs the session lock, which an in-flight
+            # worker resume holds across a transcript read. Cancelling is a
+            # request — the endpoint must not block behind that read.
+            manager._spawn_detached(
+                manager._settle_cancelled_awaiting_workers(session),
+                "settle-cancelled-parent",
+            )
+        elif current == sv2.SessionStateV2.AWAITING_USER:
             try:
                 sv2.transition(
                     session,

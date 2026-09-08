@@ -372,9 +372,10 @@ _DB_GUARDED_PATHS = ("sessions/hooks.py", "core/context/compaction.py", "core/ag
 # Known on-loop db.* calls outside the audited modules, as of 2026-07-25.
 # These predate the memory-store work and are NOT fixed here — this is a
 # ratchet, not an amnesty: the count may drop, never grow. Concentrated in
-# sessions/manager.py (7, mostly notice/divider writes in _finalize_turn and
-# transcript reads in _finalize_worker) and api/routers/chat.py (3).
-_KNOWN_ON_LOOP_DB_CALLS = 11
+# sessions/manager.py (4, mostly notice writes in _finalize_turn) with the
+# rest spread across api/routers, core/refine.py and core/snooze.py.
+# 2026-09-08: 11 → 10, the cancelled-parent notice in the worker-resume path.
+_KNOWN_ON_LOOP_DB_CALLS = 10
 
 
 def test_no_new_on_loop_db_calls_are_introduced():
