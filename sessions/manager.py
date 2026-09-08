@@ -3315,7 +3315,7 @@ class SessionManager:
     def active_count(self) -> int:
         return len(self._sessions)
 
-    def _working_sessions(self, strict: bool = False):
+    def _working_sessions(self, strict: bool = False, transparent: bool = True):
         """Yield the in-memory sessions that are actually doing something.
 
         The single definition of "busy", so the question "is anything
@@ -3327,6 +3327,12 @@ class SessionManager:
         memory-store surgery) uses this so it never runs while a goal turn
         is mid-flight — a mid-turn prompt/memory mutation changes the very
         turn the tripwire would then attribute it to.
+
+        transparent=False drops both exemptions: nothing is invisible. Both
+        exemptions exist so snooze does not deadlock against its own sweeps,
+        which is a scheduling question; asked as proof that nothing is
+        WRITING to SQLite, even strict=True answered "idle" through a canary
+        turn that was mid-write (3.2.2 audit S07).
 
         Uses the v2 state machine directly. AWAITING_USER and AWAITING_WORKERS
         are excluded (agent genuinely suspended); FINALIZING is caught by the
@@ -3343,7 +3349,9 @@ class SessionManager:
         from core.snooze import SNOOZE_TRANSPARENT_TYPES, snooze_transparent
 
         for session in list(self._sessions.values()):
-            if strict:
+            if not transparent:
+                pass  # every turn counts, canaries and goal continuations too
+            elif strict:
                 if session.session_type in SNOOZE_TRANSPARENT_TYPES:
                     continue
             elif snooze_transparent(session):
@@ -3360,6 +3368,16 @@ class SessionManager:
         generator is lazy, so this still stops at the first busy session.
         """
         return next(self._working_sessions(strict), None) is not None
+
+    def has_database_writers(self) -> bool:
+        """True if any in-memory session is mid-turn — no exemptions.
+
+        What a database-exclusive operation has to ask. `has_active_work()`
+        answers the idle-SCHEDULING question, and both of its strictness
+        levels look through a canary turn, which writes to the same file as
+        any other turn. See _working_sessions(transparent=False).
+        """
+        return next(self._working_sessions(transparent=False), None) is not None
 
     def busy_count(self, strict: bool = False) -> int:
         """How many in-memory sessions are non-idle (see _working_sessions).

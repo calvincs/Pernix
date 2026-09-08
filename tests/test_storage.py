@@ -502,13 +502,33 @@ async def test_optimize_reclaims_the_free_pages(seeded):
     assert (await _get()).json()["database"]["reclaimable_bytes"] == 0
 
 
-async def test_optimize_refuses_while_a_turn_is_running(monkeypatch):
-    """VACUUM holds a write lock for the whole rebuild — long enough to cost
-    a running agent its next write."""
+async def test_optimize_refuses_while_a_turn_is_running():
+    """VACUUM holds the writer lock for the whole rebuild, so it waits for
+    the turn rather than the turn waiting for it.
+
+    The session is a real one in the real manager, and the predicate that
+    reads it is the real one: this test used to monkeypatch `has_active_work`
+    to True, which pins the 409 but can never notice that the endpoint is
+    asking the wrong question. It was — see the S07 regression suite in
+    tests/regressions/test_2026-09-08_a_vacuum_ran_while_the_database_was_
+    being_written.py for the exemptions that let a canary turn through.
+    """
+    from sessions import state_v2 as sv2
     from sessions.manager import get_manager
 
-    monkeypatch.setattr(type(get_manager()), "has_active_work", lambda self, strict=False: True)
-    resp = await _post("/api/storage/optimize")
+    class _Turn:
+        session_id = "a-real-turn"
+        session_type = "normal"
+        goal_continuation_active = False
+        has_background_tasks = False
+        _state_v2 = sv2.SessionStateV2.PROCESSING
+
+    manager = get_manager()
+    manager._sessions["a-real-turn"] = _Turn()
+    try:
+        resp = await _post("/api/storage/optimize")
+    finally:
+        manager._sessions.pop("a-real-turn", None)
     assert resp.status_code == 409
     assert "turn is running" in resp.json()["detail"]
 
