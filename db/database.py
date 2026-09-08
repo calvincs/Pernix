@@ -1222,6 +1222,18 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_goal_continuations_open " "ON goal_continuations(status, session_id)",
         ],
     ),
+    (
+        40,
+        "worker run record: which report a run owns, and where its transcript starts",
+        [
+            # JSON, like watched_worker_ids: nothing queries inside it, and the
+            # shape grows (seq, boundary, report pointer, retired artifacts,
+            # the grade bound to the bytes it graded) faster than columns would.
+            # NULL means a worker persisted before runs existed — the readers
+            # treat that as "no boundary known", never as "stale".
+            "ALTER TABLE sessions ADD COLUMN worker_run TEXT",
+        ],
+    ),
 ]
 
 

@@ -178,11 +178,21 @@ def spawn_worker(
             space_id=getattr(parent, "space_id", None) if parent else None,
         )
 
-    summary_file = f".worker_{worker_id[:12]}_summary.md"
+    # Open this worker's first run BEFORE the charter is written: the charter
+    # has to name the exact path the record will later be read from, or the
+    # worker writes its report where nobody looks (H08). workspace_home is the
+    # space folder its own relative writes resolve into.
+    from core.extensions.orchestration import report as _report
+
+    _worker_home = getattr(manager.get(worker_id), "workspace_home", None)
+    _run = _report.begin_run(worker_id, workspace_home=_worker_home, reason="spawn")
+    summary_file = _run["report_name"]
     system_prompt = (
         f"You are a focused worker agent. Your task:\n{task_description}\n\n"
         "Complete the task using tools as needed.\n"
-        f"When done, write a {summary_file} file in the workspace with what you accomplished.\n"
+        f"When done, write your report to {_run['report_path']} — the bare name "
+        f"{summary_file} resolves there from your own file tools. That file is "
+        "what your parent reads back; nothing else you write is collected.\n"
     )
     if worker_kind is not None:
         system_prompt += _kinds.kind_charter_block(worker_kind)
@@ -538,7 +548,7 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
     header with the reflect reasoning, so the parent knows the work needs
     another look or a transcript scan.
     """
-    workspace = Path(settings.workspace_dir)
+    from core.extensions.orchestration import report as _report
 
     # Reflect verdict — the quality gate. Used by every return path below.
     reflect = _latest_reflect(worker_id)
@@ -615,16 +625,21 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
             return f"# INCOMPLETE (worker terminated: {term_reason})\n\n"
         return "# UNVERIFIED (no reflect verdict recorded — quality not gated)\n\n"
 
-    def _cap(full_text: str) -> str:
+    def _cap(full_text: str, ref=None) -> str:
         """Truncate to 3000 chars WITH a visible marker — silently cutting a
         worker's report mid-sentence left the parent with no signal that
-        content was lost or where to find the rest."""
+        content was lost or where to find the rest.
+
+        A preview that clips an artifact hands back the artifact. Both routes
+        out of the cap were unsignposted until now: an absolute path reads the
+        same from any space, and the transcript can be asked for its END."""
         if len(full_text) <= 3000:
             return full_text
-        return (
-            full_text[:3000] + f"\n[truncated at 3000 of {len(full_text)} chars — call "
-            f"get_worker_transcript({worker_id[:12]!r}) for the full output]"
-        )
+        out = full_text[:3000] + f"\n[truncated at 3000 of {len(full_text)} chars"
+        if ref is not None:
+            out += f" — the complete report is on disk: file_read({str(ref.path)!r})"
+        out += f", or get_worker_transcript({worker_id[:12]!r}, select='tail') for the end of the stream]"
+        return out
 
     # Exact sentinel prefixes _finalize_worker stamps. Matching any leading
     # "#" here suppressed the quality gate whenever a worker began its own
@@ -654,22 +669,24 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
             logger.debug("Could not mark worker %s result consumed: %s", worker_id, e)
         return body
 
-    # Per-worker summary file (new convention). The file itself is trusted
-    # (either written by the worker, or auto-stamped with a marker header).
-    per_worker = workspace / f".worker_{worker_id[:12]}_summary.md"
-    if per_worker.exists():
-        body = per_worker.read_text()
-        # If the summary already carries a sentinel marker from _finalize_worker,
-        # don't double up — just return as-is (the stamp already encodes state).
-        if body.startswith(_SENTINELS):
-            return _served(_cap(body))
-        return _served(_gate_header() + _ceiling_note() + _kind_warn(body) + _cap(body))
-
-    # Backward compat: shared summary.md from pre-fix workers
-    legacy_path = workspace / "summary.md"
-    if legacy_path.exists():
-        _legacy_body = legacy_path.read_text()
-        return _served(_gate_header() + _ceiling_note() + _kind_warn(_legacy_body) + _cap(_legacy_body))
+    # The run record names one report path; discovery by the worker id in the
+    # filename covers workers that predate the record; the shared summary.md is
+    # adopted only with provenance, and says so when it is (H08).
+    ref = _report.resolve_report(worker_id)
+    if ref is not None:
+        try:
+            body = ref.read()
+        except OSError as _read_err:
+            logger.warning("get_worker_result: could not read %s: %s", ref.path, _read_err)
+            body = ""
+        if body:
+            # If the summary already carries a sentinel marker from
+            # _finalize_worker, don't double up — the stamp already encodes state.
+            if body.startswith(_SENTINELS):
+                return _served(ref.label + _cap(body, ref))
+            return _served(
+                ref.label + _gate_header() + _ceiling_note() + _kind_warn(body) + _cap(body, ref)
+            )
 
     # Fallback: last assistant message, always wrapped in a quality header.
     messages = db.get_messages(worker_id)
@@ -725,16 +742,29 @@ def get_worker_transcript(
     worker_id: str,
     include_tool_results: bool = True,
     max_chars: int = 30000,
+    select: str = "head",
+    after_id: int = 0,
+    before_id: int = 0,
+    message_id: int = 0,
     _context: dict | None = None,
 ) -> str:
-    """Read the full message stream of a worker session.
+    """Read a worker's message stream, from either end, one page at a time.
 
     Safety valve for when get_worker_result returns an UNVERIFIED/ESCALATED
-    summary: lets the parent scan what the worker actually did (assistant
-    texts, tool calls, and tool results) and extract the real findings.
+    summary, or clips a long report: lets the parent scan what the worker
+    actually did (assistant texts, tool calls and their arguments, tool
+    results, grades) and read the real findings.
 
-    Output format: one line per message, `[role] content`, truncated to
-    max_chars characters with a trailing `[truncated]` marker when needed.
+    Every line is addressed: `[#<message id> role] content`. Those ids drive
+    the paging.
+
+    select: "head" (default, oldest-first from the start) or "tail" (the END
+        of the stream). A worker's deliverable is the LAST thing it says, and
+        head-first paging under a char budget could never reach it — the
+        recovery route get_worker_result recommends returned early exploration.
+    after_id / before_id: only messages with id above / below these.
+    message_id: return exactly that one message, in full and unclipped. This
+        is what a `[clipped ...]` pointer tells the caller to call.
     """
     try:
         messages = db.get_messages(worker_id)
@@ -744,52 +774,136 @@ def get_worker_transcript(
     if not messages:
         return f"Worker {worker_id[:8]} has no messages."
 
+    if message_id:
+        row = next((m for m in messages if int(m.get("id") or 0) == int(message_id)), None)
+        if row is None:
+            return f"Worker {worker_id[:8]} has no message #{message_id}."
+        return "\n".join(_transcript_lines([row], include_tool_results=True, full=True)) or (
+            f"Message #{message_id} has no renderable content."
+        )
+
+    scoped = [
+        m
+        for m in messages
+        if (not after_id or int(m.get("id") or 0) > after_id) and (not before_id or int(m.get("id") or 0) < before_id)
+    ]
+    if not scoped:
+        return f"Worker {worker_id[:8]} has no messages in that id range."
+
+    lines = _transcript_lines(scoped, include_tool_results=include_tool_results, full=False)
+    if not lines:
+        return f"Worker {worker_id[:8]} has no renderable messages in that range."
+
+    from_tail = str(select or "head").lower() == "tail"
+    kept: list[str] = []
+    budget = max(0, max_chars)
+    used = 0
+    for line in reversed(lines) if from_tail else lines:
+        if used + len(line) + 1 > budget and kept:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    if from_tail:
+        kept.reverse()
+
+    dropped = len(lines) - len(kept)
+    out = "\n".join(kept)
+    if dropped and from_tail:
+        edge = _line_msg_id(kept[0]) if kept else 0
+        out = (
+            f"[{dropped} earlier line(s) omitted — get_worker_transcript(before_id={edge}, select='tail') for the page before this]\n"
+            + out
+        )
+    elif dropped:
+        edge = _line_msg_id(kept[-1]) if kept else 0
+        out += f"\n[truncated — {dropped} later line(s) omitted; get_worker_transcript(after_id={edge}) continues, or select='tail' for the end]"
+    return out
+
+
+# Per-tool-result budget in a paged transcript: one 200KB grep result must not
+# eat the whole page. The clipped line points at the row that holds the rest.
+_TOOL_LINE_CHARS = 800
+
+
+def _line_msg_id(line: str) -> int:
+    """The message id a rendered line is addressed by, 0 if unparseable."""
+    try:
+        return int(line.split("#", 1)[1].split(" ", 1)[0].rstrip("]:"))
+    except (IndexError, ValueError):
+        return 0
+
+
+def _tool_call_summary(tc_raw) -> str:
+    """`name({args})` per call. Names alone were not enough to reconstruct
+    what a worker did: two file_read calls look identical without their paths."""
+    try:
+        tcs = json.loads(tc_raw) if isinstance(tc_raw, str) else tc_raw
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    parts: list[str] = []
+    for tc in tcs if isinstance(tcs, list) else []:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+        name = fn.get("name") or tc.get("name") or "?"
+        args = fn.get("arguments") if fn else tc.get("arguments")
+        if not isinstance(args, str):
+            try:
+                args = json.dumps(args or {})
+            except (TypeError, ValueError):
+                args = ""
+        parts.append(f"{name}({args[:300]})" if args and args != "{}" else str(name))
+    return ", ".join(parts)
+
+
+def _transcript_lines(messages: list, *, include_tool_results: bool, full: bool) -> list[str]:
+    """Render rows to id-addressed lines. `full` disables every per-role clip —
+    that is the single-message read a truncation pointer sends you to."""
     lines: list[str] = []
+
+    def clip(text: str, limit: int, mid: int, what: str) -> str:
+        if full or len(text) <= limit:
+            return text
+        return (
+            f"{text[:limit]}\n[{what} clipped at {limit} of {len(text)} chars — "
+            f"get_worker_transcript(message_id={mid}) for the whole row]"
+        )
+
     for m in messages:
         role = m.get("role", "?")
+        mid = int(m.get("id") or 0)
         if role == "tool" and not include_tool_results:
             continue
         content = (m.get("content") or "").replace("\r", "")
         if role == "assistant":
-            tc_raw = m.get("tool_calls")
-            if tc_raw:
-                try:
-                    tcs = json.loads(tc_raw) if isinstance(tc_raw, str) else tc_raw
-                    names = [
-                        tc.get("name") or tc.get("function", {}).get("name", "?")
-                        for tc in (tcs if isinstance(tcs, list) else [])
-                    ]
-                    if names:
-                        lines.append(f"[assistant:tool_calls] {', '.join(names)}")
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            calls = _tool_call_summary(m.get("tool_calls"))
+            if calls:
+                lines.append(f"[#{mid} assistant:tool_calls] {calls}")
             if content:
-                lines.append(f"[assistant] {content}")
+                lines.append(f"[#{mid} assistant] {content}")
         elif role == "tool":
-            # Truncate per-tool-result to avoid one huge output eating the budget
-            lines.append(f"[tool] {content[:800]}")
+            lines.append(f"[#{mid} tool] {clip(content, _TOOL_LINE_CHARS, mid, 'result')}")
         elif role == "reflect":
             try:
                 r = json.loads(content)
-                lines.append(f"[reflect] verdict={r.get('verdict')} " f"reasoning={r.get('reasoning','')[:200]}")
+                lines.append(
+                    f"[#{mid} reflect] verdict={r.get('verdict')} "
+                    f"reasoning={clip(r.get('reasoning', ''), 200, mid, 'reasoning')}"
+                )
             except (json.JSONDecodeError, TypeError):
-                lines.append(f"[reflect] {content[:200]}")
+                lines.append(f"[#{mid} reflect] {clip(content, 200, mid, 'grade')}")
         elif role == "scout":
             try:
                 r = json.loads(content)
                 approach = r.get("approach") or r.get("approach_guidance") or ""
-                lines.append(f"[scout] approach={approach[:300]}")
+                lines.append(f"[#{mid} scout] approach={clip(approach, 300, mid, 'approach')}")
             except (json.JSONDecodeError, TypeError):
-                lines.append(f"[scout] {content[:200]}")
+                lines.append(f"[#{mid} scout] {clip(content, 200, mid, 'report')}")
         elif role == "system":
-            lines.append(f"[system] {content[:300]}")
+            lines.append(f"[#{mid} system] {clip(content, 300, mid, 'system note')}")
         elif role == "user":
-            lines.append(f"[user] {content[:1000]}")
-
-    out = "\n".join(lines)
-    if len(out) > max_chars:
-        out = out[:max_chars] + "\n[truncated]"
-    return out
+            lines.append(f"[#{mid} user] {clip(content, 1000, mid, 'message')}")
+    return lines
 
 
 def await_workers(
@@ -1162,6 +1276,15 @@ def message_worker(worker_id: str, message: str, _context: dict | None = None) -
             loop = ctx.get("_loop") or asyncio.get_running_loop()
         except RuntimeError:
             return "Error: No event loop"
+        # An IDLE_READY re-prompt is a fresh RUN, exactly like resume_worker:
+        # without a boundary the previous run's artifact stays in place,
+        # _finalize_worker short-circuits on it, and run N's report comes back
+        # as run N+1's result. AWAITING_USER is the opposite case — answering a
+        # question continues the SAME turn, so it keeps the same run.
+        if current is sv2.SessionStateV2.IDLE_READY:
+            from core.extensions.orchestration import report as _report
+
+            _report.begin_run(worker_id, workspace_home=worker.workspace_home, reason="message_worker")
         asyncio.run_coroutine_threadsafe(manager.prompt(worker_id, message), loop)
         return f"Message sent to worker {worker_id[:8]} (will start new turn)"
 
@@ -1394,14 +1517,14 @@ def resume_worker(
             parent._watched_worker_ids.add(worker_id)
             manager._persist_watched(parent)
 
-        # Clear the previous run's summary file — get_worker_result prefers
-        # it, so a stale INCOMPLETE/CANCELLED stamp (or an outdated real
-        # summary) would shadow everything the resumed run produces.
-        summary_path = Path(settings.workspace_dir) / f".worker_{worker_id[:12]}_summary.md"
-        try:
-            summary_path.unlink(missing_ok=True)
-        except OSError as _e:
-            logger.warning("resume_worker: could not clear stale summary %s: %s", summary_path, _e)
+        # Open run N+1. The previous run's artifact is retired (versioned),
+        # not deleted: it would otherwise shadow everything the resumed run
+        # produces, and deleting a valid report to make room loses work the
+        # parent may still want. The record also moves the transcript boundary,
+        # which is what stops run N's verdict certifying run N+1's output.
+        from core.extensions.orchestration import report as _report
+
+        _new_run = _report.begin_run(worker_id, workspace_home=w.workspace_home, reason="resume_worker")
 
         prior = w.termination_reason or ("unknown — memory was reaped or the server restarted")
         w.termination_reason = None
@@ -1416,12 +1539,13 @@ def resume_worker(
                     "prior_termination": prior,
                 },
             )
-        return prior + "|" + model_note
+        return prior + "|" + model_note + "|" + _new_run["report_path"]
 
     outcome = call_on_loop(_revive_on_loop, loop=loop)
     if outcome.startswith(("Error:", "Worker ")):
         return outcome
-    prior, _sep, model_note = outcome.partition("|")
+    prior, _sep, _rest = outcome.partition("|")
+    model_note, _sep2, report_path = _rest.partition("|")
 
     # Budget parity with spawn_worker: a parent that revives a worker and then
     # awaits it needs its LLM wall-clock extended past the child's runtime,
@@ -1441,8 +1565,8 @@ def resume_worker(
         + (f"Operator note: {note}\n" if note else "")
         + "Your full prior transcript is above (compacted if long). Review what "
         "is already done, then CONTINUE the original task to completion — do not "
-        "start over. The previous summary file was cleared; write a fresh "
-        f".worker_{worker_id[:12]}_summary.md when done."
+        f"start over. The previous report was retired; write this run's report to "
+        f"{report_path} when done."
     )
     asyncio.run_coroutine_threadsafe(get_manager().prompt(worker_id, resume_msg), loop)
     return f"Worker {worker_id[:8]} revived (previous end: {prior}) — continuation turn started."
@@ -1789,10 +1913,12 @@ def register(reg) -> None:
         name="get_worker_transcript",
         func=get_worker_transcript,
         description=(
-            "Read a worker's full message stream (user, scout, assistant texts, "
-            "tool calls, tool results, reflect). Use when get_worker_result "
-            "returns an UNVERIFIED/ESCALATED summary and you need to see what "
-            "the worker actually did."
+            "Read a worker's message stream (user, scout, assistant texts, tool "
+            "calls with arguments, tool results, reflect), one id-addressed line "
+            "per message. Use when get_worker_result returns an "
+            "UNVERIFIED/ESCALATED summary or clips a long report. select='tail' "
+            "reads the END of the stream — that is where a worker's deliverable "
+            "is; after_id/before_id page through it; message_id reads one row whole."
         ),
         parameters={
             "type": "object",
@@ -1805,6 +1931,20 @@ def register(reg) -> None:
                 "max_chars": {
                     "type": "integer",
                     "description": "Max total chars to return (default 30000)",
+                },
+                "select": {
+                    "type": "string",
+                    "enum": ["head", "tail"],
+                    "description": (
+                        "'head' (default) reads from the start; 'tail' reads the END — "
+                        "use it to reach a long worker's final report."
+                    ),
+                },
+                "after_id": {"type": "integer", "description": "Only messages with id above this"},
+                "before_id": {"type": "integer", "description": "Only messages with id below this"},
+                "message_id": {
+                    "type": "integer",
+                    "description": "Return exactly this message, unclipped (what a [clipped ...] pointer names)",
                 },
             },
             "required": ["worker_id"],

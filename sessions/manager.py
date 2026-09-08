@@ -2094,18 +2094,31 @@ class SessionManager:
     _STAMP_MAX_CHARS = 8000
 
     async def _finalize_worker(self, session: AgentSession) -> None:
-        """Ensure a worker produces a stamped summary file on completion.
+        """Ensure a worker's run ends with a report at the path its record names.
 
-        If the worker wrote its own `.worker_{id[:12]}_summary.md`, leave it alone.
-        Otherwise write a sentinel-prefixed file containing the last assistant
-        message so `get_worker_result` has something reliable to return.
+        If the worker wrote its own report, leave it alone. Otherwise write a
+        sentinel-prefixed file containing the last assistant message so
+        `get_worker_result` has something reliable to return.
+
+        The path comes from the run record, not from `settings.workspace_dir`:
+        a worker in a space writes its report into the space home, and stamping
+        the global root instead fabricated a second "report" out of the last
+        chat line while the real one sat unread (H08).
         """
         from pathlib import Path as _P
 
-        workspace = _P(settings.workspace_dir)
-        summary_path = workspace / f".worker_{session.session_id[:12]}_summary.md"
-        if summary_path.exists():
+        from core.extensions.orchestration import report as _wreport
+
+        existing = await asyncio.to_thread(_wreport.resolve_report, session.session_id)
+        if existing is not None:
             return
+
+        _run = await asyncio.to_thread(_wreport.load_run, session.session_id)
+        summary_path = _P(
+            (_run or {}).get("report_path")
+            or (_P(session.workspace_home or settings.workspace_dir) / _wreport.report_name(session.session_id))
+        )
+        workspace = summary_path.parent
 
         # Grab the last assistant message as the best-available content.
         last_text = ""
