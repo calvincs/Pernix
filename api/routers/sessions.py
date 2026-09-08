@@ -885,8 +885,8 @@ async def purge_sessions(body: dict = {}):
     event loop for 8.98 seconds — three heartbeat ticks delivered where
     1,798 were due, every stream on the box frozen for the batch. The async
     form keeps phase 1 (which cancels the turn, and must stay loop-affine)
-    on the loop and phase 2 on a worker thread, and measured the same 995
-    deletions with a worst gap of 6.2 ms.
+    on the loop and phase 2 on a worker thread, and made the same 995
+    deletions with a worst gap of 7.6 ms — 1,252 of the 1,347 ticks due.
 
     The candidate list is a snapshot taken in a thread, and the deletions
     happen one at a time after it, so each id is re-checked against the same
