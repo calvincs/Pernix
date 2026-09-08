@@ -4151,15 +4151,19 @@ def recent_tool_outcomes(tool: str, days: int = 14) -> dict:
     """{calls, failures} for one tool over the last `days` of tool results.
 
     Reads the per-result metadata the agent stamps on tool rows (tool name,
-    was_error, miss, unavailable). Misses and by-design unavailability are
-    not calls the tool could have got right, so they leave both counts.
+    was_error, miss, unavailable, command_failed). Misses and by-design
+    unavailability are not calls the tool could have got right, so they leave
+    both counts. A shell command that ran and exited non-zero is a call the
+    tool got right — it counts, but never as a failure of the tool.
     Rows written before the tool name was stamped are invisible, which is
     the point: this is the recent window, not the ledger.
     """
     with connect_sessions() as conn:
         row = conn.execute(
             """SELECT COUNT(*) AS calls,
-                      COALESCE(SUM(CASE WHEN json_extract(metadata, '$.was_error') IN (1, 'true', 'True') THEN 1 ELSE 0 END), 0) AS failures
+                      COALESCE(SUM(CASE WHEN json_extract(metadata, '$.was_error') IN (1, 'true', 'True')
+                                          AND COALESCE(json_extract(metadata, '$.command_failed'), 0) NOT IN (1, 'true', 'True')
+                                         THEN 1 ELSE 0 END), 0) AS failures
                FROM messages
                WHERE role = 'tool'
                  AND created_at > datetime('now', ?)

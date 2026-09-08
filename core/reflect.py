@@ -887,13 +887,20 @@ def _build_compact_evidence(
         summary_lines = [f"TOOL EXECUTION SUMMARY{scope_note}:"]
         for tool_name, stats in sorted(tool_summary.items()):
             refusals = int(stats.get("refusals") or 0)
+            nonzero = int(stats.get("command_failures") or 0)
             summary_lines.append(
                 f"- {tool_name}: {stats['calls']} call(s), "
                 f"{stats['failures']} failure(s), {stats['total_latency_ms']}ms total"
                 + (f", {refusals} policy refusal(s) — not tool failures" if refusals else "")
+                # The command failed, the tool did not — but the grader has to
+                # SEE that a check exited non-zero, or a turn whose every test
+                # run failed reads as a turn with nothing wrong in it.
+                + (f", {nonzero} non-zero exit(s) — the command failed, not the tool" if nonzero else "")
             )
             for err in stats.get("errors", [])[:5]:
                 summary_lines.append(f"    ERROR: {err}")
+            for err in stats.get("command_errors", [])[:3]:
+                summary_lines.append(f"    NON-ZERO EXIT: {err}")
             for err in stats.get("refusal_errors", [])[:3]:
                 summary_lines.append(f"    REFUSED: {err}")
         parts.append("\n".join(summary_lines))

@@ -218,8 +218,9 @@ def test_file_write_overwrite(tmp_path, monkeypatch):
 def test_bash_echo(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
-    result = bash("echo hello")
+    result, meta = bash("echo hello")
     assert "hello" in result
+    assert meta["exit_code"] == 0
 
 
 def test_bash_empty_command(tmp_path, monkeypatch):
@@ -238,9 +239,10 @@ def test_bash_blocked_command(tmp_path, monkeypatch):
 def test_bash_exit_code(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
-    result = bash("exit 1")
-    # Should report exit code
-    assert "1" in result
+    result, meta = bash("exit 1")
+    # Every result reports its exit status, not just the silent ones.
+    assert "[exit: 1]" in result
+    assert meta["exit_code"] == 1
 
 
 def test_bash_strict_mode_blocked(tmp_path, monkeypatch):
@@ -255,7 +257,7 @@ def test_bash_strict_mode_allowed(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     monkeypatch.setattr("config.settings.shell_security_mode", "strict")
     monkeypatch.setattr("config.settings.shell_allowlist", ["echo"])
-    result = bash("echo hello")
+    result, _meta = bash("echo hello")
     assert "hello" in result
 
 
@@ -263,8 +265,9 @@ def test_bash_cwd_prefix(tmp_path, monkeypatch):
     """Bash output starts with [cwd: ...] to clarify working directory."""
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
-    result = bash("echo ok")
+    result, meta = bash("echo ok")
     assert result.startswith("[cwd:")
+    assert meta["cwd"]
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +287,7 @@ def test_bash_accepts_timeout_override(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
     # Default shell_timeout=1; override to 5s; sleep 2 should succeed.
     monkeypatch.setattr("config.settings.shell_timeout", 1)
-    result = bash("sleep 2 && echo done", timeout=5)
+    result, _meta = bash("sleep 2 && echo done", timeout=5)
     assert "done" in result, result
     assert "timed out" not in result.lower(), result
 
@@ -295,8 +298,9 @@ def test_bash_timeout_default_kills_long_command(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
     monkeypatch.setattr("config.settings.shell_timeout", 1)
-    result = bash("sleep 5 && echo done")
+    result, meta = bash("sleep 5 && echo done")
     assert "timed out" in result.lower(), result
+    assert meta["timed_out"] is True
     assert "1s" in result, result
 
 
@@ -346,7 +350,7 @@ def test_bash_backgrounded_compound_does_not_block(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.shell_timeout", 8)
     start = _time.monotonic()
     # The sleep self-expires in 6s so the test never leaks a process.
-    result = bash("cd . && nohup sleep 6 > /dev/null 2>&1 & disown\necho launched")
+    result, _meta = bash("cd . && nohup sleep 6 > /dev/null 2>&1 & disown\necho launched")
     elapsed = _time.monotonic() - start
     assert "launched" in result, result
     assert "timed out" not in result.lower(), result
@@ -359,7 +363,7 @@ def test_bash_timeout_reports_partial_output(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
     monkeypatch.setattr("config.settings.shell_timeout", 1)
-    result = bash("echo started-ok; sleep 5")
+    result, _meta = bash("echo started-ok; sleep 5")
     assert "timed out after 1s" in result, result
     assert "started-ok" in result, result
 
@@ -368,7 +372,7 @@ def test_bash_stdout_stderr_both_captured(tmp_path, monkeypatch):
     """File-backed capture must preserve the old contract: stdout then stderr."""
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
-    result = bash("echo out-line; echo err-line >&2")
+    result, _meta = bash("echo out-line; echo err-line >&2")
     assert "out-line" in result, result
     assert "err-line" in result, result
     assert result.index("out-line") < result.index("err-line"), result
@@ -381,9 +385,9 @@ def test_bash_timeout_zero_or_negative_falls_back_to_default(tmp_path, monkeypat
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
     monkeypatch.setattr("config.settings.shell_timeout", 1)
-    result_zero = bash("sleep 5 && echo done", timeout=0)
+    result_zero, _mz = bash("sleep 5 && echo done", timeout=0)
     assert "timed out" in result_zero.lower(), result_zero
-    result_neg = bash("sleep 5 && echo done", timeout=-1)
+    result_neg, _mn = bash("sleep 5 && echo done", timeout=-1)
     assert "timed out" in result_neg.lower(), result_neg
 
 

@@ -118,11 +118,12 @@ def test_bash_timeout_error_points_at_job_start(monkeypatch):
     monkeypatch.setattr("config.settings.jobs_enabled", True)
     from core.tools.builtin.core_tools import bash
 
-    out = bash("sleep 30", timeout=1, _context={"session_id": "timeout-hint-test"})
+    out, meta = bash("sleep 30", timeout=1, _context={"session_id": "timeout-hint-test"})
     assert "timed out" in out
+    assert meta["timed_out"] is True
     assert "job_start" in out
 
     monkeypatch.setattr("config.settings.jobs_enabled", False)
-    out = bash("sleep 30", timeout=1, _context={"session_id": "timeout-hint-test"})
+    out, _meta = bash("sleep 30", timeout=1, _context={"session_id": "timeout-hint-test"})
     assert "timed out" in out
     assert "job_start" not in out
