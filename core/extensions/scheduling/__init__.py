@@ -435,8 +435,17 @@ async def _execute_heartbeat_job(meta: dict):
             logger.info("Heartbeat %s queued as follow-up for %s (state=%s)", job_id, sid[:12], state)
         else:
             # Idle (or non-resident) session: a heartbeat tick IS the turn —
-            # same dispatch, same bound, as a cron fire.
-            await _dispatch_prompt(sid, text)
+            # same dispatch, same bound, as a cron fire. And the same outcome
+            # rules: a tick that was refused or whose turn failed is not a
+            # delivered heartbeat.
+            result = await _dispatch_prompt(sid, text)
+            if result.status == DISPATCH_UNRESOLVED:
+                logger.info("Heartbeat %s is still running past the dispatch ceiling", job_id)
+                _watch_unresolved_cron_run(run_id, job_id, sid, result, None, None, time.time())
+                return
+            if not result.completed:
+                db.update_cron_run(run_id, "error", _dispatch_error_text(result))
+                return
         db.update_cron_run(run_id, "completed")
     except Exception as e:
         logger.warning("Heartbeat %s delivery failed: %s", job_id, e)
@@ -845,6 +854,95 @@ async def _dispatch_prompt(
     return DispatchResult(session_id, status, error=execution.error, execution=execution, queued=queued)
 
 
+def _dispatch_error_text(result: DispatchResult) -> str:
+    """A run row's error column, phrased so history says what happened."""
+    if result.status == DISPATCH_REJECTED:
+        return f"not admitted: {result.error or 'rejected'}"
+    if result.status == DISPATCH_CANCELLED:
+        return f"stopped before it finished: {result.error or 'cancelled'}"
+    return result.error or "turn failed"
+
+
+async def _settle_cron_run(run_id, name, session_id, result: DispatchResult, bus, manager, start_time) -> None:
+    """Write a run's terminal outcome once, from the execution's own result.
+
+    Only DISPATCH_COMPLETED writes 'completed' and emits job.completed. The
+    row used to reach both from eight different paths — five of which never
+    ran a turn at all — because the executor read "_dispatch_prompt returned
+    without raising" as success.
+    """
+    duration_ms = int((time.time() - start_time) * 1000)
+    if result.completed:
+        await asyncio.to_thread(db.update_cron_run, run_id, "completed", None, session_id)
+        if bus is not None:
+            bus.emit(
+                {
+                    "type": "job.completed",
+                    "job_name": name,
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "duration_ms": duration_ms,
+                }
+            )
+        return
+
+    error_text = _dispatch_error_text(result)
+    await asyncio.to_thread(db.update_cron_run, run_id, "error", error_text, session_id)
+    if bus is not None:
+        bus.emit(
+            {
+                "type": "job.error",
+                "job_name": name,
+                "session_id": session_id,
+                "run_id": run_id,
+                "error": error_text,
+                "duration_ms": duration_ms,
+            }
+        )
+    # Deliberate stops are not breakages, and a shutdown rejection is every
+    # unattended job at once — neither earns a high-urgency push.
+    if result.status == DISPATCH_CANCELLED or result.error == "shutting_down":
+        logger.info("Cron job '%s' did not run: %s", name, error_text)
+        return
+    if bus is not None and manager is not None:
+        _notify_job_failure(manager, bus, name, session_id, error_text)
+
+
+def _watch_unresolved_cron_run(run_id, name, session_id, result: DispatchResult, bus, manager, start_time) -> None:
+    """Leave the row 'running' and settle it when the turn actually ends.
+
+    A wait that expired is not an outcome. The run keeps the only status that
+    is true — running — and this watcher writes the real one later. If the
+    process dies first, the boot reconcile marks the row uncertain: reported,
+    never replayed.
+    """
+    execution = result.execution
+    if execution is None:
+        return
+
+    async def _settle_later() -> None:
+        try:
+            await execution.wait()
+        except asyncio.CancelledError:
+            return
+        final = DispatchResult(
+            result.session_id,
+            _EXEC_TO_DISPATCH.get(getattr(execution, "result", "") or "", DISPATCH_UNRESOLVED),
+            error=getattr(execution, "error", None),
+            execution=execution,
+        )
+        if final.status == DISPATCH_UNRESOLVED:  # pragma: no cover - defensive
+            return
+        try:
+            await _settle_cron_run(run_id, name, session_id, final, bus, manager, start_time)
+        except Exception:
+            logger.exception("Deferred settle failed for cron run %s", run_id)
+
+    task = asyncio.create_task(_settle_later())
+    _unresolved_watchers.add(task)
+    task.add_done_callback(_unresolved_watchers.discard)
+
+
 async def _execute_cron_job(meta: dict):
     """Execute a cron job by creating/reusing a session and sending the prompt."""
     from core.events import get_event_bus
@@ -888,19 +986,19 @@ async def _execute_cron_job(meta: dict):
         # written before this session existed.
         session_id = _ensure_dispatch_session(session_id, title=f"Cron: {name}", space_id=meta.get("space_id"))
         await asyncio.to_thread(db.update_cron_run, run_id, "running", session_id=session_id)
-        await _dispatch_prompt(session_id, prompt, model=model, allowed_tools=meta.get("allowed_tools"))
+        result = await _dispatch_prompt(session_id, prompt, model=model, allowed_tools=meta.get("allowed_tools"))
+        session_id = result.session_id or session_id
 
-        duration_ms = int((time.time() - start_time) * 1000)
-        await asyncio.to_thread(db.update_cron_run, run_id, "completed")
-        bus.emit(
-            {
-                "type": "job.completed",
-                "job_name": name,
-                "session_id": session_id,
-                "run_id": run_id,
-                "duration_ms": duration_ms,
-            }
-        )
+        if result.status == DISPATCH_UNRESOLVED:
+            # Admitted and still going. Say so, and settle the row from the
+            # execution when it really ends — never from the end of a wait.
+            # No new event: the row already reads 'running', which is both
+            # true and what the jobs panel renders. job.completed / job.error
+            # follow from the watcher when the turn really ends.
+            logger.info("Cron job '%s' is still running past the dispatch ceiling", name)
+            _watch_unresolved_cron_run(run_id, name, session_id, result, bus, manager, start_time)
+        else:
+            await _settle_cron_run(run_id, name, session_id, result, bus, manager, start_time)
     except Exception as e:
         logger.error("Cron job '%s' failed: %s", name, e)
         # session_id is whatever resolution reached before the failure —

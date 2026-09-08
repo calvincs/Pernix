@@ -176,6 +176,25 @@ async def test_idle_session_gets_prompt(monkeypatch):
     assert runs and runs[0]["status"] == "completed"
 
 
+async def test_an_idle_tick_whose_turn_failed_is_not_a_delivered_heartbeat(monkeypatch):
+    """A tick IS the turn, so it inherits the turn's outcome, not the dispatch's."""
+    from sessions.manager import SessionManager
+
+    mgr = SessionManager()
+    monkeypatch.setattr("sessions.manager._manager", mgr)
+    sid = mgr.create_session(title="hb-broken")
+
+    async def runner(session_id, message, session, **kw):
+        raise RuntimeError("the tick blew up")
+
+    mgr.set_agent_runner(runner)
+    await sched._execute_heartbeat_job(_meta(sid))
+
+    runs = db.list_cron_runs(f"hb_agent_{sid[:12]}_pulse")
+    assert runs and runs[0]["status"] == "error"
+    assert "the tick blew up" in runs[0]["error"]
+
+
 # ---------------------------------------------------------------------------
 # Restart round-trip
 # ---------------------------------------------------------------------------
