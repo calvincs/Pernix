@@ -294,6 +294,51 @@ docker compose up -d --build`, verify `--dangerous` survived, curl health,
 grep the container for one new line per fix, and run live assertions inside
 the container.
 
+## Outcome (2026-09-08, same day)
+
+All 20 fixes landed on `next-3.2-testing`, one commit each, plus one merge
+reconciliation commit. Eight Opus agents implemented them in parallel
+worktrees. Gate green at 4,055 tests; deployed to the box (build
+c9a3a1a8de33); 19 live assertions pass inside the container and a real
+tool-using turn completes.
+
+**The merge was the risky part, and one conflict mattered on its own.**
+Three streams each claimed schema version 37 and a fourth took 38. The
+migration runner skips any version at or below the database's current one,
+so a MIGRATIONS list that is not ascending silently drops an entry on every
+existing database instead of failing loudly. Renumbered to 37-40 in list
+order and verified on the live box: `schema_version = 40` with all four
+columns and both new tables present on a real v36 database, not a fresh one.
+The continuation-outbox test now pins that ordering invariant instead of its
+own absolute number.
+
+A second conflict was worth the care it got: W2 and W8 had independently
+rewritten the same two search tools, and both had introduced a variable
+named `scope` with different meanings. Git merged them cleanly while
+silently discarding the path fix. It would have compiled and quietly dropped
+a finding.
+
+The rest was signature drift between streams: bash returns text plus
+metadata now, the gate runner gained a base path, and worker trust rewrote a
+tuple the round-renewal test pinned by source text. Nine tests needed
+mechanical updates; two of them pinned brittle things and were rewritten to
+pin the real invariant instead.
+
+Things the implementation found that the audit did not:
+- **H05 fires same-round.** `gate.admit()` dedups the whole round's batch
+  before any of it executes, so `file_write(fix)` plus `bash(rerun)` in one
+  response is served the stale pre-fix failure. The documented mitigation
+  only covers an edit in a strictly earlier round.
+- **H18 needs no termination-resistant process.** GNU `timeout` puts itself
+  in its own process group, so an ordinary job survives its own kill, the
+  exit sidecar is never written, and the concurrency cap counts the slot
+  free.
+- **H06's reuse path fails in the opposite direction** to the filing: a
+  genuinely broken gate flips back to *failing* on attempt three.
+- **H09 defeats a fix from the same morning.** A hydrated worker loses its
+  inherited `active_goal_id`, so the budget check in `b257532` no-ops for
+  every revived worker.
+
 ## Follow-ups (deliberately out of scope)
 
 - The durable task/checkpoint/continuation layer, progress policies,
