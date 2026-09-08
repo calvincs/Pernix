@@ -181,9 +181,12 @@ def mgr(monkeypatch):
     from sessions.manager import SessionManager
 
     monkeypatch.setattr(sv2, "_current_state", lambda s: sv2.SessionStateV2.FINALIZING)
-    m = SimpleNamespace(broadcast=lambda *a, **k: None)
-    m._limit_goal = lambda session, goal, reason: SessionManager._limit_goal(m, session, goal, reason)
-    m._renew_continuation_budget = lambda session, budget: SessionManager._renew_continuation_budget(m, session, budget)
+    # A real manager, not a shim: _maybe_enqueue_goal_continuation now leans on
+    # several of its siblings (the outbox debit, the checkpoint, the budget
+    # renewal), and a stub that has to grow a lambda per collaborator stops
+    # testing the thing it stands in for.
+    m = SessionManager()
+    monkeypatch.setattr(m, "broadcast", lambda *a, **k: None)
     return m
 
 

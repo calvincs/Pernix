@@ -227,9 +227,8 @@ def mgr(monkeypatch):
     from sessions.manager import SessionManager
 
     monkeypatch.setattr(sv2, "_current_state", lambda s: sv2.SessionStateV2.FINALIZING)
-    m = SimpleNamespace(broadcast=lambda *a, **k: None)
-    m._limit_goal = lambda session, goal, reason: SessionManager._limit_goal(m, session, goal, reason)
-    m._renew_continuation_budget = lambda session, budget: SessionManager._renew_continuation_budget(m, session, budget)
+    m = SessionManager()
+    monkeypatch.setattr(m, "broadcast", lambda *a, **k: None)
     return m
 
 

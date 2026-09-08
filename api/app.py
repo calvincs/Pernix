@@ -170,6 +170,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Interrupted-session reconcile failed (continuing): %s", e)
 
+    # 3.4 Recover goal continuations a dead process left mid-flight. The three
+    # sweeps above reset interrupted turns to readiness; none of them looks at
+    # work that was authorized but never ran. A goal continuation is debited
+    # durably and used to be dispatched from an in-memory deque, so a crash
+    # between the two spent the allowance on nothing — and the only orphan
+    # sweeps in the codebase run at turn finalization or inside prompt(), i.e.
+    # never without a human. Must follow the reconciles: a recovered
+    # continuation dispatches into a session those have just made ready.
+    try:
+        recovered = await manager.recover_goal_continuations()
+        if recovered:
+            logger.warning("Recovered %d goal continuation(s) at startup", recovered)
+    except Exception as e:
+        logger.warning("Continuation recovery failed (continuing): %s", e)
+
     # 1.5 VAPID key generation (idempotent — skipped if keys already present)
     if not settings.vapid_private_key or not settings.vapid_public_key:
         try:

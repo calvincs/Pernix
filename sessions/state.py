@@ -48,6 +48,11 @@ class PendingMessage(NamedTuple):
     # this to set/clear session.goal_continuation_active per turn, so a real
     # user message queued behind a continuation never runs snooze-transparent.
     is_goal_continuation: bool = False
+    # goal_continuations row id for a continuation that was durably debited.
+    # The dispatcher claims that row before starting the turn and settles it
+    # after, so a crash between the debit and the dispatch is recoverable at
+    # boot instead of silently spending the goal's allowance on nothing.
+    continuation_id: int | None = None
 
     @classmethod
     def coerce(cls, entry) -> "PendingMessage":

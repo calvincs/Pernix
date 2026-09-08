@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -643,6 +644,98 @@ class SessionManager:
                 reset += 1
         return reset
 
+    # Prepended to a continuation whose predecessor died with the claim still
+    # held. What it did — a shell command, a file write, an HTTP call — is
+    # unknown, and the only safe move is to look before repeating anything.
+    _RECOVERED_CONTINUATION_PREAMBLE = (
+        "[recovered continuation] The server restarted while this continuation "
+        "was running. Whatever it had started may have completed, may have "
+        "half-completed, or may never have begun — the outcome was not "
+        "recorded. Before doing anything: re-read the workspace, the files "
+        "this task writes, and any command receipts or logs, and work out what "
+        "the current state actually is. Do NOT re-run a command, re-apply a "
+        "file write, or re-send an external request whose result you have not "
+        "confirmed is missing. Then continue from the state you observed.\n"
+        "{checkpoint_line}\n"
+    )
+
+    async def recover_goal_continuations(self) -> int:
+        """Boot-time sweep for continuations a dead process left mid-flight.
+
+        Nothing swept for these before. The debit was durable and the dispatch
+        was an in-memory deque, and the two orphan sweeps that exist run only
+        at turn finalization or inside prompt() — so an unattended goal drained
+        its whole allowance across restarts without executing one continuation,
+        and only a human sending a fresh message could dislodge it.
+
+        Recovery is not replay. A row that was merely `pending` never started a
+        turn and goes back out unchanged; a row that was `claimed` comes back
+        marked recovered and carries an explicit instruction to verify state
+        before repeating anything. Either way the user's standing intent is
+        re-checked first: a goal that is no longer active, or a session with
+        un-answered user direction waiting, settles the row instead of running
+        it. Returns the number actually re-queued.
+        """
+        if not settings.goals_enabled:
+            return 0
+        try:
+            rows = await asyncio.to_thread(db.recover_abandoned_continuations)
+        except Exception as e:
+            logger.error("Continuation outbox recovery failed: %s", e)
+            return 0
+        if not rows:
+            return 0
+
+        async def _abandon(cid: int, reason: str) -> None:
+            logger.warning("Boot recovery: continuation %s dropped — %s", cid, reason)
+            try:
+                await asyncio.to_thread(db.settle_goal_continuation, cid, "abandoned", reason)
+            except Exception as _e:
+                logger.warning("Continuation %s abandon-settle failed: %s", cid, _e)
+
+        requeued = 0
+        for row in rows:
+            cid = row["id"]
+            goal = await asyncio.to_thread(db.get_goal, int(row["goal_id"]))
+            if goal is None or goal.get("status") != "active":
+                # A paused goal is the durable form of "the user stopped this".
+                await _abandon(cid, f"goal is {goal.get('status') if goal else 'gone'}, not active")
+                continue
+            try:
+                session = self.get_or_create(row["session_id"])
+            except ValueError:
+                await _abandon(cid, "session no longer exists")
+                continue
+            if session.cancel_requested or not session.pause_event.is_set():
+                await _abandon(cid, "the session is cancelled or paused")
+                continue
+            if any(PendingMessage.coerce(e).continuation_id == cid for e in session.pending_messages):
+                continue  # already queued in this process
+            if self._find_db_orphans(session):
+                await _abandon(cid, "un-answered user direction is waiting — the user's words come first")
+                continue
+
+            message = row["prompt"]
+            if int(row.get("recovered") or 0):
+                checkpoint_line = (
+                    f"Checkpoint at the time it was dispatched: {row['checkpoint']}"
+                    if row.get("checkpoint")
+                    else "No checkpoint was recorded."
+                )
+                message = self._RECOVERED_CONTINUATION_PREAMBLE.format(checkpoint_line=checkpoint_line) + message
+            session.pending_messages.append(
+                PendingMessage(message, None, False, is_goal_continuation=True, continuation_id=cid)
+            )
+            requeued += 1
+            logger.warning(
+                "Boot recovery: re-queued continuation %s (%s) for %s",
+                cid,
+                "uncertain — was mid-dispatch" if row.get("recovered") else "never dispatched",
+                row["session_id"][:12],
+            )
+            self._spawn_detached(self._process_pending(session), "process-pending")
+        return requeued
+
     def _persist_watched(self, session: AgentSession) -> None:
         """Centralized helper: persist the watch-set after every mutation.
 
@@ -767,25 +860,86 @@ class SessionManager:
         # authorized continuation plus one per worker, capped at 24h.
         self._renew_continuation_budget(session, budget)
 
-        ordinal = used_cont + 1
-        await asyncio.to_thread(db.update_goal, goal["id"], continuations_used=ordinal)
-        prompt = (
-            f"[goal continuation {ordinal}/{budget}] The goal is still active:\n"
-            f"{goal['objective']}\n\n"
-            f"Continue working toward it, or report blockage with host-observable "
-            f"evidence — do not end the goal yourself. Use goal_complete only when "
-            f"the objective is met and its gates pass."
+        # Debit and enqueue in ONE transaction against the outbox. They used
+        # to be a durable update_goal followed by an append to an in-memory
+        # deque nothing persists, and no boot path swept for the difference —
+        # a crash in between spent the allowance and ran nothing at all
+        # (measured: three cycles, allowance drained, zero continuations
+        # executed). The row is also what makes the dispatch claimable, so a
+        # duplicate attempt cannot start a second turn for the same ordinal.
+        checkpoint = self._continuation_checkpoint(session, goal)
+
+        def _prompt_for(ordinal: int, cap: int) -> str:
+            return (
+                f"[goal continuation {ordinal}/{cap}] The goal is still active:\n"
+                f"{goal['objective']}\n\n"
+                f"Continue working toward it, or report blockage with host-observable "
+                f"evidence — do not end the goal yourself. Use goal_complete only when "
+                f"the objective is met and its gates pass."
+            )
+
+        row = await asyncio.to_thread(
+            db.enqueue_goal_continuation,
+            session.session_id,
+            goal["id"],
+            budget,
+            _prompt_for,
+            checkpoint,
         )
-        session.pending_messages.append(PendingMessage(prompt, None, False, is_goal_continuation=True))
+        if row is None:
+            logger.info(
+                "Goal #%d: continuation refused at the outbox for %s (status/allowance changed)",
+                goal["id"],
+                session.session_id[:12],
+            )
+            return
+        ordinal = row["ordinal"]
+        session.pending_messages.append(
+            PendingMessage(
+                row["prompt"],
+                None,
+                False,
+                is_goal_continuation=True,
+                continuation_id=row["id"],
+            )
+        )
         session.emit_event({"type": "goal.continuation", "goal_id": goal["id"], "ordinal": ordinal, "budget": budget})
         logger.info(
-            "Goal #%d: auto-continuation %d/%d enqueued for %s (termination=%s)",
+            "Goal #%d: auto-continuation %d/%d enqueued for %s (termination=%s, outbox row %d)",
             goal["id"],
             ordinal,
             budget,
             session.session_id[:12],
             session.termination_reason,
+            row["id"],
         )
+
+    def _continuation_checkpoint(self, session: AgentSession, goal: dict) -> str:
+        """A bounded record of where the work stood when the debit happened.
+
+        A synthetic "continue working toward it" is an instruction, not a
+        position. After a restart the recovering turn needs to know what the
+        last durable thing was so it can re-read from there instead of
+        guessing — and, when its predecessor died mid-flight, so it can tell
+        what may already have happened.
+        """
+        try:
+            tail = db.get_messages(session.session_id, last=1)
+            last_id = tail[-1]["id"] if tail else None
+        except Exception:
+            last_id = None
+        try:
+            return json.dumps(
+                {
+                    "goal_id": goal["id"],
+                    "last_message_id": last_id,
+                    "termination_reason": session.termination_reason,
+                    "workspace": str(settings.workspace_dir),
+                    "worker_ids": [w[:12] for w in list(getattr(session, "worker_ids", ()) or ())[:10]],
+                }
+            )[:2000]
+        except Exception:
+            return ""
 
     def _renew_continuation_budget(self, session: AgentSession, continuation_budget: int) -> float:
         """Give the next goal continuation a real window. Returns its headroom.
@@ -2667,7 +2821,21 @@ class SessionManager:
                     session.session_id[:12],
                 )
                 return
-            entry = PendingMessage.coerce(session.pending_messages.popleft())
+            # A durably debited continuation is claimed here, immediately
+            # before the turn that spends it starts, and settled immediately
+            # after. Anything the claim refuses — the goal was paused or
+            # completed while this sat in the queue, the user cancelled, the
+            # row was already dispatched by someone else — is dropped and the
+            # next entry considered, so a refused continuation cannot block a
+            # real user message behind it.
+            entry = None
+            while session.pending_messages:
+                candidate = PendingMessage.coerce(session.pending_messages.popleft())
+                if await self._admit_continuation(session, candidate):
+                    entry = candidate
+                    break
+            if entry is None:
+                return
 
             # Per-turn transparency: only a goal auto-continuation turn is
             # snooze-transparent. A real user message dispatched from the
@@ -2723,6 +2891,65 @@ class SessionManager:
                     pre_saved=entry.pre_saved,
                 )
             )
+            # Settle the claim now that the turn exists. A crash before this
+            # leaves the row 'claimed', and boot recovery re-offers it with a
+            # verify-before-repeating preamble rather than replaying it: the
+            # turn may already have run a command or written a file, and
+            # durable dispatch is not exactly-once side effects.
+            if entry.continuation_id is not None:
+                try:
+                    await asyncio.to_thread(
+                        db.settle_goal_continuation, entry.continuation_id, "dispatched", "turn started"
+                    )
+                except Exception as _e:
+                    logger.warning("Continuation %s settle failed: %s", entry.continuation_id, _e)
+
+    async def _admit_continuation(self, session: AgentSession, entry: PendingMessage) -> bool:
+        """Claim a durable continuation immediately before it runs.
+
+        False means do not dispatch this entry. Anything without a
+        continuation_id — every real user message, every synthetic worker
+        resume — passes straight through.
+
+        The re-checks here are the ones that can change while an entry waits
+        in the queue: an explicit user stop, a goal that was paused or
+        completed in the meantime, and queued user direction, which outranks
+        the machine's own continuation the same way it does at enqueue time.
+        """
+        if entry.continuation_id is None:
+            return True
+        cid = entry.continuation_id
+
+        async def _abandon(reason: str) -> bool:
+            logger.info("Continuation %s not dispatched: %s", cid, reason)
+            try:
+                await asyncio.to_thread(db.settle_goal_continuation, cid, "abandoned", reason)
+            except Exception as _e:
+                logger.warning("Continuation %s abandon-settle failed: %s", cid, _e)
+            return False
+
+        if session.cancel_requested:
+            return await _abandon("the user cancelled the session")
+        if not session.pause_event.is_set():
+            return await _abandon("the session is paused")
+        try:
+            row = await asyncio.to_thread(db.get_goal_continuation, cid)
+            goal = await asyncio.to_thread(db.get_goal, int(row["goal_id"])) if row else None
+        except Exception as _e:
+            logger.warning("Continuation %s lookup failed: %s", cid, _e)
+            return await _abandon(f"outbox lookup failed: {_e}")
+        if goal is None or goal.get("status") != "active":
+            return await _abandon(f"goal is {goal.get('status') if goal else 'gone'}, not active")
+        if any(PendingMessage.coerce(e).msg_id is not None for e in session.pending_messages):
+            return await _abandon("a queued user message supersedes it")
+
+        claimed = await asyncio.to_thread(db.claim_goal_continuation, cid)
+        if claimed is None:
+            # Not an error: a duplicate dispatch attempt losing the race is
+            # exactly what the claim exists to make safe.
+            logger.info("Continuation %s already claimed or settled — not dispatching twice", cid)
+            return False
+        return True
 
     def _find_db_orphans(self, session: AgentSession) -> list[dict]:
         """Return DB user messages that have no subsequent assistant response.
