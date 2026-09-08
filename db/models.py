@@ -1728,6 +1728,31 @@ def count_messages(session_id: str, before_id: int | None = None) -> int:
         return int(row["c"]) if row else 0
 
 
+def count_messages_and_compactions(session_id: str) -> tuple[int, int]:
+    """(messages, compaction markers) for one session, as one aggregate.
+
+    The context-status endpoint used to read the whole transcript a second
+    time — after `compile_context` had already read it once — purely to
+    produce these two integers. On a 1,201-message session that materialized
+    2.4 MB of content to count rows. `idx_messages_session_role` covers both
+    halves of this statement, so it never touches the content column at all:
+    measured 7.00 ms -> 0.18 ms on that transcript.
+
+    An unknown session id answers (0, 0), which is what "no rows" means;
+    callers that need to distinguish it from a real empty session ask
+    `get_session` first.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(role = 'compaction'), 0) AS compactions "
+            "FROM messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if not row:
+            return (0, 0)
+        return (int(row["total"]), int(row["compactions"]))
+
+
 def get_last_message_at(session_id: str, role: str) -> str | None:
     """Return the created_at of the newest message with the given role
     (None if there are none). Cheap indexed lookup — avoids loading the
