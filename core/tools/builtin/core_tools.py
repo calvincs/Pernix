@@ -819,23 +819,137 @@ def _detect_duplicate_workspace_prefix(command: str, workspace: Path) -> str | N
 # override is silently inert.
 BASH_MAX_TIMEOUT = 30 * 60  # 30 minutes
 
-# Upper bound on how much captured output is read back from the temp files.
-# truncate_output then trims to MAX_OUTPUT; this cap only guards against
-# pathological multi-GB captures being pulled into memory first.
+# Upper bound on how much captured output is read back INTO MEMORY from the
+# temp files. truncate_output then trims to MAX_OUTPUT; this cap only guards
+# against pathological multi-GB captures being pulled into memory first.
 _CAPTURE_READ_CAP = 5 * 1024 * 1024
+
+# Upper bound on how much of a capture is streamed to a durable artifact. Same
+# size, different job: this one bounds DISK, and it is what the model can still
+# read after the preview has been collapsed and clipped. Both caps stay — the
+# audit's complaint (3.2.1 H15) was never that they exist, it was that a
+# capture cut by them left no evidence and no statement that it had been cut.
+_CAPTURE_ARTIFACT_CAP = 5 * 1024 * 1024
+
+# Copy granularity for the temp-file → artifact stream. 1 MiB keeps peak
+# memory flat regardless of how much a command printed.
+_CAPTURE_COPY_CHUNK = 1024 * 1024
+
+
+def _capture_evidence(f, stream: str, *, persist: bool = True) -> tuple[str, dict]:
+    """Read one capture temp file back as (preview_text, acquisition_meta).
+
+    Evidence first, rendering second. The temp file is the only place the
+    command's full output ever existed, and it is unlinked the moment bash's
+    `with` block closes — so anything past the preview cap is copied to a
+    durable artifact BEFORE the caller collapses repeated lines and clips to
+    50 KB. The audit measured the old order costing 6,157,089 chars of a
+    build log, including the unique end marker that carried the diagnosis.
+
+    Returns the acquisition record even when nothing was lost; the caller
+    decides what to say about it (a complete capture says nothing).
+    """
+    from core.tools.truncation import acquisition_meta, new_artifact_path, write_artifact_meta
+
+    try:
+        size = f.seek(0, os.SEEK_END)
+    except (OSError, ValueError):
+        return "", acquisition_meta(source=f"bash {stream}", captured=0, source_total=0)
+    if not size:
+        return "", acquisition_meta(source=f"bash {stream}", captured=0, source_total=0)
+
+    artifact = ""
+    captured = size
+    # Small captures are wholly present in the preview; a second copy on disk
+    # would be pure noise (and a file the cleanup sweep has to carry).
+    if persist and size > MAX_OUTPUT:
+        captured = min(size, _CAPTURE_ARTIFACT_CAP)
+        try:
+            path = new_artifact_path(f"bash_{stream}")
+            f.seek(0)
+            remaining = captured
+            with open(path, "wb") as dest:
+                while remaining > 0:
+                    block = f.read(min(_CAPTURE_COPY_CHUNK, remaining))
+                    if not block:
+                        break
+                    dest.write(block)
+                    remaining -= len(block)
+            artifact = str(path)
+        except (OSError, ValueError) as e:
+            logger.warning("Could not persist %s capture evidence: %s", stream, e)
+            captured = min(size, _CAPTURE_READ_CAP)
+
+    meta = acquisition_meta(
+        source=f"bash {stream}",
+        captured=captured,
+        source_total=size,
+        unit="bytes",
+        truncation_reason=f"the {_CAPTURE_ARTIFACT_CAP // (1024 * 1024)} MiB process-output cap",
+        artifact=artifact,
+    )
+    if artifact:
+        write_artifact_meta(artifact, meta)
+
+    try:
+        f.seek(0)
+        text = f.read(_CAPTURE_READ_CAP).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        text = ""
+    return text, meta
+
+
+def _collapse_for_preview(raw: str, metas: list[dict]) -> tuple[str, list[dict]]:
+    """Run the readability collapse, keeping a durable copy of what it ate.
+
+    Collapse is a presentation transform and a lossy one: 2000 identical
+    WARNING lines reach the model as 4. Above the preview cap each stream
+    already has its own raw artifact, so nothing more is needed. Below it —
+    40 KB of library banners, say — the collapsed rendering would otherwise be
+    the only surviving copy, and the audit found exactly that: an artifact
+    holding 4 of 2000 lines.
+    """
+    from core.tools.truncation import acquisition_meta, write_artifact
+
+    collapsed = _collapse_repeated_lines(raw)
+    if collapsed == raw or any(m.get("artifact") for m in metas):
+        return collapsed, metas
+    meta = acquisition_meta(
+        source="bash output (pre-collapse)",
+        captured=len(raw.encode("utf-8", "ignore")),
+        source_total=len(raw.encode("utf-8", "ignore")),
+        unit="bytes",
+    )
+    path = write_artifact(raw, "bash_stdout", meta=meta)
+    if not path:
+        return collapsed, metas
+    meta["artifact"] = path
+    return collapsed, [*metas, meta]
+
+
+def _prepend_acquisition_notes(output: str, metas: list[dict]) -> str:
+    """Put the completeness statement where a head-truncation cannot cut it.
+
+    Leading, not trailing: everything downstream of bash clips from the end,
+    so a footer describing what was lost is the first thing lost.
+    """
+    from core.tools.truncation import acquisition_notes
+
+    notes = acquisition_notes([m for m in metas if m])
+    if not notes:
+        return output
+    return f"{notes}\n{output}" if output else notes
 
 
 def _read_capture(f) -> str:
-    """Read a binary capture temp file back from the start (bounded by _CAPTURE_READ_CAP)."""
-    try:
-        size = f.seek(0, os.SEEK_END)
-        f.seek(0)
-        data = f.read(_CAPTURE_READ_CAP).decode("utf-8", errors="replace")
-        if size > _CAPTURE_READ_CAP:
-            data += f"\n[... output truncated: {size - _CAPTURE_READ_CAP} more bytes not shown ...]"
-        return data
-    except (OSError, ValueError):
-        return ""
+    """Preview text for one capture, with no artifact written.
+
+    core/gates.py runs its own capture pairs through this and reports a short
+    excerpt; a gate does not need a durable evidence copy of every check's
+    output, and writing one would put a file in the tool-output dir for every
+    gate run in every turn.
+    """
+    return _capture_evidence(f, "output", persist=False)[0]
 
 
 def bash(command: str, timeout: int | None = None, _context: dict | None = None) -> str | tuple[str, dict]:
@@ -942,10 +1056,16 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
                 # Include what the command managed to print — the difference
                 # between "hung silently" and "hung after X" is usually the
                 # whole diagnosis.
-                partial = (_read_capture(out_f) + _read_capture(err_f)).strip()
+                _out_text, _out_meta = _capture_evidence(out_f, "stdout")
+                _err_text, _err_meta = _capture_evidence(err_f, "stderr")
+                partial = (_out_text + _err_text).strip()
                 msg = f"Error: Command timed out after {effective_timeout}s"
                 if partial:
                     msg += f"\n[partial output before timeout]\n{partial[-2000:]}"
+                # 2000 chars is a glance, not the record. A build that ran for
+                # 30 minutes and then timed out printed everything it knew
+                # before it hung, and that evidence outlives the temp files.
+                msg = _prepend_acquisition_notes(msg, [_out_meta, _err_meta])
                 # Pointer at the moment of pain (ARC-3 retest field case: two
                 # solver timeouts, 600s and 1800s, with job_start never
                 # considered — scout-time steering alone doesn't reach the
@@ -971,8 +1091,10 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
                 if _session and _proc_handle is not None:
                     _session.release_process(_proc_handle)
 
-            stdout = _read_capture(out_f)
-            stderr = _read_capture(err_f)
+            # Evidence to disk before the preview transforms run over it.
+            stdout, out_meta = _capture_evidence(out_f, "stdout")
+            stderr, err_meta = _capture_evidence(err_f, "stderr")
+            acquired = [m for m in (out_meta, err_meta) if m.get("captured")]
 
         output = ""
         if stdout:
@@ -982,11 +1104,16 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
                 output += "\n"
             output += stderr
 
-        output = _collapse_repeated_lines(output)
+        output, acquired = _collapse_for_preview(output, acquired)
 
         trunc = {"truncated": False, "total_chars": len(output)}
         if len(output) > MAX_OUTPUT:
-            output, trunc = truncate_output(output, "bash")
+            output, trunc = truncate_output(output, "bash", sources=acquired)
+        else:
+            # Collapse can shrink 11 MB of repeated warnings to a few hundred
+            # chars, so a short result is no evidence that a short source
+            # produced it. State any loss even when nothing was truncated.
+            output = _prepend_acquisition_notes(output, acquired)
 
         rc = process.returncode
 

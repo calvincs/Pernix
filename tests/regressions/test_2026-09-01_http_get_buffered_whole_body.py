@@ -70,8 +70,12 @@ def test_streaming_stops_reading_once_past_the_cap(offline, monkeypatch):
     monkeypatch.setattr("httpx.Client", _client_returning(resp))
 
     out = web.http_get("https://example.com/huge.bin")
-    assert "[truncated at" in out
-    assert len(out) <= cap + 64
+    # 2026-09-08 (H15): the old marker read "[truncated at {cap} bytes]" on
+    # BOTH the cap and the deadline path, so a short deadline-cut body claimed
+    # it had filled the cap. Each limit now names itself, and the body that
+    # was acquired keeps an artifact handle.
+    assert "source_complete=false" in out and f"{cap:,}-byte fetch cap" in out
+    assert len(out) <= cap + 400
     assert resp.read_chunks < int(cap / 8192) + 200, "must stop reading, not drain the whole body"
 
 

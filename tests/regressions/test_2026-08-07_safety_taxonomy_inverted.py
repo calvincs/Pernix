@@ -313,13 +313,22 @@ def test_truncation_pointer_resolves_to_the_real_artifact(tmp_path, monkeypatch)
     monkeypatch.setattr(truncation, "TOOL_OUTPUT_DIR", tmp_path / ".tool_output")
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path / "workspace"))
 
-    preview, meta = truncation.truncate_output("x" * 60_000, "bash")
+    body = "".join(f"line {i}\n" for i in range(8_000))
+    preview, meta = truncation.truncate_output(body, "bash")
     assert meta["truncated"] and meta["output_path"]
     assert f'file_read(path="{meta["output_path"]}"' in preview
 
     resolved = paths.safe_read_path(meta["output_path"])
     assert resolved.exists(), f"drill-in pointer {meta['output_path']} is dead"
-    assert resolved.read_text() == "x" * 60_000
+    assert resolved.read_text() == body
+
+    # 2026-09-08 (H16): one line wider than the whole preview budget has no
+    # line boundary to stop at, so it gets a named byte route instead of a
+    # line offset that would step over its remainder. The artifact still has
+    # to be reachable — a dead pointer was the original failure here.
+    preview, meta = truncation.truncate_output("x" * 60_000, "bash")
+    assert meta["output_path"] in preview and "cut -c" in preview
+    assert paths.safe_read_path(meta["output_path"]).read_text() == "x" * 60_000
 
 
 def test_tool_output_is_read_only_never_a_write_root(tmp_path, monkeypatch):
