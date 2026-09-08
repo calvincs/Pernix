@@ -136,23 +136,41 @@ def _backups_ledger(root: Path | None = None) -> dict:
     root = backup.backups_dir() if root is None else root
     keep = backup.resolve_keep()
     if not root.is_dir():
-        return {"dir": str(root), "count": 0, "bytes": 0, "keep": keep, "last_backup_at": None, "beyond_keep": []}
+        return {
+            "dir": str(root),
+            "count": 0,
+            "bytes": 0,
+            "keep": keep,
+            "last_backup_at": None,
+            "beyond_keep": [],
+            "incomplete": [],
+        }
 
     snapshots = backup.list_snapshots(root)
+    # The newest COMPLETED generation, not the newest file. A generation that
+    # failed halfway used to be ranked newest and reported here as the last
+    # backup, which is the number an operator decides by.
+    newest = next((s for s in snapshots if s["complete"]), None)
     last_at = (
-        datetime.fromtimestamp(snapshots[0]["mtime"], tz=timezone.utc).isoformat().replace("+00:00", "Z")
-        if snapshots
-        else None
+        datetime.fromtimestamp(newest["mtime"], tz=timezone.utc).isoformat().replace("+00:00", "Z") if newest else None
     )
     return {
         "dir": str(root),
-        "count": len(snapshots),
+        "count": sum(1 for s in snapshots if s["complete"]),
         "bytes": _dir_bytes(root),
         "keep": keep,
         "last_backup_at": last_at,
         "beyond_keep": [
             {"name": s["path"].name, "bytes": s["bytes"], "mtime": s["mtime"], "scheme": s["scheme"]}
             for s in backup.snapshots_beyond_keep(keep, snapshots)
+        ],
+        # Reported rather than hidden: a half-written generation an operator
+        # cannot see is one they cannot delete, and it is the answer to "why
+        # does the directory hold four files and the ledger say three?"
+        "incomplete": [
+            {"name": s["path"].name, "bytes": s["bytes"], "mtime": s["mtime"], "scheme": s["scheme"]}
+            for s in snapshots
+            if not s["complete"]
         ],
     }
 
