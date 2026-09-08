@@ -80,7 +80,13 @@ def _space_with(n: int, prefix: str = "sp") -> str:
             "INSERT INTO sessions (id, title, system_prompt, session_type, space_id, state,"
             " created_at, updated_at) VALUES (?, ?, '', 'normal', ?, 'idle', ?, ?)",
             [
-                (f"{prefix}{i:05d}", f"space chat {i}", space_id, "2026-09-01T00:00:00+00:00", f"2020-01-{i%28+1:02d}")
+                (
+                    f"{prefix}{i:05d}",
+                    f"space chat {i}",
+                    space_id,
+                    "2026-09-01T00:00:00+00:00",
+                    "2020-01-{:02d}".format(i % 28 + 1),
+                )
                 for i in range(n)
             ],
         )
