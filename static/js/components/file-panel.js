@@ -363,6 +363,14 @@ const BINARY_EXTS = new Set([
     '.sqlite', '.db', '.pyc', '.class', '.o', '.a',
 ]);
 const MAX_TEXT_SIZE = 2 * 1024 * 1024; // 2MB — don't load larger files as text
+// The image path had no ceiling at all: resp.blob() buffered whatever the
+// server sent, and IMAGE_EXTS includes .svg, so a generated plot or a
+// multi-megabyte SVG went straight into the tab's memory. 16MB is generous
+// for a screenshot and still bounded; past it the viewer falls back to the
+// same 'too-large' card the text path uses, which still offers open and
+// download. This is a COMPLEMENT to the lifecycle below, never a substitute
+// for it — a bounded leak is still a leak. (S21)
+const MAX_IMAGE_SIZE = 16 * 1024 * 1024; // 16MB — don't buffer larger images as blobs
 
 function getExt(name) {
     const dot = name.lastIndexOf('.');
@@ -556,6 +564,9 @@ export function toggleFilePanel() {
         document.getElementById('files-btn')?.classList.add('active');
         loadTabData();
     } else {
+        // Closing the panel is panel teardown: the preview stops being visible,
+        // so it stops being owned. (S21)
+        _disposePreview();
         _panel.classList.remove('open');
         _panel.style.width = '';
         document.getElementById('files-btn')?.classList.remove('active');
@@ -723,6 +734,9 @@ function _selectTab(key) {
     _state.tab = key;
     _state.group = _groupOf(key).key;
     _state.groupTabs[_state.group] = key;
+    // Leaving the tab is leaving the preview: without this the blob stayed
+    // pinned for the life of the tab, invisible and unreachable. (S21)
+    _disposePreview();
     _state.viewMode = 'tree';
     _state.currentFile = null;
     renderTabs();
@@ -1242,55 +1256,176 @@ function _renderEntries(parent, entries) {
 // Viewer
 // ---------------------------------------------------------------------------
 
+// ── preview ownership (S21) ────────────────────────────────────────────────
+//
+// A blob: URL is an allocation on the DOCUMENT, not on the <img> that uses it.
+// Dropping the element, or the string, or the whole viewer frees nothing: the
+// image data stays resident for the life of the tab until someone calls
+// revokeObjectURL on that exact string. Revocation used to hang off the Back
+// button alone, so every other way of leaving a preview — a tab change, the
+// next file, deleting the file, closing the panel — pinned another copy. Fifty
+// screenshots in a working session is ~100MB the tab never gives back.
+//
+// The contract is a single owner. Exactly one preview URL is owned at a time,
+// `_previewUrl` is it, and the invariant is that it is non-null only while
+// `_state.currentFile` is the image it belongs to. Everything that installs a
+// preview goes through _installPreview (which revokes the outgoing one), and
+// everything that stops showing one goes through _disposePreview.
+//
+// Loads are generational because viewFile awaits. Each load claims a
+// generation on entry; anything that installs or retires a preview moves the
+// generation on, so a response that lands into a newer one revokes the blob it
+// just created instead of installing it over the newer view. That is not only
+// a leak fix: without it, two clicks whose fetches resolve out of order leave
+// the viewer showing the file the user navigated AWAY from — for text as well
+// as images. It is the same guard _wsSeq already applies to directory
+// listings, which is where the shape is borrowed from.
+let _previewUrl = null;   // the one object URL this panel owns, or null
+let _previewSeq = 0;      // ownership generation for preview loads
+
+function _releasePreviewUrl() {
+    if (!_previewUrl) return;
+    URL.revokeObjectURL(_previewUrl);
+    _previewUrl = null;
+}
+
+/** Claim the generation for a load that is about to start. */
+function _startPreviewLoad() { return ++_previewSeq; }
+
+/** True once anything else has taken the viewer over from generation `gen`. */
+function _previewSuperseded(gen) { return gen !== _previewSeq; }
+
+/**
+ * Make `file` the preview on screen, revoking whatever URL the outgoing one
+ * owned. `url` is the object URL the new file owns (images only), or null —
+ * a video/audio/binary preview references /workspace/<path> directly and owns
+ * nothing.
+ */
+function _installPreview(file, url = null) {
+    _releasePreviewUrl();
+    _previewUrl = url;
+    _state.currentFile = file;
+    _state.viewMode = 'viewer';
+    _state.dirty = false;
+}
+
+/**
+ * Retire the current preview and invalidate every load still in flight. A
+ * revoked blob cannot be rendered again, so the file it backed goes with it —
+ * leaving `currentFile` behind would show a broken image on the next paint.
+ * Only the URL this preview owns is revoked, never a replacement's. Safe to
+ * call with no preview open, which is why every leave-the-viewer path can call
+ * it unconditionally.
+ */
+function _disposePreview() {
+    if (_previewUrl) {
+        _releasePreviewUrl();
+        if (_state.currentFile?.type === 'image') {
+            _state.currentFile = null;
+            _state.viewMode = 'tree';
+        }
+    }
+    return ++_previewSeq;
+}
+
+/** Back out of the viewer to the tree. All four Back buttons come through here. */
+function _backToTree(rerender) {
+    _disposePreview();
+    _state.viewMode = 'tree';
+    _state.currentFile = null;
+    rerender();
+}
+
+/**
+ * A file that no longer exists must not stay on screen, and if it was an image
+ * preview its blob has to go with it. `path` matches the open file itself or
+ * any directory above it.
+ */
+function _closeViewerFor(path) {
+    const open = _state.currentFile?.path;
+    if (open !== path && !open?.startsWith(path + '/')) return false;
+    _disposePreview();
+    _state.currentFile = null;
+    _state.viewMode = 'tree';
+    return true;
+}
+// ── end preview ownership ──────────────────────────────────────────────────
+
 async function viewFile(path, source = 'workspace') {
     const url = `/workspace/${path}`;
+    // Claiming the generation here is what makes the SECOND click authoritative:
+    // from this line on, whatever this call loads is the only thing allowed to
+    // reach the viewer, and any earlier load is already obsolete.
+    const gen = _startPreviewLoad();
     try {
         const name = path.split('/').pop();
         const fileUrl = url;
 
         // Media files — don't load into memory, just reference the URL
         if (isVideo(name)) {
-            _state.currentFile = { path, content: fileUrl, source, type: 'video', name };
+            _installPreview({ path, content: fileUrl, source, type: 'video', name });
         } else if (isAudio(name)) {
-            _state.currentFile = { path, content: fileUrl, source, type: 'audio', name };
+            _installPreview({ path, content: fileUrl, source, type: 'audio', name });
         } else if (isBinary(name)) {
-            _state.currentFile = { path, content: '', source, type: 'binary', name, fileUrl };
+            _installPreview({ path, content: '', source, type: 'binary', name, fileUrl });
         } else {
             // Fetch the file — check size first via HEAD for non-image files
             const resp = await fetch(url, { headers: _authHdr() });
             if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+            const size = parseInt(resp.headers.get('content-length') || '0', 10);
 
             if (isImage(name)) {
-                const blob = await resp.blob();
-                const blobUrl = URL.createObjectURL(blob);
-                _state.currentFile = { path, content: blobUrl, source, type: 'image', name };
-            } else {
-                // Check content-length to avoid loading huge text files
-                const size = parseInt(resp.headers.get('content-length') || '0', 10);
-                if (size > MAX_TEXT_SIZE) {
-                    _state.currentFile = {
+                if (size > MAX_IMAGE_SIZE) {
+                    if (_previewSuperseded(gen)) return;
+                    _installPreview({
                         path, content: '', source, type: 'too-large', name,
                         fileUrl, fileSize: size,
-                    };
+                    });
                 } else {
-                    const content = await resp.text();
-                    const mtime = _mtimeOf(resp);
-                    // Double-check: if the fetched text is huge (chunked response with no content-length)
-                    if (content.length > MAX_TEXT_SIZE) {
-                        _state.currentFile = {
-                            path, content: content.slice(0, MAX_TEXT_SIZE),
-                            source, type: 'text', name, truncated: true, mtime,
-                        };
+                    const blob = await resp.blob();
+                    // Chunked response with no content-length: the bytes are
+                    // already here, but they must not become a blob URL.
+                    if (blob.size > MAX_IMAGE_SIZE) {
+                        if (_previewSuperseded(gen)) return;
+                        _installPreview({
+                            path, content: '', source, type: 'too-large', name,
+                            fileUrl, fileSize: blob.size,
+                        });
                     } else {
-                        _state.currentFile = { path, content, source, type: 'text', name, mtime };
+                        const blobUrl = URL.createObjectURL(blob);
+                        // Overtaken while the bytes were arriving: revoke the URL
+                        // we just made rather than installing a file the user has
+                        // already navigated away from.
+                        if (_previewSuperseded(gen)) { URL.revokeObjectURL(blobUrl); return; }
+                        _installPreview({ path, content: blobUrl, source, type: 'image', name }, blobUrl);
                     }
+                }
+            } else if (size > MAX_TEXT_SIZE) {
+                if (_previewSuperseded(gen)) return;
+                _installPreview({
+                    path, content: '', source, type: 'too-large', name,
+                    fileUrl, fileSize: size,
+                });
+            } else {
+                const content = await resp.text();
+                const mtime = _mtimeOf(resp);
+                if (_previewSuperseded(gen)) return;
+                // Double-check: if the fetched text is huge (chunked response with no content-length)
+                if (content.length > MAX_TEXT_SIZE) {
+                    _installPreview({
+                        path, content: content.slice(0, MAX_TEXT_SIZE),
+                        source, type: 'text', name, truncated: true, mtime,
+                    });
+                } else {
+                    _installPreview({ path, content, source, type: 'text', name, mtime });
                 }
             }
         }
-        _state.viewMode = 'viewer';
-        _state.dirty = false;
         renderCurrentTab();
     } catch (e) {
+        // A load the user has already left must not pop an error over the file
+        // they are actually looking at.
+        if (_previewSuperseded(gen)) return;
         notify('error', `Could not open ${path}: ${e.message || e}`);
     }
 }
@@ -1303,14 +1438,7 @@ function renderViewer(container) {
     const backBtn = el('button', {
         class: 'fp-toolbar-back', title: 'Back to tree', 'aria-label': 'Back to the file tree',
     }, [icon('arrow-left')]);
-    backBtn.addEventListener('click', () => {
-        if (file.type === 'image' && file.content.startsWith('blob:')) {
-            URL.revokeObjectURL(file.content);
-        }
-        _state.viewMode = 'tree';
-        _state.currentFile = null;
-        renderCurrentTab();
-    });
+    backBtn.addEventListener('click', () => _backToTree(renderCurrentTab));
 
     const actions = el('div', { class: 'fp-toolbar-actions' });
 
@@ -1663,11 +1791,7 @@ async function deleteEntry(path, type = 'file') {
     if (!go) return;
     try {
         await del(`/workspace/${path.split('/').map(encodeURIComponent).join('/')}`);
-        if (_state.currentFile?.path === path ||
-            _state.currentFile?.path?.startsWith(path + '/')) {
-            _state.currentFile = null;
-            _state.viewMode = 'tree';
-        }
+        _closeViewerFor(path);
         await loadWorkspace({ path: _wsCurrentPath });
     } catch (e) {
         notify('error', `Could not delete ${path}: ${e.message || e}`);
@@ -2514,11 +2638,7 @@ function renderSkillViewer(container) {
     const backBtn = el('button', {
         class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the skills list',
     }, [icon('arrow-left')]);
-    backBtn.addEventListener('click', () => {
-        _state.viewMode = 'tree';
-        _state.currentFile = null;
-        renderSkills();
-    });
+    backBtn.addEventListener('click', () => _backToTree(renderSkills));
 
     const editBtn = el('button', { class: 'fp-btn' }, [text('edit')]);
     editBtn.addEventListener('click', () => {
