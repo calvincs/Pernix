@@ -1589,10 +1589,21 @@ function _mtimeOf(resp) {
 // user needs to see which file this is about. (S3)
 function _showSaveConflict(container, { onReload, onOverwrite }) {
     container.querySelector('.fp-conflict')?.remove();
+    // The toolbar's own save button re-sends the same draft against the same
+    // base version. It used to be left enabled and dirty beside this banner,
+    // so a user who reached for it instead of answering here got a 200 — the
+    // 409 was a one-shot warning and the other writer's work died on the
+    // second click, silently. It is parked until one of these two answers
+    // the question. (S05)
+    const saveBtn = container.querySelector('.save-btn');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.className = 'fp-btn save-btn'; saveBtn.textContent = 'save'; }
+    const release = () => {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+    };
     const reloadBtn = el('button', { class: 'fp-btn' }, [text('Reload')]);
-    reloadBtn.addEventListener('click', () => { box.remove(); onReload(); });
+    reloadBtn.addEventListener('click', () => { box.remove(); release(); onReload(); });
     const overwriteBtn = el('button', { class: 'fp-btn fp-btn-danger' }, [text('Overwrite')]);
-    overwriteBtn.addEventListener('click', () => { box.remove(); onOverwrite(); });
+    overwriteBtn.addEventListener('click', () => { box.remove(); release(); onOverwrite(); });
     const box = el('div', { class: 'fp-conflict', role: 'alert' }, [
         el('span', { class: 'fp-conflict-msg' }, [text('Changed on disk since you opened it')]),
         el('span', { class: 'fp-conflict-actions' }, [reloadBtn, overwriteBtn]),
@@ -1732,8 +1743,13 @@ async function saveFile(container, { force = false } = {}) {
         if (resp.status === 409) {
             let payload = {};
             try { payload = await resp.json(); } catch { /* body is optional */ }
-            if (payload.mtime != null) file.mtime = payload.mtime;
-            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            // NOT file.mtime = payload.mtime. That is the version on disk —
+            // the other writer's — and adopting it as this draft's base makes
+            // the very next save match, succeed, and destroy their work with
+            // no second warning. The base stays what this editor actually
+            // read, so anything short of Reload or Overwrite conflicts
+            // again. (S05)
+            file.diskMtime = payload.mtime ?? null;
             if (statusEl) {
                 statusEl.className = 'fp-editor-status error';
                 statusEl.textContent = 'Changed on disk';
@@ -2169,9 +2185,14 @@ function renderSearchResults(listEl) {
 }
 
 /**
- * Open a memory file in the viewer, or straight into the editor. The mtime
- * comes back with the content and is what a later save hands to the server as
- * base_mtime — same optimistic-concurrency contract as the workspace. (S9)
+ * Open a memory file in the viewer, or straight into the editor. The version
+ * comes back with the content and is what a later save hands to the server —
+ * same optimistic-concurrency contract as the workspace. (S9)
+ *
+ * `revision` is a digest of the bytes just read and is the exact half of that
+ * contract: an mtime compare carries a millisecond of slack for the float
+ * round-trip, and two writes landing inside that slack look identical to
+ * it. Sent alongside base_mtime, which older servers still answer. (S05)
  */
 async function openMemoryFile(name, { edit = false } = {}) {
     if (!guardDirty()) return;
@@ -2185,6 +2206,7 @@ async function openMemoryFile(name, { edit = false } = {}) {
             type: 'text',
             name: name + '.md',
             mtime: data.mtime ?? null,
+            revision: data.revision ?? null,
         };
         _state.originalContent = data.content;
         _state.dirty = false;
@@ -2267,6 +2289,9 @@ async function _reloadMemoryFile(container) {
         if (data.error) throw new Error(data.error);
         file.content = data.content;
         file.mtime = data.mtime ?? null;
+        file.revision = data.revision ?? null;
+        file.diskMtime = null;
+        file.diskRevision = null;
         _state.originalContent = file.content;
         _state.dirty = false;
         renderMemory();
@@ -2293,9 +2318,12 @@ async function saveMemoryFile(container, { force = false } = {}) {
 
     try {
         const body = { content };
-        // Overwrite = resend without base_mtime, which is the server's own
+        // Overwrite = resend without a base version, which is the server's own
         // opt-out and therefore literally last-writer-wins again.
-        if (!force && file.mtime != null) body.base_mtime = file.mtime;
+        if (!force) {
+            if (file.revision != null) body.base_revision = file.revision;
+            if (file.mtime != null) body.base_mtime = file.mtime;
+        }
         const resp = await fetch(`/api/memory/files/${encodeURIComponent(file.path)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', ..._authHdr() },
@@ -2304,8 +2332,13 @@ async function saveMemoryFile(container, { force = false } = {}) {
         if (resp.status === 409) {
             let payload = {};
             try { payload = await resp.json(); } catch { /* body is optional */ }
-            if (payload.mtime != null) file.mtime = payload.mtime;
-            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            // The base version stays what this editor read. Adopting the
+            // server's — payload.mtime is the *current disk* version, i.e.
+            // the other writer's — turned the 409 into a one-shot warning:
+            // the next plain save matched, returned 200, and the newer
+            // content died silently. (S05)
+            file.diskMtime = payload.mtime ?? null;
+            file.diskRevision = payload.revision ?? null;
             if (statusEl) {
                 statusEl.className = 'fp-editor-status error';
                 statusEl.textContent = 'Changed on disk';
@@ -2318,7 +2351,13 @@ async function saveMemoryFile(container, { force = false } = {}) {
         }
         if (!resp.ok) throw new Error(await _errorDetail(resp));
         const saved = await resp.json().catch(() => ({}));
+        // The version the server committed for THIS content, not a stat it
+        // took afterwards — so the next save is based on bytes that were
+        // really ours. (S05)
         if (saved.mtime != null) file.mtime = saved.mtime;
+        file.revision = saved.revision ?? null;
+        file.diskMtime = null;
+        file.diskRevision = null;
 
         file.content = content;
         _state.originalContent = content;
@@ -2886,8 +2925,9 @@ async function saveSkill(container, { force = false } = {}) {
         if (resp.status === 409) {
             let payload = {};
             try { payload = await resp.json(); } catch { /* body is optional */ }
-            if (payload.mtime != null) file.mtime = payload.mtime;
-            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            // Same rule as the workspace and memory editors: report the disk
+            // version, never adopt it as this draft's base. (S05)
+            file.diskMtime = payload.mtime ?? null;
             if (statusEl) {
                 statusEl.className = 'fp-editor-status error';
                 statusEl.textContent = 'Changed on disk';
