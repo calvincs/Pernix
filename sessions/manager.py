@@ -750,17 +750,22 @@ class SessionManager:
             await self._limit_goal(session, goal, f"continuation budget spent ({used_cont}/{budget})")
             return
 
-        # A budget_exhausted turn's continuation would inherit the exhausted
-        # LLM session clock and die immediately — synthetic messages don't
-        # get the reset real user messages get. Extend deliberately; the
-        # goal's own budgets are the governing limit now.
-        if session.termination_reason == "budget_exhausted":
-            try:
-                from core.llm.client import extend_session_budget
-
-                extend_session_budget(session.session_id, float(settings.llm_session_timeout))
-            except Exception as _e:
-                logger.warning("Session budget extension failed for goal continuation: %s", _e)
+        # Every continuation inherits the running LLM session clock, whatever
+        # ended the turn before it: a synthetic message gets none of the reset
+        # a real user row gets (_process_pending only resets for entry.msg_id,
+        # and this entry has none by design). So the window has to be opened
+        # here, for round_ceiling and complete as much as for budget_exhausted
+        # — the old branch extended only the last of the three, and a
+        # round-ceiling continuation started on a clock that was already spent.
+        #
+        # Clock-relative, not base-relative. extend_session_budget grants
+        # headroom against the BASE timeout, so a fixed argument is idempotent:
+        # three cycles of "extend by one base timeout" granted [1799s, 0s, 0s],
+        # and a single prior spawn_worker had already installed a larger cap,
+        # which swallowed even the first grant. The ceiling is what keeps this
+        # from being an unlimited self-service bypass — one window per
+        # authorized continuation plus one per worker, capped at 24h.
+        self._renew_continuation_budget(session, budget)
 
         ordinal = used_cont + 1
         await asyncio.to_thread(db.update_goal, goal["id"], continuations_used=ordinal)
@@ -781,6 +786,41 @@ class SessionManager:
             session.session_id[:12],
             session.termination_reason,
         )
+
+    def _renew_continuation_budget(self, session: AgentSession, continuation_budget: int) -> float:
+        """Give the next goal continuation a real window. Returns its headroom.
+
+        The ceiling is the whole point: an active goal is authorization to run
+        `continuation_budget` more phases, not authorization to keep buying
+        wall-clock forever. Once the cumulative cap is reached this grants
+        nothing, the continuation dies on its own acquire, and that death is
+        typed as a time-budget exhaustion rather than a provider failure.
+        """
+        base = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else 0.0
+        if base <= 0:
+            return float("inf")  # 0 = unlimited; there is no window to renew
+        try:
+            from core.llm.client import phase_budget_ceiling, renew_phase_budget
+
+            ceiling = phase_budget_ceiling(base, continuation_budget, len(getattr(session, "worker_ids", ()) or ()))
+            headroom = renew_phase_budget(session.session_id, base, ceiling)
+        except Exception as _e:
+            logger.warning("Session budget renewal failed for goal continuation: %s", _e)
+            return 0.0
+        if headroom <= 0:
+            logger.warning(
+                "Session %s: goal continuation gets no headroom — cumulative " "budget ceiling of %.0fs reached",
+                session.session_id[:12],
+                ceiling,
+            )
+        else:
+            logger.info(
+                "Session %s: goal continuation window renewed — %.0fs headroom (ceiling %.0fs)",
+                session.session_id[:12],
+                headroom,
+                ceiling,
+            )
+        return headroom
 
     async def _limit_goal(self, session: AgentSession, goal: dict, reason: str) -> None:
         await asyncio.to_thread(db.update_goal, goal["id"], status="budget_limited")
@@ -1476,43 +1516,61 @@ class SessionManager:
         except Exception as e:
             logger.error("Agent error in session %s: %s", session.session_id, e, exc_info=True)
             session.error = str(e)
-            current = sv2._current_state(session)
-            if current == sv2.SessionStateV2.SCOUTING:
-                session.termination_reason = "scout_error"
-                try:
-                    sv2.transition(
-                        session,
-                        sv2.SessionStateV2.FINALIZING,
-                        "scout-error",
-                        termination_reason=sv2.TerminationReason.SCOUT_ERROR,
-                    )
-                except Exception as _e:
-                    logger.error("Scout-error transition failed: %s", _e)
-            else:
-                session.termination_reason = "error"
-                try:
-                    sv2.transition(
-                        session,
-                        sv2.SessionStateV2.FINALIZING,
-                        "agent-error",
-                        termination_reason=sv2.TerminationReason.ERROR,
-                    )
-                except Exception as _e:
-                    logger.error("Agent-error transition failed: %s", _e)
-            session.emit_event({"type": "stream.error", "error": str(e)})
-
             # Budget-exhaustion is a special class of error: the user can
             # recover by sending a new message (which resets the wall-clock
-            # budget). Notify them so they know which session needs a nudge,
-            # rather than leaving them to wonder why their conversation went
-            # quiet. Skip for worker sessions — the orchestrator handles
-            # those internally; firing on every worker would spam the user.
+            # budget). Classify it before the state transition, because what
+            # this turn is called decides whether the goal driving it may
+            # continue. A continuation that died on its FIRST acquire was
+            # filed as scout_error — not one of the reasons
+            # _maybe_enqueue_goal_continuation accepts — so the goal stalled
+            # at status=active with its allowance already debited and nothing
+            # left to spend it. The wall it hit was the clock, not the scout.
             try:
                 from core.llm.semaphore import LLMSessionTimeoutError
 
                 is_budget_exhausted = isinstance(e, LLMSessionTimeoutError)
             except Exception:
                 is_budget_exhausted = False
+
+            current = sv2._current_state(session)
+            if current == sv2.SessionStateV2.SCOUTING:
+                session.termination_reason = "budget_exhausted" if is_budget_exhausted else "scout_error"
+                try:
+                    sv2.transition(
+                        session,
+                        sv2.SessionStateV2.FINALIZING,
+                        # The edge is still "the turn died during scout" —
+                        # only the classification of WHY changes.
+                        "scout-error",
+                        termination_reason=(
+                            sv2.TerminationReason.BUDGET_EXHAUSTED
+                            if is_budget_exhausted
+                            else sv2.TerminationReason.SCOUT_ERROR
+                        ),
+                    )
+                except Exception as _e:
+                    logger.error("Scout-error transition failed: %s", _e)
+            else:
+                session.termination_reason = "budget_exhausted" if is_budget_exhausted else "error"
+                try:
+                    sv2.transition(
+                        session,
+                        sv2.SessionStateV2.FINALIZING,
+                        "agent-error",
+                        termination_reason=(
+                            sv2.TerminationReason.BUDGET_EXHAUSTED
+                            if is_budget_exhausted
+                            else sv2.TerminationReason.ERROR
+                        ),
+                    )
+                except Exception as _e:
+                    logger.error("Agent-error transition failed: %s", _e)
+            session.emit_event({"type": "stream.error", "error": str(e)})
+
+            # Notify the user so they know which session needs a nudge, rather
+            # than leaving them to wonder why their conversation went quiet.
+            # Skip for worker sessions — the orchestrator handles those
+            # internally; firing on every worker would spam the user.
             if is_budget_exhausted and session.session_type != "worker":
                 _broadcast_session_timeout_notification(session)
         finally:
