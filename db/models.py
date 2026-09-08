@@ -2746,6 +2746,189 @@ def total_token_usage_since(since_iso: str) -> int:
         return int(row["t"]) if row else 0
 
 
+# ---------------------------------------------------------------------------
+# Goal continuation outbox (harness review 3.2.1 / H12)
+# ---------------------------------------------------------------------------
+#
+# The debit was durable and the dispatch was not: continuations_used was
+# written, then a synthetic PendingMessage was appended to an in-memory deque
+# that nothing persists, and no boot path swept for the difference. A crash in
+# between spent the allowance and ran nothing.
+#
+# These four functions are the whole outbox: enqueue (debit + insert in ONE
+# transaction), claim (take ownership durably), settle (record what happened),
+# recover (find rows a dead process left behind). Recovery is deliberately not
+# a replay: a row left in `claimed` may have executed shell commands or written
+# files, so it comes back marked `recovered` and its dispatcher prepends a
+# verify-before-repeating instruction rather than re-running anything.
+
+CONTINUATION_RECOVERY_LIMIT = 3
+
+
+def enqueue_goal_continuation(
+    session_id: str,
+    goal_id: int,
+    budget: int,
+    prompt_for,
+    checkpoint: str | None = None,
+) -> dict | None:
+    """Debit one continuation and enqueue it, atomically. None if refused.
+
+    Refused when the goal is no longer active or its continuation allowance is
+    spent — checked inside the same BEGIN IMMEDIATE that writes the debit, so
+    two racing finalizers cannot both allocate ordinal N. The UNIQUE index on
+    (goal_id, ordinal) is the backstop if one ever slips past on another
+    connection: the INSERT raises and this returns None rather than
+    double-spending. Same explicit-transaction pattern as create_goal.
+
+    `prompt_for(ordinal, budget)` builds the user-visible text; it is called
+    inside the transaction so the wording can name the ordinal it was actually
+    allocated. `checkpoint` is a bounded reference to where the work stood —
+    what recovery re-reads instead of trusting a bare "continue" instruction.
+    """
+    with connect_sessions() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            goal = conn.execute(
+                "SELECT * FROM session_goals WHERE id = ? AND session_id = ?",
+                (goal_id, session_id),
+            ).fetchone()
+            if not goal or goal["status"] != "active":
+                conn.execute("ROLLBACK")
+                return None
+            used = int(goal["continuations_used"] or 0)
+            if budget <= 0 or used >= budget:
+                conn.execute("ROLLBACK")
+                return None
+            ordinal = used + 1
+            prompt = prompt_for(ordinal, budget)
+            conn.execute(
+                "UPDATE session_goals SET continuations_used = ?, updated_at = ? WHERE id = ?",
+                (ordinal, _now(), goal_id),
+            )
+            cur = conn.execute(
+                "INSERT INTO goal_continuations "
+                "(goal_id, session_id, ordinal, status, prompt, checkpoint, created_at) "
+                "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+                (goal_id, session_id, ordinal, prompt, checkpoint, _now()),
+            )
+            row_id = cur.lastrowid
+            conn.execute("COMMIT")
+            return {
+                "id": row_id,
+                "goal_id": goal_id,
+                "session_id": session_id,
+                "ordinal": ordinal,
+                "prompt": prompt,
+                "checkpoint": checkpoint,
+                "recovered": 0,
+            }
+        except sqlite3.IntegrityError:
+            conn.execute("ROLLBACK")
+            logger.warning("Goal #%s: continuation ordinal collision — not double-debiting", goal_id)
+            return None
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def claim_goal_continuation(continuation_id: int) -> dict | None:
+    """Take durable ownership of a pending continuation. None if someone else
+    already has it (or it was settled) — a duplicate dispatch attempt loses
+    here rather than starting a second turn for the same ordinal."""
+    with connect_sessions() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                "UPDATE goal_continuations SET status = 'claimed', claimed_at = ?, "
+                "attempts = attempts + 1 WHERE id = ? AND status = 'pending'",
+                (_now(), continuation_id),
+            )
+            if cur.rowcount != 1:
+                conn.execute("ROLLBACK")
+                return None
+            row = conn.execute("SELECT * FROM goal_continuations WHERE id = ?", (continuation_id,)).fetchone()
+            conn.execute("COMMIT")
+            return dict(row) if row else None
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def settle_goal_continuation(continuation_id: int, status: str, outcome: str | None = None) -> None:
+    """Record how a claimed continuation ended: 'dispatched' or 'abandoned'."""
+    if status not in ("dispatched", "abandoned"):
+        raise ValueError(f"not a settlement status: {status}")
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE goal_continuations SET status = ?, outcome = ?, settled_at = ? "
+            "WHERE id = ? AND status IN ('pending', 'claimed')",
+            (status, outcome, _now(), continuation_id),
+        )
+
+
+def get_goal_continuation(continuation_id: int) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM goal_continuations WHERE id = ?", (continuation_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def recover_abandoned_continuations() -> list[dict]:
+    """Rows a dead process left mid-flight, ready to be re-offered. Startup only.
+
+    Two shapes, and the difference matters:
+
+    `pending` — debited, never claimed. The turn cannot have started, so
+    nothing was executed and the row goes back out unchanged.
+
+    `claimed` — a dispatcher owned it when the process died. Whether it ran a
+    shell command, wrote a file or called out is UNKNOWN, so it is returned
+    to `pending` with `recovered = 1`. Its dispatcher prepends an instruction
+    to re-read receipts and artifacts and continue from observed state; the
+    harness replays nothing by itself. Same posture as
+    reconcile_uncertain_cron_runs: report it, don't guess, don't re-send.
+
+    A row that has been recovered CONTINUATION_RECOVERY_LIMIT times is
+    abandoned instead — a crash loop must not replay forever.
+    """
+    with connect_sessions() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM goal_continuations WHERE status IN ('pending', 'claimed') ORDER BY id"
+                ).fetchall()
+            ]
+            live: list[dict] = []
+            for row in rows:
+                if int(row["attempts"] or 0) >= CONTINUATION_RECOVERY_LIMIT:
+                    conn.execute(
+                        "UPDATE goal_continuations SET status = 'abandoned', outcome = ?, settled_at = ? "
+                        "WHERE id = ?",
+                        (
+                            f"abandoned after {row['attempts']} recovery attempts — "
+                            "the process died on this continuation every time",
+                            _now(),
+                            row["id"],
+                        ),
+                    )
+                    continue
+                if row["status"] == "claimed":
+                    conn.execute(
+                        "UPDATE goal_continuations SET status = 'pending', recovered = 1 WHERE id = ?",
+                        (row["id"],),
+                    )
+                    row["recovered"] = 1
+                    row["status"] = "pending"
+                live.append(row)
+            conn.execute("COMMIT")
+            return live
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
 def reconcile_orphan_goals() -> int:
     """Goals whose session row no longer exists -> error (startup sweep)."""
     with connect_sessions() as conn:

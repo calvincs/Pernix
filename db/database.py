@@ -1175,6 +1175,53 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_worker_manifests_archived ON worker_result_manifests(archived_at)",
         ],
     ),
+    (
+        39,
+        "goal continuation outbox: a debited continuation survives the crash that debited it",
+        [
+            # A goal continuation was debited durably (session_goals.
+            # continuations_used) and then dispatched from an in-memory deque.
+            # A crash between the two spent the allowance and ran nothing, and
+            # no boot path swept for it — the orphan sweep runs only at turn
+            # finalization or inside prompt(), so unattended operation stalled
+            # silently with the budget drained (measured: three cycles, zero
+            # continuations executed).
+            #
+            # The debit and the enqueue are now one transaction against this
+            # table. (goal_id, ordinal) is UNIQUE: that index is what makes a
+            # double debit impossible, whatever races or retries occur.
+            #
+            # status is the dispatch lifecycle:
+            #   pending    debited, nobody owns it yet — safe to dispatch
+            #   claimed    a dispatcher owns it; its side effects are UNKNOWN
+            #   dispatched the turn actually started
+            #   abandoned  settled without running (goal paused, user cancelled,
+            #              queued user direction, recovery limit)
+            # `recovered` marks a row that came back from a dead claim, so the
+            # prompt it is re-dispatched with tells the agent to verify state
+            # before repeating anything. Durable dispatch is not exactly-once
+            # side effects: a claimed row is never blindly replayed.
+            """CREATE TABLE IF NOT EXISTS goal_continuations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','claimed','dispatched','abandoned')),
+                prompt TEXT NOT NULL,
+                checkpoint TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                recovered INTEGER NOT NULL DEFAULT 0,
+                outcome TEXT,
+                created_at TEXT NOT NULL,
+                claimed_at TEXT,
+                settled_at TEXT
+            )""",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_continuations_ordinal "
+            "ON goal_continuations(goal_id, ordinal)",
+            "CREATE INDEX IF NOT EXISTS idx_goal_continuations_open " "ON goal_continuations(status, session_id)",
+        ],
+    ),
 ]
 
 
