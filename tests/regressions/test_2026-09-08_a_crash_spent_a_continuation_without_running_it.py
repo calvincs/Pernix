@@ -17,7 +17,7 @@ continuations ever executed. And the boot path has no orphan sweep at all —
 to IDLE_READY and dispatch nothing — so even a continuation that HAD reached
 the DB waited for a human to send a new message.
 
-The fix is a small outbox at schema v37: the status/allowance check, the
+The fix is a small outbox at schema v39: the status/allowance check, the
 ordinal allocation and the insert are one transaction; dispatch takes a
 durable claim and settles it; boot recovers what a dead process left behind.
 
@@ -433,11 +433,19 @@ def test_the_outbox_refuses_what_the_goal_no_longer_authorizes(goal_session):
     assert db.enqueue_goal_continuation(other, goal_session.gid, 3, _prompt) is None
 
 
-def test_the_schema_is_at_version_37():
+def test_the_outbox_migration_is_present_and_the_list_stays_ordered():
+    """The runner skips any version <= the DB's current one, so a MIGRATIONS
+    list that is not ascending silently drops an entry on every existing
+    database. Four migrations landed in one batch here; this pins the ordering
+    invariant rather than the outbox's absolute number, which is merge-order
+    dependent and says nothing on its own."""
     from db.database import MIGRATIONS
 
-    assert MIGRATIONS[-1][0] == 37
-    assert "continuation" in MIGRATIONS[-1][1]
+    versions = [m[0] for m in MIGRATIONS]
+    assert versions == sorted(versions), f"MIGRATIONS out of order: {versions}"
+    assert len(versions) == len(set(versions)), f"duplicate migration version: {versions}"
+    outbox = [m for m in MIGRATIONS if "goal continuation outbox" in m[1]]
+    assert len(outbox) == 1, "the continuation outbox migration is missing"
 
 
 def test_migration_v37_adds_the_outbox_to_a_v36_database(tmp_path, monkeypatch):
