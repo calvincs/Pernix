@@ -182,8 +182,19 @@ class _FakeClient:
     def get(self, url):
         return _FakeResp(self.page)
 
-    def stream(self, method, url):
+    def stream(self, method, url, timeout=None):
         return _FakeResp(self.page)
+
+
+def _ok(url: str, size: int) -> dict:
+    """The status dict a whole, uncapped fetch returns (2026-09-08, H17)."""
+    return {
+        "fetch_status": "ok",
+        "url": url,
+        "source_complete": True,
+        "captured_bytes": size,
+        "artifact": "",
+    }
 
 
 @pytest.fixture
@@ -194,8 +205,9 @@ def offline_http(monkeypatch):
 
 def test_http_get_skips_bad_domain_before_fetching(bridge, offline_http):
     bridge.prediction = {"p": 0.20, "observations": 30}
-    out = web.http_get("https://forbes.com/article")
+    out, status = web.http_get("https://forbes.com/article")
     assert out.startswith("Skipped:")
+    assert status["fetch_status"] == "refused"
     # The refusal is not an attempt — nothing may be recorded against the domain.
     assert bridge.recorded == []
 
@@ -203,8 +215,9 @@ def test_http_get_skips_bad_domain_before_fetching(bridge, offline_http):
 def test_http_get_force_overrides_reroute(bridge, offline_http):
     bridge.prediction = {"p": 0.20, "observations": 30}
     _FakeClient.page = "real content"
-    out = web.http_get("https://forbes.com/article", force=True)
+    out, status = web.http_get("https://forbes.com/article", force=True)
     assert out == "real content"
+    assert status["fetch_status"] == "ok"
     assert len(bridge.recorded) == 1
     assert all(o["outcome"] is True for o in bridge.recorded[0])
 
@@ -212,7 +225,7 @@ def test_http_get_force_overrides_reroute(bridge, offline_http):
 def test_http_get_records_success(bridge, offline_http):
     bridge.prediction = None  # no admitted fact yet — first contact
     _FakeClient.page = "a normal page"
-    assert web.http_get("https://example.com/") == "a normal page"
+    assert web.http_get("https://example.com/") == ("a normal page", _ok("https://example.com/", 13))
     assert len(bridge.recorded) == 1
     assert all(o["outcome"] is True for o in bridge.recorded[0])
 
@@ -221,7 +234,7 @@ def test_http_get_records_bot_wall_as_failure(bridge, offline_http):
     # Bot walls answer 200 with challenge HTML — that is a failed fetch.
     bridge.prediction = None
     _FakeClient.page = "<html>Checking your browser before accessing…</html>"
-    out = web.http_get("https://example.com/")
+    out, _ = web.http_get("https://example.com/")
     assert "Checking your browser" in out
     assert len(bridge.recorded) == 1
     assert all(o["outcome"] is False for o in bridge.recorded[0])
@@ -231,12 +244,13 @@ def test_http_get_records_http_error_as_failure(bridge, offline_http, monkeypatc
     bridge.prediction = None
 
     class _ErrClient(_FakeClient):
-        def stream(self, method, url):
+        def stream(self, method, url, timeout=None):
             raise RuntimeError("boom 503")
 
     monkeypatch.setattr("httpx.Client", _ErrClient)
-    out = web.http_get("https://example.com/")
+    out, status = web.http_get("https://example.com/")
     assert out.startswith("Error fetching")
+    assert status["fetch_status"] == "error"
     assert len(bridge.recorded) == 1
     assert all(o["outcome"] is False for o in bridge.recorded[0])
 
@@ -247,8 +261,9 @@ def test_http_get_policy_block_records_nothing(bridge, monkeypatch):
         raise ValueError("Blocked: host resolves to a private/internal address")
 
     monkeypatch.setattr(web, "_validate_url", _blocked)
-    out = web.http_get("https://internal.corp/")
+    out, status = web.http_get("https://internal.corp/")
     assert out.startswith("Error:")
+    assert status["fetch_status"] == "refused"
     assert bridge.recorded == []
 
 
