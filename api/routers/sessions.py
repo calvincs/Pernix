@@ -296,12 +296,19 @@ async def session_events(session_id: str, request: Request):
     # Query-param fallback exists because JS-instantiated EventSource (used by
     # the client's stale-stream watchdog) cannot set request headers; without
     # this fallback every watchdog reconnect would skip replay and lose events.
-    last_id = 0
-    raw = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id", "0")
-    try:
-        last_id = int(raw)
-    except (ValueError, TypeError):
-        pass
+    #
+    # Absent and "0" are DIFFERENT requests (api/streaming.event_stream): no
+    # cursor means "just join me to the live stream", while an explicit 0 means
+    # "replay everything you still retain". Defaulting the missing case to "0"
+    # made them indistinguishable and left the initial connection unable to
+    # ask for replay at all.
+    raw = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id")
+    last_id: int | None = None
+    if raw is not None:
+        try:
+            last_id = max(0, int(raw))
+        except (ValueError, TypeError):
+            last_id = None
 
     return sse_response(event_stream(session, last_event_id=last_id))
 
