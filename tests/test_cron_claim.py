@@ -6,10 +6,12 @@ disk BEFORE the prompt is dispatched; a crash anywhere after surfaces as an
 across downtime coalesce into at most one catch-up run per job.
 """
 
+import asyncio
 from datetime import datetime, timezone
 
 import core.extensions.scheduling as sched
 from db import models as db
+from sessions import state_v2 as sv2
 
 # ---------------------------------------------------------------------------
 # DB layer
@@ -324,3 +326,136 @@ async def test_execute_cron_job_claims_before_prompt(monkeypatch):
     # resolved id must be back-filled or the History link stays NULL forever.
     assert final["session_id"]
     assert mgr.get(final["session_id"]) is not None
+
+
+async def test_execute_cron_job_error_path(monkeypatch):
+    """A turn that raises is recorded, not raised: _run_agent_safe swallows it."""
+
+    async def runner(session_id, message, session, **kw):
+        raise RuntimeError("boom")
+
+    _cron_env(monkeypatch, runner)
+
+    meta = {"name": "err-job", "prompt": "run it", "session_id": None, "model": ""}
+    await sched._execute_cron_job(meta)
+
+    final = db.list_cron_runs("err-job")[0]
+    assert final["status"] == "error"
+    assert "boom" in final["error"]
+
+
+async def test_execute_cron_job_records_a_refusal_as_a_failure(monkeypatch):
+    """A full queue is a job that did not run. It used to read 'completed'."""
+    monkeypatch.setattr("config.settings.max_pending_messages", 1)
+    mgr = _cron_env(monkeypatch)
+    sid = mgr.create_session(title="busy")
+    session = mgr.get(sid)
+    from sessions.state import PendingMessage
+
+    session._state_v2 = sv2.SessionStateV2.PROCESSING
+    session.pending_messages.append(PendingMessage("already queued", ""))
+
+    meta = {"name": "full-job", "prompt": "run it", "session_id": sid, "model": ""}
+    await sched._execute_cron_job(meta)
+
+    final = db.list_cron_runs("full-job")[0]
+    assert final["status"] == "error"
+    assert "queue_full" in final["error"]
+
+
+async def test_execute_cron_job_waits_for_the_turn_it_queued(monkeypatch):
+    """Queued behind a live turn: completion is the QUEUED turn's, not the wait's."""
+    mgr = _cron_env(monkeypatch)
+    sid = mgr.create_session(title="busy")
+    session = mgr.get(sid)
+    first_running = asyncio.Event()
+    release_first = asyncio.Event()
+    ran = []
+
+    async def runner(session_id, message, session, **kw):
+        ran.append(message)
+        # A real turn leaves an assistant row behind; without one the
+        # post-turn orphan sweep re-queues the message it just answered.
+        db.add_message(session_id, "assistant", f"done: {message}")
+        if len(ran) == 1:
+            first_running.set()
+            await release_first.wait()
+
+    mgr.set_agent_runner(runner)
+    await mgr.prompt(sid, "the user's own request")
+    await first_running.wait()
+    session.last_user_msg_at -= 60  # outside the rapid-fire window
+
+    meta = {"name": "queued-job", "prompt": "the job's work", "session_id": sid, "model": ""}
+    job = asyncio.create_task(sched._execute_cron_job(meta))
+    while not session.pending_messages:
+        await asyncio.sleep(0)
+    # Still queued: nothing terminal may be written yet.
+    assert db.list_cron_runs("queued-job")[0]["status"] == "running"
+
+    release_first.set()
+    await asyncio.wait_for(job, timeout=10)
+
+    assert ran == ["the user's own request", "the job's work"]
+    assert db.list_cron_runs("queued-job")[0]["status"] == "completed"
+
+
+async def test_execute_cron_job_leaves_an_unfinished_run_running(monkeypatch):
+    """A wait that expired is not an outcome. The row keeps the one true status."""
+    monkeypatch.setattr("config.settings.cron_dispatch_timeout", 0.2)
+    mgr = _cron_env(monkeypatch)
+    running = asyncio.Event()
+    release = asyncio.Event()
+
+    async def runner(session_id, message, session, **kw):
+        running.set()
+        await release.wait()
+
+    mgr.set_agent_runner(runner)
+
+    meta = {"name": "slow-job", "prompt": "run it", "session_id": None, "model": ""}
+    await sched._execute_cron_job(meta)
+    await running.wait()
+
+    row = db.list_cron_runs("slow-job")[0]
+    assert row["status"] == "running", "a job still going must not report completion"
+    assert not row["completed_at"]
+
+    # And the deferred watcher settles it from the execution's real result.
+    release.set()
+    for _ in range(500):
+        if db.list_cron_runs("slow-job")[0]["status"] != "running":
+            break
+        await asyncio.sleep(0.01)
+    assert db.list_cron_runs("slow-job")[0]["status"] == "completed"
+
+
+async def test_an_unfinished_run_that_never_settles_is_uncertain_after_a_restart(monkeypatch):
+    """Crash uncertainty is preserved: 'running' at boot means unknown, never replayed."""
+    monkeypatch.setattr("config.settings.cron_dispatch_timeout", 0.2)
+    mgr = _cron_env(monkeypatch)
+    running = asyncio.Event()
+    release = asyncio.Event()
+
+    async def runner(session_id, message, session, **kw):
+        running.set()
+        await release.wait()
+
+    mgr.set_agent_runner(runner)
+
+    meta = {"name": "crash-job", "prompt": "run it", "session_id": None, "model": ""}
+    await sched._execute_cron_job(meta)
+    await running.wait()
+    assert db.list_cron_runs("crash-job")[0]["status"] == "running"
+
+    # The process dies here. Next boot reconciles.
+    affected = db.reconcile_uncertain_cron_runs()
+    assert any(r["job_name"] == "crash-job" for r in affected)
+    row = db.list_cron_runs("crash-job")[0]
+    assert row["status"] == "uncertain"
+    assert "not replayed" in row["error"]
+
+    release.set()
+    session = mgr.get(row["session_id"])
+    if session is not None and session.task is not None:
+        await asyncio.wait({session.task})
