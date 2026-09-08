@@ -85,6 +85,7 @@ RULES:
 - TRUST THE PLAN: If the evidence includes ACTIVE SKILL / PLANNED APPROACH / TOOL RATIONALE, treat those as the contract the agent was given. If the agent followed the planned approach using the planned tools, do NOT call hallucination just because the tools look "generic" (e.g. browse_web). Skills routinely mandate generic tools — that's expected, not a failure. Only flag hallucination when the agent invented data with no supporting tool calls AND the plan called for a tool that wasn't run.
 - Use the TOOL EXECUTION SUMMARY to identify failure patterns. If a tool failed 2+ times with the same error, the retry strategy MUST suggest a different tool or approach.
 - SELF-REPORTED COUNTS ARE NOT A RUBRIC INPUT: the agent cannot see the TOOL EXECUTION SUMMARY and, on a retry, cannot see prior attempts' totals — so a mismatch between the agent's own stated tool count and the summary is NOT, by itself, dishonesty or a retry cause. Grade what the agent DID against the summary and transcript; ignore its arithmetic about itself. (Actual misuse of a forbidden tool remains gradeable — from the summary, not from the agent's count.)
+- THE SUMMARY LISTS TOOLS, NOT PROGRAMS. A test suite, build, linter or script run through `bash`/`repl` has NO row of its own — the summary says "bash: 12 call(s)", never "pytest". Absence of a program from the TOOL EXECUTION SUMMARY is therefore NEVER evidence that it did not run. To check whether a command ran, read the COMMANDS RUN THIS ATTEMPT section and the transcript's tool results. Writing "the summary records zero pytest calls" about a turn whose transcript contains a pytest result is a verifier-side correctness failure.
 - TOOL CALL FACTS ARE NOT NEGOTIABLE. The TOOL EXECUTION SUMMARY is observed truth, not interpretation. Before claiming the agent did NOT use a tool, verify: if the tool name appears in the summary with calls > 0, the agent DID call it. Do NOT write "agent did not call X" or "agent failed to use X" or "X was skipped" if X.calls > 0 in the summary. If you believe the call was *ineffective* (tool ran but didn't produce the expected result), say that — but do not deny the call happened. Hallucinating absence of a call that the summary records as present is a verifier-side correctness failure.
 - REFUSALS ARE NOT FAILURES: "policy refusal(s)" and REFUSED lines in the summary are the harness declining a call (job allow-list, retry exclusion, disabled tool, approval gate). They say nothing about the tool's reliability and must never be written up as "the tool failed" or as an env problem. They DO show the agent called a tool it was told not to use: grade that as a rule breach only when the user or the job charter forbade it; otherwise note it in what_failed and move on.
 - A REQUIREMENT ATTRIBUTED TO THE USER MUST QUOTE THE USER: before a non-pass verdict says "the user asked for X" or "the user explicitly called out X", find X in USER REQUEST (or a TURN SCOPE block) and quote it in reasoning. A requirement that appears only in SCOUT DELIVERABLES PLAN, PLANNED APPROACH or TOOL RATIONALE is the planner's, not the user's — by the plan-literalism rule above it cannot justify retry or escalate. Field case: a deferred escalate on a correct reply cited two memory entries "the user explicitly called out" that appeared only in the scout plan.
@@ -660,6 +661,70 @@ def _build_attempt_transcript_section(
     return "\n\n---\n\n".join(kept)
 
 
+# Tools whose real work is a program the summary never names: the tool row
+# says "bash: 12 calls", not that one of them ran the test suite.
+_SHELL_TOOLS = ("bash", "repl", "job_start")
+
+
+def _commands_run_section(attempt_msgs: list[dict]) -> str:
+    """What the shell tools actually RAN this attempt, with their result tails.
+
+    The TOOL EXECUTION SUMMARY lists tool names and counts. A test suite,
+    build or linter invoked through `bash` therefore has no row of its own,
+    and a grader reading that summary can find no evidence a program ran.
+    One did exactly that (Agent Mesh build, 2026-09-08): the agent ran pytest
+    twice and got "155 passed" both times, both results sitting in the graded
+    slice, and reflect returned `retry` on the grounds that no pytest call
+    appeared in the summary — then raised a high-urgency alert saying the
+    build was unverified.
+
+    Commands are the fact the summary cannot carry, so they get their own
+    section. The tail line is included because for a test run it IS the
+    result.
+    """
+    results_by_id: dict[str, str] = {}
+    for m in attempt_msgs:
+        if m.get("role") == "tool" and m.get("tool_call_id"):
+            results_by_id[m["tool_call_id"]] = m.get("content") or ""
+
+    entries: list[str] = []
+    for m in attempt_msgs:
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        try:
+            calls = json.loads(m["tool_calls"])
+        except (ValueError, TypeError):
+            continue
+        for tc in calls or []:
+            fn = tc.get("function") or tc
+            name = fn.get("name") or ""
+            if name not in _SHELL_TOOLS:
+                continue
+            try:
+                args = fn.get("arguments")
+                args = json.loads(args) if isinstance(args, str) else (args or {})
+            except (ValueError, TypeError):
+                args = {}
+            body = args.get("command") or args.get("code") or ""
+            if not isinstance(body, str) or not body.strip():
+                continue
+            head = " ".join(body.split())[:200]
+            tail = ""
+            raw = results_by_id.get(tc.get("id") or "", "")
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            if lines:
+                tail = lines[-1][:200]
+            entries.append(f"- {name}: {head}" + (f"\n    -> {tail}" if tail else ""))
+
+    if not entries:
+        return ""
+    return (
+        "COMMANDS RUN THIS ATTEMPT (what the shell tools executed, with the last "
+        "line each returned — these are observed facts, same standing as the tool "
+        "summary):\n" + "\n".join(entries[:40])
+    )
+
+
 def _build_compact_evidence(
     session_id: str,
     user_request: str,
@@ -846,6 +911,13 @@ def _build_compact_evidence(
         else:
             cur_lines.append("(no tool calls this attempt)")
         parts.append("\n".join(cur_lines))
+
+    # What the shell tools actually ran. Sits beside the tool summary because
+    # it carries the fact the summary structurally cannot: which program was
+    # invoked inside a `bash` call, and what it printed.
+    _commands = _commands_run_section(_messages_since_attempt_start(messages, turn_user_msg_id))
+    if _commands:
+        parts.append(_commands)
 
     # User's ask (echoed) so reflect anchors against the original goal even when
     # the transcript scrolls through tool calls.
