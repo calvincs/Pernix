@@ -232,20 +232,149 @@ async def prune_sessions_of_type(
     return pruned
 
 
-async def prune_worker_sessions(retention_days: int | None = None) -> int:
-    """Worker sessions past worker_session_retention_days, except any a
-    parent is still waiting on. The worker's result already lives in the
-    parent's transcript; the worker transcript is debugging residue."""
-    days = retention_days if retention_days is not None else settings.worker_session_retention_days
+_MANIFEST_RESULT_CHARS = 20_000
+
+
+def _worker_result_manifest(worker_id: str, workspace: Path) -> dict:
+    """Everything worth keeping about one worker, gathered before deletion.
+
+    The old digest kept `id "title" (last active <date>)`. That is enough to
+    know a worker existed and nothing at all about what it found — and for a
+    worker whose report the parent never collected, the transcript this sweep
+    deletes is the only copy there was.
+
+    The result is taken from the same places get_worker_result reads, in the
+    same order, so the manifest holds what the parent would have been served.
+    The workspace summary file survives a DB delete on its own; the last
+    assistant message does not, and that is the case this exists for.
+    """
+    row = db.get_session(worker_id) or {}
+    result, source = "", "none"
+    summary = workspace / f".worker_{worker_id[:12]}_summary.md"
     try:
-        keep = await asyncio.to_thread(db.watched_worker_ids)
-        pruned = await prune_sessions_of_type("worker", days, keep=keep, digest_label="worker")
+        if summary.exists():
+            result, source = summary.read_text(), f"workspace summary ({summary.name})"
+    except OSError as e:
+        logger.warning("Worker manifest: could not read %s: %s", summary, e)
+    if not result:
+        try:
+            for m in reversed(db.get_messages(worker_id)):
+                if m.get("role") == "assistant" and m.get("content"):
+                    result, source = m["content"], "final assistant message"
+                    break
+        except Exception as e:
+            logger.warning("Worker manifest: could not read messages for %s: %s", worker_id, e)
+    try:
+        recent = db.recent_termination_reasons(worker_id, 1)
+        term = recent[0] if recent else None
+    except Exception:
+        term = None
+    if len(result) > _MANIFEST_RESULT_CHARS:
+        result = (
+            result[:_MANIFEST_RESULT_CHARS]
+            + f"\n[manifest truncated at {_MANIFEST_RESULT_CHARS:,} of {len(result):,} chars]"
+        )
+    return {
+        "worker_id": worker_id,
+        "parent_session_id": row.get("parent_session_id"),
+        "title": row.get("title") or "",
+        "worker_kind": row.get("worker_kind"),
+        "created_at": row.get("created_at"),
+        "last_active_at": row.get("updated_at"),
+        "termination_reason": term,
+        "result": result,
+        "result_source": source,
+        "archived_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def prune_worker_sessions(retention_days: int | None = None) -> int:
+    """Delete worker TRANSCRIPTS whose work has come to rest.
+
+    The rationale this sweep used to carry — "the worker's result already
+    lives in the parent's transcript" — holds exactly when the parent
+    collected it, and the sweep had no way of knowing whether it had. So it
+    deleted on age: a paused long-research worker, one waiting on an answer,
+    and a finished report nobody had read all went at 30 days, and afterwards
+    the parent was told the worker "produced no output".
+
+    Age is now a precondition rather than the test.
+    ``list_prunable_worker_ids`` answers whether the work reached a resting
+    place; this function makes the result durable before the transcript goes,
+    and a failed archive cancels that deletion instead of being logged past.
+    """
+    days = max(int((retention_days if retention_days is not None else settings.worker_session_retention_days) or 0), 1)
+    horizon = max(int(getattr(settings, "worker_abandoned_after_days", 180) or 0), days)
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=days)).isoformat()
+    horizon_cutoff = (now - timedelta(days=horizon)).isoformat()
+    workspace = Path(settings.workspace_dir)
+
+    try:
+        ids = await asyncio.to_thread(db.list_prunable_worker_ids, cutoff, horizon_cutoff)
     except Exception as e:
         logger.warning("Snooze worker-session cleanup failed: %s", e)
         return 0
+
+    prunable = set(ids)
+    pruned = 0
+    for sid in ids:
+        # delete_session cascades into child sessions, so pruning a lead
+        # worker would take a still-paused sub-worker with it — protection
+        # that only holds at the top of a tree is not protection.
+        try:
+            children = await asyncio.to_thread(db.get_worker_sessions, sid)
+        except Exception as e:
+            logger.warning("Retention: could not list children of worker %s: %s", sid, e)
+            continue
+        held = [c["id"] for c in children if c["id"] not in prunable]
+        if held:
+            logger.info("Retention: keeping worker %s — %d child session(s) still held", sid, len(held))
+            continue
+
+        try:
+            manifest = await asyncio.to_thread(_worker_result_manifest, sid, workspace)
+            await asyncio.to_thread(db.upsert_worker_manifest, manifest)
+        except Exception as e:
+            # Archive failure PREVENTS the prune. The transcript survives to
+            # the next sweep; a day of disk costs less than the work does.
+            logger.warning("Retention: archiving worker %s failed, keeping its transcript: %s", sid, e)
+            continue
+
+        try:
+            await asyncio.to_thread(db.delete_session, sid)
+            pruned += 1
+        except Exception as e:
+            logger.warning("Retention: could not delete worker session %s: %s", sid, e)
+
     if pruned:
-        logger.info("Snooze worker cleanup: %d worker session(s) older than %dd", pruned, max(int(days or 0), 1))
+        logger.info(
+            "Snooze worker cleanup: %d worker transcript(s) archived and deleted (window %dd, horizon %dd)",
+            pruned,
+            days,
+            horizon,
+        )
     return pruned
+
+
+def prune_worker_manifests(retention_days: int | None = None) -> int:
+    """Expire result manifests on their own, much longer, window.
+
+    Transcript retention and result retention are different questions: the
+    transcript is a debugging artifact measured in megabytes, the manifest is
+    the last record of what the work produced. Tying them to one number is
+    what made "prune the transcript" mean "lose the finding".
+    """
+    days = max(int(retention_days if retention_days is not None else settings.worker_result_manifest_retention_days), 1)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        deleted = db.delete_worker_manifests_before(cutoff)
+    except Exception as e:
+        logger.warning("Worker manifest cleanup failed: %s", e)
+        return 0
+    if deleted:
+        logger.info("Worker manifest cleanup: %d manifest(s) older than %dd", deleted, days)
+    return deleted
 
 
 _TERMINAL_HYPOTHESIS_STATUSES = ("refuted", "expired", "archived", "promoted")

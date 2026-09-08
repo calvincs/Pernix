@@ -1445,6 +1445,10 @@ Output valid JSON only. No markdown fences. /no_think"""
         await retention.prune_canary_runs()
         await retention.nudge_stale_canaries()
         self._bump("worker_sessions_pruned", await retention.prune_worker_sessions())
+        # The result manifests those transcripts leave behind, on their own
+        # much longer window — a worker's transcript is debugging residue, its
+        # result is the work.
+        self._bump("worker_manifests_pruned", await asyncio.to_thread(retention.prune_worker_manifests))
         self._bump("dream_hypotheses_pruned", await asyncio.to_thread(retention.prune_dream_hypotheses))
 
     async def _archive_idle_sessions(self) -> None:

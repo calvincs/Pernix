@@ -1130,7 +1130,7 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
         ],
     ),
     (
-        38,
+        37,
         "distillation coverage watermark: the newest message already distilled",
         [
             # Distillation ran at the end of EVERY turn over the whole
@@ -1142,6 +1142,37 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             # every existing row — a re-read of already-covered material is
             # wasteful, never wrong.
             "ALTER TABLE sessions ADD COLUMN distilled_up_to INTEGER NOT NULL DEFAULT 0",
+        ],
+    ),
+    (
+        38,
+        "worker retention: result consumption, abandonment, and a durable result manifest",
+        [
+            # Worker pruning selected on session_type and age alone. These two
+            # columns are the lifecycle facts it was missing: when a parent
+            # actually READ the result (get_worker_result), and when the task
+            # was explicitly given up on (cancel_worker). Until one of them is
+            # set, an aged worker is unfinished business, not residue.
+            "ALTER TABLE sessions ADD COLUMN result_consumed_at TEXT",
+            "ALTER TABLE sessions ADD COLUMN abandoned_at TEXT",
+            # Written BEFORE the transcript is deleted and outliving it by its
+            # own retention window. The old distill-before-delete digest kept
+            # id, title and date — enough to know a worker existed, not enough
+            # to recover a single finding it reported.
+            """CREATE TABLE IF NOT EXISTS worker_result_manifests (
+                worker_id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                title TEXT NOT NULL DEFAULT '',
+                worker_kind TEXT,
+                created_at TEXT,
+                last_active_at TEXT,
+                termination_reason TEXT,
+                result TEXT NOT NULL DEFAULT '',
+                result_source TEXT NOT NULL DEFAULT '',
+                archived_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_worker_manifests_parent ON worker_result_manifests(parent_session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_worker_manifests_archived ON worker_result_manifests(archived_at)",
         ],
     ),
 ]

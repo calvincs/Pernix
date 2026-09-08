@@ -3406,6 +3406,150 @@ def watched_worker_ids() -> set[str]:
     return out
 
 
+def referenced_worker_ids() -> set[str]:
+    """Every worker id a live session still holds a reference to.
+
+    The narrower `watched_worker_ids()` reads only from parents currently in
+    `awaiting_workers`, which made protection a function of what the parent
+    happened to be doing at that second: a parent that had moved on to another
+    step stopped protecting work it was still going to use. A reference is a
+    reference whatever state the referrer is in.
+    """
+    out: set[str] = set()
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT watched_worker_ids FROM sessions WHERE watched_worker_ids IS NOT NULL "
+            "AND watched_worker_ids NOT IN ('', '[]')"
+        ).fetchall()
+    for r in rows:
+        try:
+            out.update(str(x) for x in json.loads(r["watched_worker_ids"] or "[]"))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+# A worker session at rest. Anything else — paused, awaiting_user, processing,
+# cancelling, finalizing, and whatever a later migration adds — is work in
+# progress, and work in progress is not retention residue. Enumerating the
+# RESTING states rather than the busy ones is deliberate: a state added to the
+# enum later should default to protected, not to deletable.
+_WORKER_STATES_AT_REST = ("idle_ready",)
+
+
+def mark_worker_result_consumed(worker_id: str) -> None:
+    """Record that a parent has actually read this worker's result.
+
+    Consumption is what starts the transcript's retention clock. Written once —
+    the first read is the one that matters, and re-reading a report months
+    later should not push its deletion further out.
+    """
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE sessions SET result_consumed_at = ? WHERE id = ? AND result_consumed_at IS NULL",
+            (_now(), worker_id),
+        )
+
+
+def mark_worker_abandoned(worker_id: str) -> None:
+    """Record that the task this worker was doing was explicitly given up on."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE sessions SET abandoned_at = ? WHERE id = ? AND abandoned_at IS NULL",
+            (_now(), worker_id),
+        )
+
+
+def list_prunable_worker_ids(cutoff_iso: str, horizon_iso: str) -> list[str]:
+    """Worker ids whose transcript may be deleted, oldest first.
+
+    Age was the whole test before this: `session_type = 'worker' AND
+    updated_at < cutoff`, with one exemption. A 90-day-old paused worker, one
+    waiting on an answer, and a finished report nobody had collected were all
+    equally deletable.
+
+    A worker is prunable when it is past ``cutoff_iso``, nothing references it,
+    and either
+
+      * it is at rest and its result was consumed or its task abandoned — the
+        work reached a resting place and the transcript is now residue, or
+      * it is past ``horizon_iso``, the abandonment horizon, which is what
+        keeps "protect the unread" from meaning "retain everything forever".
+
+    A referenced worker is exempt from both: a live reference is a statement
+    that the work is still wanted.
+    """
+    referenced = referenced_worker_ids()
+    placeholders = ",".join("?" * len(_WORKER_STATES_AT_REST))
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"""SELECT id FROM sessions
+                 WHERE session_type = 'worker' AND updated_at < ?
+                   AND (
+                        updated_at < ?
+                        OR (COALESCE(state_v2, '') IN ({placeholders}, '')
+                            AND (result_consumed_at IS NOT NULL OR abandoned_at IS NOT NULL))
+                   )
+                 ORDER BY updated_at""",
+            (cutoff_iso, horizon_iso, *_WORKER_STATES_AT_REST),
+        ).fetchall()
+    return [r["id"] for r in rows if r["id"] not in referenced]
+
+
+def upsert_worker_manifest(manifest: dict) -> None:
+    """Write a worker's result manifest. Raises on failure — by design.
+
+    The caller deletes a transcript only once this has returned, so a storage
+    error here has to be loud. The digest it replaces was wrapped in
+    try/except, ran AFTER the delete loop, and fed on a per-row fetch that
+    swallowed its own errors: it could not have blocked a deletion even if
+    someone had wanted it to.
+    """
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO worker_result_manifests
+                 (worker_id, parent_session_id, title, worker_kind, created_at,
+                  last_active_at, termination_reason, result, result_source, archived_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(worker_id) DO UPDATE SET
+                 parent_session_id = excluded.parent_session_id,
+                 title = excluded.title,
+                 worker_kind = excluded.worker_kind,
+                 created_at = excluded.created_at,
+                 last_active_at = excluded.last_active_at,
+                 termination_reason = excluded.termination_reason,
+                 result = excluded.result,
+                 result_source = excluded.result_source,
+                 archived_at = excluded.archived_at""",
+            (
+                manifest["worker_id"],
+                manifest.get("parent_session_id"),
+                manifest.get("title") or "",
+                manifest.get("worker_kind"),
+                manifest.get("created_at"),
+                manifest.get("last_active_at"),
+                manifest.get("termination_reason"),
+                manifest.get("result") or "",
+                manifest.get("result_source") or "",
+                manifest.get("archived_at") or _now(),
+            ),
+        )
+
+
+def get_worker_manifest(worker_id: str) -> dict | None:
+    """The archived result of a worker whose transcript retention removed."""
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM worker_result_manifests WHERE worker_id = ?", (worker_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def delete_worker_manifests_before(cutoff_iso: str) -> int:
+    """Expire result manifests archived before the cutoff. Returns the count."""
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM worker_result_manifests WHERE archived_at < ?", (cutoff_iso,))
+        return cur.rowcount
+
+
 def delete_old_dream_hypotheses(cutoff_iso: str, statuses: tuple[str, ...]) -> int:
     """Delete hypotheses in the given (terminal) statuses created before the
     cutoff. Returns the row count."""
