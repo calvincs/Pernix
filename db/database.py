@@ -1129,6 +1129,21 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_postmortems_outcome_source ON post_mortems(outcome_source, created_at DESC)",
         ],
     ),
+    (
+        38,
+        "distillation coverage watermark: the newest message already distilled",
+        [
+            # Distillation ran at the end of EVERY turn over the whole
+            # session and sent the extractor the first 40,000 characters of
+            # it. Past that size the prefix is frozen: two consecutive runs
+            # shipped byte-identical input, burning a background call per
+            # turn for nothing, while every late correction sat outside it.
+            # 0 means nothing distilled yet, which is the correct reading for
+            # every existing row — a re-read of already-covered material is
+            # wasteful, never wrong.
+            "ALTER TABLE sessions ADD COLUMN distilled_up_to INTEGER NOT NULL DEFAULT 0",
+        ],
+    ),
 ]
 
 
