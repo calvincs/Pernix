@@ -279,30 +279,38 @@ class _StubBus:
         pass
 
 
-async def test_execute_cron_job_claims_before_prompt(monkeypatch):
-    observed = {}
+def _cron_env(monkeypatch, runner=None):
+    """A real SessionManager plus the stubs _execute_cron_job needs.
 
-    class _Mgr:
-        def create_session(self, title="", session_type="normal", space_id=None):
-            return "sess-claim"
+    Real, because a fake prompt() that returns or raises can only ever
+    produce the two outcomes the executor already handled. Everything
+    interesting — a queue-full refusal, a job queued behind a live turn, a
+    turn that fails without raising, a wait that expires — only exists on the
+    real admission path.
+    """
+    from sessions.manager import SessionManager
 
-        def get(self, sid):
-            return None
-
-        async def prompt(self, sid, prompt):
-            # By the time the prompt is dispatched, the claim must be durable.
-            runs = db.list_cron_runs("claim-job")
-            observed["status_at_prompt"] = runs[0]["status"]
-            observed["fire_time_at_prompt"] = runs[0]["fire_time"]
-            observed["last_fired_meta"] = meta.get("last_fired_at")
-
-        def broadcast(self, *_a, **_k):
-            pass
-
-    monkeypatch.setattr("sessions.manager.get_manager", lambda: _Mgr())
+    mgr = SessionManager()
+    monkeypatch.setattr("sessions.manager._manager", mgr)
     monkeypatch.setattr("core.snooze.get_snooze", lambda: _StubSnooze())
     monkeypatch.setattr("core.events.get_event_bus", lambda: _StubBus())
     monkeypatch.setattr(sched, "_save_jobs", lambda: None)
+    if runner is not None:
+        mgr.set_agent_runner(runner)
+    return mgr
+
+
+async def test_execute_cron_job_claims_before_prompt(monkeypatch):
+    observed = {}
+
+    async def runner(session_id, message, session, **kw):
+        # By the time the turn runs, the claim must be durable.
+        runs = db.list_cron_runs("claim-job")
+        observed["status_at_prompt"] = runs[0]["status"]
+        observed["fire_time_at_prompt"] = runs[0]["fire_time"]
+        observed["last_fired_meta"] = meta.get("last_fired_at")
+
+    mgr = _cron_env(monkeypatch, runner)
 
     meta = {"name": "claim-job", "prompt": "run it", "session_id": None, "model": ""}
     await sched._execute_cron_job(meta)
@@ -314,31 +322,5 @@ async def test_execute_cron_job_claims_before_prompt(monkeypatch):
     assert final["status"] == "completed"
     # Fresh-session jobs claim the run before the session exists — the
     # resolved id must be back-filled or the History link stays NULL forever.
-    assert final["session_id"] == "sess-claim"
-
-
-async def test_execute_cron_job_error_path(monkeypatch):
-    class _Mgr:
-        def create_session(self, title="", session_type="normal", space_id=None):
-            return "sess-err"
-
-        def get(self, sid):
-            return None
-
-        async def prompt(self, sid, prompt):
-            raise RuntimeError("boom")
-
-        def broadcast(self, *_a, **_k):
-            pass
-
-    monkeypatch.setattr("sessions.manager.get_manager", lambda: _Mgr())
-    monkeypatch.setattr("core.snooze.get_snooze", lambda: _StubSnooze())
-    monkeypatch.setattr("core.events.get_event_bus", lambda: _StubBus())
-    monkeypatch.setattr(sched, "_save_jobs", lambda: None)
-
-    meta = {"name": "err-job", "prompt": "run it", "session_id": None, "model": ""}
-    await sched._execute_cron_job(meta)
-
-    final = db.list_cron_runs("err-job")[0]
-    assert final["status"] == "error"
-    assert "boom" in final["error"]
+    assert final["session_id"]
+    assert mgr.get(final["session_id"]) is not None

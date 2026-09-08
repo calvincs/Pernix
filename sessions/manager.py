@@ -7,7 +7,8 @@ import json
 import logging
 import re
 import time
-from typing import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Awaitable, Callable, NamedTuple
 
 from config import settings
 from db import models as db
@@ -40,6 +41,160 @@ def _combine_rapid_fire(existing: str, addition: str) -> str:
         next_num = (max(nums) if nums else 0) + 1
         return f"{existing}\n\n{next_num}. {addition}"
     return f"{_COMBINED_PREFIX}\n\n1. {existing}\n\n2. {addition}"
+
+
+# ---------------------------------------------------------------------------
+# Admission and execution: the contract between a caller and one turn
+# ---------------------------------------------------------------------------
+#
+# Two unrelated things used to be called "the session's settings": the
+# configuration a session carries BETWEEN turns (a user's pinned model, a
+# worker kind's confinement) and the options one unit of scheduled work needs
+# for the turn it is about to run (a cron job's model pin and tool charter).
+# The scheduler wrote the second kind straight onto AgentSession before
+# prompt() had decided whether the message would start a turn or queue behind
+# one. On a busy session that meant the USER's live turn ran under the JOB's
+# charter, the job's own turn later ran with nothing, and the cleanup assigned
+# None over whatever the user had pinned — unrecoverably, since the DB restore
+# is worker-only.
+#
+# ExecOptions is the per-turn half: it rides with the admitted message, is
+# applied when THAT turn starts, and is lifted back to the value it displaced
+# when that turn ends. Never to None.
+#
+# TurnExecution is the handle the admitting caller keeps. It answers the one
+# question a scheduler actually needs and previously could not ask: did the
+# work this fire admitted reach a terminal outcome, and which one? Admission
+# and outcome are separate facts — a caller that stops WAITING has learned
+# nothing about the turn.
+
+
+@dataclass(frozen=True)
+class ExecOptions:
+    """Execution settings owned by one admitted message, not by the session.
+
+    model            per-turn model pin (session.model_override for its turn)
+    tool_allowlist   exclusive tool charter for the turn (schema + executor)
+    context_budget   context budget matching `model`; without it a pinned run
+                     compiles against the previous model's window
+    """
+
+    model: str | None = None
+    tool_allowlist: frozenset | None = None
+    context_budget: int | None = None
+
+    def is_empty(self) -> bool:
+        return not (self.model or self.tool_allowlist or self.context_budget)
+
+
+# Terminal results a TurnExecution settles on. Only COMPLETED means the turn
+# ran and ended cleanly; everything else is a caller-visible non-success.
+EXEC_COMPLETED = "completed"
+EXEC_FAILED = "failed"
+EXEC_CANCELLED = "cancelled"
+EXEC_REJECTED = "rejected"
+EXEC_DROPPED = "dropped"
+EXEC_ABSORBED = "absorbed"
+
+# What prompt() decided about a message. Deliberately NOT an outcome.
+ADMIT_STARTED = "started"
+ADMIT_QUEUED = "queued"
+ADMIT_ABSORBED = "absorbed"
+ADMIT_REJECTED = "rejected"
+
+
+class TurnExecution:
+    """One admitted unit of work, from admission through terminal outcome.
+
+    The handle is stable: it is created at admission, survives the message
+    sitting in the queue behind another turn, and is settled exactly once by
+    whichever path ends the work — the turn's own finally, the cancel that
+    cleared the queue, or the admission that refused it. `wait()` resolves
+    only on that terminal event, so a caller that times out waiting knows it
+    still does not have an outcome, which is the whole point.
+    """
+
+    __slots__ = (
+        "session_id",
+        "options",
+        "origin",
+        "msg_id",
+        "state",
+        "result",
+        "error",
+        "termination_reason",
+        "_done",
+    )
+
+    def __init__(self, session_id: str, options: "ExecOptions | None" = None, origin: str = "user"):
+        self.session_id = session_id
+        self.options = options
+        self.origin = origin
+        self.msg_id: int | None = None
+        self.state = "pending"  # pending -> running -> <terminal result>
+        self.result: str | None = None
+        self.error: str | None = None
+        self.termination_reason: str | None = None
+        self._done = asyncio.Event()
+
+    @property
+    def settled(self) -> bool:
+        return self.result is not None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.result == EXEC_COMPLETED
+
+    def mark_running(self) -> None:
+        if not self.settled:
+            self.state = "running"
+
+    def settle(self, result: str, error: str | None = None, termination_reason: str | None = None) -> bool:
+        """Record the terminal outcome. First writer wins; True if that was us."""
+        if self.settled:
+            return False
+        self.result = result
+        self.error = error
+        self.termination_reason = termination_reason
+        self.state = result
+        self._done.set()
+        return True
+
+    async def wait(self) -> str | None:
+        """Block until the work reaches a terminal outcome, then name it."""
+        await self._done.wait()
+        return self.result
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<TurnExecution {self.session_id[:12]} {self.state} origin={self.origin}>"
+
+
+@dataclass(frozen=True)
+class Admission:
+    """What prompt() decided about one message — never whether it succeeded."""
+
+    outcome: str
+    session_id: str
+    execution: TurnExecution
+    reason: str = ""
+    msg_id: int | None = None
+
+    @property
+    def accepted(self) -> bool:
+        return self.outcome in (ADMIT_STARTED, ADMIT_QUEUED)
+
+    @property
+    def rejected(self) -> bool:
+        return self.outcome == ADMIT_REJECTED
+
+
+class _AppliedExec(NamedTuple):
+    """An execution whose options are live on a session, plus what they displaced."""
+
+    execution: TurnExecution
+    model_override: str | None
+    tool_allowlist: frozenset | None
+    context_budget_override: int | None
 
 
 def _build_retry_directive(session) -> str:
@@ -323,6 +478,15 @@ class SessionManager:
         self._global_subscribers: list[asyncio.Queue] = []  # global notification listeners
         # Strong refs for detached recovery tasks — see _spawn_detached.
         self._detached_tasks: set[asyncio.Task] = set()
+        # Admitted-but-not-yet-started executions, per session, keyed by the
+        # queued message's row id. A queued cron job's options and its outcome
+        # handle live here until _process_pending pops the entry that owns
+        # them — or until the queue is cancelled or drained without them.
+        self._pending_execs: dict[str, dict[int, TurnExecution]] = {}
+        # The execution whose options are currently applied to each session,
+        # carrying the session-level values it displaced so they can be put
+        # back rather than nulled.
+        self._active_exec: dict[str, _AppliedExec] = {}
 
     def _spawn_detached(self, coro, label: str) -> asyncio.Task:
         """Schedule a fire-and-forget task, retaining a reference to it.
@@ -353,6 +517,142 @@ class SessionManager:
 
         task.add_done_callback(_done)
         return task
+
+    def _reject_admission(
+        self,
+        execution: TurnExecution,
+        session: AgentSession | None,
+        session_id: str,
+        reason: str,
+    ) -> Admission:
+        """Refuse a message and settle its handle so the caller sees why."""
+        execution.settle(EXEC_REJECTED, error=reason)
+        if session is not None:
+            session.emit_event({"type": "session.prompt_rejected", "reason": reason})
+        logger.info("Session %s prompt rejected: %s", session_id[:12], reason)
+        return Admission(ADMIT_REJECTED, session_id, execution, reason=reason)
+
+    def _register_pending_exec(self, session_id: str, msg_id: int | None, execution: TurnExecution) -> None:
+        """Park an execution against the queued row that will eventually run it."""
+        if msg_id is None:
+            return
+        execution.msg_id = msg_id
+        self._pending_execs.setdefault(session_id, {})[msg_id] = execution
+
+    def _take_pending_exec(self, session_id: str, msg_id: int | None) -> TurnExecution | None:
+        by_id = self._pending_execs.get(session_id)
+        if not by_id or msg_id is None:
+            return None
+        found = by_id.pop(msg_id, None)
+        if not by_id:
+            self._pending_execs.pop(session_id, None)
+        return found
+
+    def _reap_pending_execs(
+        self,
+        session: AgentSession,
+        *,
+        result: str = EXEC_DROPPED,
+        error: str | None = None,
+        msg_ids: list | None = None,
+    ) -> None:
+        """Settle executions whose queue entry is gone without having run.
+
+        A queued message can leave the deque without a turn: the user cancels,
+        a continuation is refused at dispatch, the pending-message endpoint
+        removes it. Each of those is a terminal outcome for whoever admitted
+        the work — leaving the handle unsettled would hang a waiting caller
+        and, for cron, leave the run row reading 'running' forever.
+        """
+        by_id = self._pending_execs.get(session.session_id)
+        if not by_id:
+            return
+        if msg_ids is None:
+            queued: set[int] = set()
+            for raw in session.pending_messages:
+                try:
+                    entry = PendingMessage.coerce(raw)
+                except Exception:
+                    continue
+                if entry.msg_id is not None:
+                    queued.add(entry.msg_id)
+            msg_ids = [m for m in list(by_id) if m not in queued]
+        for msg_id in list(msg_ids):
+            if msg_id is None:
+                continue
+            found = by_id.pop(msg_id, None)
+            if found is not None and found.settle(result, error=error):
+                logger.info(
+                    "Session %s: queued execution for msg %s settled as %s",
+                    session.session_id[:12],
+                    msg_id,
+                    result,
+                )
+        if not by_id:
+            self._pending_execs.pop(session.session_id, None)
+
+    def _apply_execution(self, session: AgentSession, execution: TurnExecution | None) -> None:
+        """Put one turn's execution options on the session, saving what they displace.
+
+        Self-healing: a predecessor that left through one of _finalize_turn's
+        early returns is released here first, so the baseline this turn saves
+        is the session's own configuration and never the previous turn's pin.
+        """
+        sid = session.session_id
+        stale = self._active_exec.pop(sid, None)
+        if stale is not None:
+            self._restore_session_settings(session, stale)
+        if execution is None or execution.options is None or execution.options.is_empty():
+            return
+        opts = execution.options
+        applied = _AppliedExec(
+            execution,
+            session.model_override,
+            session.tool_allowlist,
+            session.context_budget_override,
+        )
+        if opts.model:
+            session.model_override = opts.model
+        if opts.tool_allowlist:
+            session.tool_allowlist = opts.tool_allowlist
+        if opts.context_budget:
+            session.context_budget_override = opts.context_budget
+        self._active_exec[sid] = applied
+        logger.info(
+            "Session %s: turn running under %s options (model=%s, tools=%s)",
+            sid[:12],
+            execution.origin,
+            opts.model or "session default",
+            len(opts.tool_allowlist) if opts.tool_allowlist else "unrestricted",
+        )
+
+    def _release_execution(self, session: AgentSession, execution: TurnExecution | None) -> None:
+        """Lift this turn's options, if they are still the ones in force."""
+        if execution is None:
+            return
+        applied = self._active_exec.get(session.session_id)
+        if applied is None or applied.execution is not execution:
+            return  # a later turn already took over and saved its own baseline
+        del self._active_exec[session.session_id]
+        self._restore_session_settings(session, applied)
+
+    def _restore_session_settings(self, session: AgentSession, applied: _AppliedExec) -> None:
+        """Put back exactly the fields this execution overwrote.
+
+        Assignment, not deletion: the old cleanup set model_override and
+        tool_allowlist to None, which threw away a user's pinned model (the
+        API sets it in memory only, so nothing restores it) and stripped a
+        worker kind's confinement until the session was rehydrated from disk.
+        """
+        opts = applied.execution.options
+        if opts is None:
+            return
+        if opts.model:
+            session.model_override = applied.model_override
+        if opts.tool_allowlist:
+            session.tool_allowlist = applied.tool_allowlist
+        if opts.context_budget:
+            session.context_budget_override = applied.context_budget_override
 
     def _turn_in_flight(self, session: AgentSession) -> bool:
         """True when a live turn other than the caller's own owns this session.
@@ -1210,6 +1510,8 @@ class SessionManager:
                 dropped_ids.append(entry.msg_id)
         dropped = len(session.pending_messages)
         session.pending_messages.clear()
+        # Whoever admitted that queued work is owed the outcome, not silence.
+        self._reap_pending_execs(session, result=EXEC_CANCELLED, error="queued work cancelled")
         running = session.current_turn_user_msg_id
         try:
             if running is not None and not db.turn_has_assistant_row(session.session_id, running):
@@ -1322,7 +1624,10 @@ class SessionManager:
         message: str,
         system_prompt: str = "",
         idempotency_key: str | None = None,
-    ) -> None:
+        *,
+        exec_options: ExecOptions | None = None,
+        origin: str = "user",
+    ) -> Admission:
         """Send a message to a session.
 
         Events are delivered via the persistent SSE connection.
@@ -1331,7 +1636,26 @@ class SessionManager:
         idempotency_key, when provided, is persisted on the user message row
         so a concurrent re-submission with the same key is caught by the
         chat-router dedup check (api/routers/chat.py).
+
+        exec_options are the settings THIS message's turn runs under. They are
+        carried with the message and applied when its own turn starts, so a
+        message that queues behind a live turn cannot reconfigure that turn.
+
+        origin names the producer ("user", "scheduled", ...). Scheduled work
+        is never folded into another message's row: the machine's instructions
+        would end up appended to a human's turn, and the job that "ran" would
+        never have run at all.
+
+        Returns an Admission: what was decided about the message, plus the
+        stable TurnExecution handle that will eventually carry its outcome.
+        Admission is not outcome — `accepted` means the work was taken on,
+        never that it succeeded.
         """
+        execution = TurnExecution(session_id, exec_options, origin)
+        if exec_options is not None and not message:
+            # Options with nothing to run: there would be no row to hang the
+            # execution on and no turn to apply them to.
+            return self._reject_admission(execution, self.get(session_id), session_id, "empty_message")
         # Cancel Snooze if running (user work takes priority). Snooze-
         # transparent sessions (canary sweeps) skip both signals — a 3am
         # sweep must not cancel the very snooze cycle it coexists with.
@@ -1361,14 +1685,7 @@ class SessionManager:
                 sv2.SessionStateV2.AWAITING_USER,
             )
             if current_v2 is sv2.SessionStateV2.CANCELLING:
-                session.emit_event(
-                    {
-                        "type": "session.prompt_rejected",
-                        "reason": "cancelling",
-                    }
-                )
-                logger.info("Session %s prompt rejected: cancelling", session_id)
-                return
+                return self._reject_admission(execution, session, session_id, "cancelling")
             if settling or current_v2 not in (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_USER):
                 # Backpressure: reject if queue is full
                 if len(session.pending_messages) >= settings.max_pending_messages:
@@ -1379,16 +1696,10 @@ class SessionManager:
                             "max": settings.max_pending_messages,
                         }
                     )
-                    session.emit_event(
-                        {
-                            "type": "session.prompt_rejected",
-                            "reason": "queue_full",
-                        }
-                    )
                     logger.warning(
                         "Session %s queue full (%d), rejecting message", session_id, len(session.pending_messages)
                     )
-                    return
+                    return self._reject_admission(execution, session, session_id, "queue_full")
                 # Session is busy. If the most recent user message (running
                 # OR queued) landed within the rapid-fire window, fold this
                 # message into that DB row instead of opening a new turn.
@@ -1442,7 +1753,10 @@ class SessionManager:
                             target_id,
                             session_id,
                         )
-                        return
+                        # Absorbed, not run: no turn of its own will ever
+                        # start for this message.
+                        execution.settle(EXEC_ABSORBED)
+                        return Admission(ADMIT_ABSORBED, session_id, execution, msg_id=target_id)
                     # Fall through: the running turn can no longer pick this up.
                     # Queue it as its own turn below rather than writing into a
                     # row nothing will re-read.
@@ -1461,6 +1775,10 @@ class SessionManager:
                     session.last_user_msg_id = msg_id
                     session.last_user_msg_at = now
                 session.pending_messages.append(PendingMessage(message, system_prompt, True, now, msg_id))
+                # The options and the outcome handle ride with the row, not
+                # with the session: they come back out when _process_pending
+                # pops this entry, and only then.
+                self._register_pending_exec(session_id, msg_id, execution)
                 session.emit_event(
                     {
                         "type": "session.queued",
@@ -1489,7 +1807,10 @@ class SessionManager:
                         ),
                         "dispatch-after-turn",
                     )
-                return
+                if msg_id is None:
+                    # Nothing durable to pop later; nobody can be left waiting.
+                    execution.settle(EXEC_DROPPED, error="no message to run")
+                return Admission(ADMIT_QUEUED, session_id, execution, msg_id=msg_id)
 
             # Start agent task — reset state for new user turn.
             # post_hooks_complete and waiting_for_input are now derived from
@@ -1527,7 +1848,9 @@ class SessionManager:
                         "error": "Agent runner not initialized",
                     }
                 )
-                return
+                # Nothing ran. An SSE error alone left every non-interactive
+                # caller believing its work had been done.
+                return self._reject_admission(execution, session, session_id, "no_agent_runner")
 
             # Window B recovery: before dispatching the new message, check the
             # DB for any user message that was orphaned by a prior restart (i.e.,
@@ -1574,14 +1897,18 @@ class SessionManager:
                     session.pending_messages.append(
                         PendingMessage(message, system_prompt, True, _time.monotonic(), _new_id)
                     )
+                    self._register_pending_exec(session_id, _new_id, execution)
+                else:
+                    execution.settle(EXEC_DROPPED, error="no message to run")
                 # Dispatch via _process_pending (pops oldest entry — the orphan)
                 self._spawn_detached(self._process_pending(session), "process-pending")
-                return
+                return Admission(ADMIT_QUEUED, session_id, execution, msg_id=execution.msg_id)
 
             # Pre-save the user message inline so a concurrent re-submission
             # with the same idempotency_key sees the row and the chat router
             # short-circuits to "duplicate". Without inline persistence, the
             # second call's SELECT runs before _run_agent_safe writes the row.
+            _started_id = None
             if message:
                 _new_id = await asyncio.to_thread(
                     db.add_message,
@@ -1593,9 +1920,13 @@ class SessionManager:
                 session.last_user_msg_id = _new_id
                 session.last_user_msg_at = _time.monotonic()
                 session.current_turn_user_msg_id = _new_id
+                _started_id = _new_id
+            execution.msg_id = _started_id
+            execution.mark_running()
             session.task = asyncio.create_task(
-                self._run_agent_safe(session, message, system_prompt, pre_saved=bool(message))
+                self._run_agent_safe(session, message, system_prompt, pre_saved=bool(message), execution=execution)
             )
+            return Admission(ADMIT_STARTED, session_id, execution, msg_id=_started_id)
 
     def _can_absorb_rapid_fire(self, session: AgentSession, target_id: int) -> bool:
         """Can a follow-up still be folded into message `target_id`?
@@ -1649,12 +1980,22 @@ class SessionManager:
         message: str,
         system_prompt: str,
         pre_saved: bool = False,
+        execution: TurnExecution | None = None,
     ) -> None:
         """Wrapper: runs scout → agent loop → post-task hooks, routed through
         the v2 state machine. State mutations go through sv2.transition() which
         writes a session_state_log row and emits session.state_changed SSE for
-        every transition."""
+        every transition.
+
+        `execution` is the handle for the admitted work this turn is running.
+        Its options go on at the turn boundary and come off when the turn ends;
+        its terminal result is recorded here, because this is the only frame
+        that sees every way a turn can end. Failures are recorded rather than
+        raised, which is exactly why callers could not tell a failed turn from
+        a finished one."""
         _was_cancelled = False
+        _outcome = EXEC_COMPLETED
+        _outcome_error: str | None = None
         try:
             # The single turn boundary. Every path into a turn passes through
             # here — immediate prompt, queued-popped, answer-resumed and
@@ -1686,6 +2027,12 @@ class SessionManager:
             # _process_pending (the queued-popped path) and
             # _resume_from_workers.
             session.turn = TurnState()
+
+            # This turn's own execution options go on HERE — at the boundary of
+            # the turn that owns them, not when their message was admitted. A
+            # message that queued behind someone else's turn no longer changes
+            # the model or the tool surface that turn runs under.
+            self._apply_execution(session, execution)
 
             # --- Scout phase ---
             # Distinguish an answer-resumed turn from a fresh user prompt and
@@ -1750,6 +2097,7 @@ class SessionManager:
 
         except asyncio.CancelledError:
             _was_cancelled = True
+            _outcome = EXEC_CANCELLED
             session.termination_reason = "cancelled"
             current = sv2._current_state(session)
             if current != sv2.SessionStateV2.CANCELLING:
@@ -1790,6 +2138,8 @@ class SessionManager:
             logger.info("Session %s agent task cancelled", session.session_id)
         except Exception as e:
             logger.error("Agent error in session %s: %s", session.session_id, e, exc_info=True)
+            _outcome = EXEC_FAILED
+            _outcome_error = str(e)
             session.error = str(e)
             # Budget-exhaustion is a special class of error: the user can
             # recover by sending a new message (which resets the wall-clock
@@ -1849,7 +2199,25 @@ class SessionManager:
             if is_budget_exhausted and session.session_type != "worker":
                 _broadcast_session_timeout_notification(session)
         finally:
-            await self._finalize_turn(session, message, system_prompt, _was_cancelled)
+            # Classify BEFORE finalizing. _finalize_turn ends by draining the
+            # queue, and the turn that drains it clears session.error and
+            # session.termination_reason under the lock — so read them now or
+            # read the next turn's blank slate instead. Errors raised inside
+            # the loop land in the handler above; errors merely RECORDED on the
+            # session (the ones that made a failed turn look finished to every
+            # caller) are picked up here.
+            if _outcome == EXEC_COMPLETED and session.error:
+                _outcome, _outcome_error = EXEC_FAILED, session.error
+            _termination = session.termination_reason
+            try:
+                await self._finalize_turn(session, message, system_prompt, _was_cancelled)
+            finally:
+                # Lift the options, then publish the outcome. Release is a
+                # no-op if a queued turn already took the session over from
+                # inside _finalize_turn's drain.
+                self._release_execution(session, execution)
+                if execution is not None:
+                    execution.settle(_outcome, error=_outcome_error, termination_reason=_termination)
 
     async def _finalize_turn(
         self,
@@ -2956,6 +3324,10 @@ class SessionManager:
         if self.shutting_down:
             return
         async with session.lock:
+            # Anything that left the queue without running (the pending-message
+            # endpoint, a purge) settles its handle here rather than leaving a
+            # caller waiting on work that no longer exists.
+            self._reap_pending_execs(session)
             if not session.pending_messages:
                 return
             # Dispatch only from an explicitly ready state. The pre-v2 enum
@@ -2991,6 +3363,7 @@ class SessionManager:
                 if await self._admit_continuation(session, candidate):
                     entry = candidate
                     break
+                self._reap_pending_execs(session, msg_ids=[candidate.msg_id], error="continuation refused")
             if entry is None:
                 return
 
@@ -3039,13 +3412,20 @@ class SessionManager:
             session.error = None
             session.termination_reason = None
 
-            # Start a new agent task for the pending message while lock is held
+            # Start a new agent task for the pending message while lock is held.
+            # The entry's own execution — its options and its outcome handle —
+            # comes back out of the pending registry here, so the turn that
+            # runs the message is the turn its options are applied to.
+            _exec = self._take_pending_exec(session.session_id, entry.msg_id)
+            if _exec is not None:
+                _exec.mark_running()
             session.task = asyncio.create_task(
                 self._run_agent_safe(
                     session,
                     entry.message,
                     entry.system_prompt,
                     pre_saved=entry.pre_saved,
+                    execution=_exec,
                 )
             )
             # Settle the claim now that the turn exists. A crash before this

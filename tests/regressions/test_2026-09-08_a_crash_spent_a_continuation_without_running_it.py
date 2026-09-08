@@ -197,7 +197,7 @@ async def test_a_dispatch_claims_and_settles(goal_session, monkeypatch):
 
     started: list[str] = []
 
-    async def _runner(sess, message, system_prompt, pre_saved=False):
+    async def _runner(sess, message, system_prompt, pre_saved=False, **kw):
         started.append(message)
 
     monkeypatch.setattr(goal_session.mgr, "_run_agent_safe", _runner)
@@ -335,7 +335,7 @@ async def test_a_goal_completed_during_the_await_is_not_continued(goal_session, 
 
     started: list[str] = []
 
-    async def _runner(sess, message, system_prompt, pre_saved=False):
+    async def _runner(sess, message, system_prompt, pre_saved=False, **kw):
         started.append(message)
 
     monkeypatch.setattr(goal_session.mgr, "_run_agent_safe", _runner)
@@ -360,7 +360,7 @@ async def test_a_cancel_during_the_await_stops_the_dispatch(goal_session, monkey
 
     started: list[str] = []
 
-    async def _runner(sess, message, system_prompt, pre_saved=False):
+    async def _runner(sess, message, system_prompt, pre_saved=False, **kw):
         started.append(message)
 
     monkeypatch.setattr(goal_session.mgr, "_run_agent_safe", _runner)
@@ -386,7 +386,7 @@ async def test_a_refused_continuation_does_not_block_a_real_user_message(goal_se
 
     started: list[str] = []
 
-    async def _runner(sess, message, system_prompt, pre_saved=False):
+    async def _runner(sess, message, system_prompt, pre_saved=False, **kw):
         started.append(message)
 
     monkeypatch.setattr(goal_session.mgr, "_run_agent_safe", _runner)
