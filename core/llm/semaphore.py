@@ -287,6 +287,49 @@ class SessionAwareLLMScheduler:
             self._session_timeout_override[session_id] = needed
         return self._effective_timeout(session_id)
 
+    def renew_phase_budget(
+        self,
+        session_id: str,
+        window_seconds: float,
+        ceiling_seconds: float = 0.0,
+    ) -> float:
+        """Open a fresh bounded phase window; return the headroom it leaves.
+
+        A renewable task runs as a sequence of phases — a goal continuation, a
+        renewed round window — and each phase needs a window measured from
+        NOW, not from the session's first acquire. extend_session_budget is
+        base-relative and therefore idempotent for a fixed argument, which is
+        right for an orchestrator's total cap and wrong here: three
+        consecutive goal continuations asking for one base timeout each were
+        granted [1799s, 0s, 0s], and a single prior spawn_worker had already
+        installed a bigger cap, so even the FIRST of them added nothing.
+
+        ensure_session_budget alone would fix that and open a different hole:
+        a self-triggered phase that can top itself up without limit is an
+        unbounded spend. `ceiling_seconds` is the hard cumulative wall-clock
+        this session may ever occupy — computed by the caller from the
+        allowance the user actually authorized (see phase_budget_ceiling).
+        Once the cap reaches it, further renewals grant nothing and the phase
+        dies on its own acquire, typed as a time-budget exhaustion.
+
+        0/unlimited semantics survive untouched: an unlimited session's base
+        timeout is inf, no finite `needed` ever exceeds it, and the cap is
+        never lowered. Elapsed time is monotonic. Returns the seconds now
+        remaining, which is the number worth asserting on — an extension that
+        grants no headroom is the bug this exists to make visible.
+        """
+        if not session_id:
+            return self._session_timeout
+        first = self._session_first_active.get(session_id)
+        elapsed = 0.0 if first is None else time.monotonic() - first
+        needed = elapsed + max(0.0, window_seconds)
+        if ceiling_seconds and ceiling_seconds > 0:
+            needed = min(needed, ceiling_seconds)
+        existing = self._session_timeout_override.get(session_id, self._session_timeout)
+        if needed > existing:
+            self._session_timeout_override[session_id] = needed
+        return max(0.0, self._effective_timeout(session_id) - elapsed)
+
     @property
     def available(self) -> int:
         return self._available

@@ -2312,14 +2312,25 @@ async def _grant_round_renewal(
         authorized,
         settings.max_tool_rounds,
     )
+    # A renewed window of rounds is worth nothing on a spent clock. The old
+    # call was base-relative (extend_session_budget), so the second and third
+    # renewal each granted exactly 0 seconds; this one is measured from now
+    # and bounded by what the turn was actually authorized to spend.
     try:
-        from core.llm.client import extend_session_budget
+        from core.llm.client import phase_budget_ceiling, renew_phase_budget
 
         base = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else 0.0
         if base > 0:
-            extend_session_budget(session_id, base)
+            ceiling = phase_budget_ceiling(base, authorized, len(getattr(session, "worker_ids", ()) or ()))
+            headroom = renew_phase_budget(session_id, base, ceiling)
+            if headroom <= 0:
+                logger.warning(
+                    "Session %s: round renewal gets no headroom — cumulative budget ceiling of %.0fs reached",
+                    session_id,
+                    ceiling,
+                )
     except Exception as _ext_err:
-        logger.debug("Round-cap continuation budget extend failed: %s", _ext_err)
+        logger.debug("Round-cap continuation budget renewal failed: %s", _ext_err)
     left = max(0, authorized - granted)
     # The old copy said "No further continuations follow this one" whatever
     # the configured allowance was, so an agent with three renewals left was

@@ -145,10 +145,10 @@ async def _drive(
 
     monkeypatch.setattr("config.settings.max_tool_rounds", rounds)
     monkeypatch.setattr("config.settings.round_cap_auto_continue", renewals)
-    extends: list[tuple[str, float]] = []
+    extends: list[tuple[str, float, float]] = []
     monkeypatch.setattr(
-        "core.llm.client.extend_session_budget",
-        lambda sid, secs: extends.append((sid, secs)) or 0.0,
+        "core.llm.client.renew_phase_budget",
+        lambda sid, window, ceiling=0.0: extends.append((sid, window, ceiling)) or window,
     )
 
     sid = db.create_session(title="H01")
