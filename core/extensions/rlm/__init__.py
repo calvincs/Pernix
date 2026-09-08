@@ -122,6 +122,43 @@ def _resolve_sources(source) -> tuple[str | None, list[Path], str]:
     return None, files, ", ".join(f.name for f in files)
 
 
+def source_completeness_notice(files: list[Path]) -> str:
+    """A notice naming every staged source known to be a partial acquisition.
+
+    RLM's whole point is whole-source analysis, which is exactly why it must
+    not silently promote a prefix. When a tool captured a bounded slice of a
+    build log or a page it leaves an acquisition sidecar beside the artifact
+    (core/tools/truncation.py); this reads them back so both the sub-model's
+    prompt and the returned header carry the same caveat the artifact does.
+
+    Empty when every source is whole — or has no sidecar at all, which is what
+    an ordinary workspace file looks like and is not evidence of loss.
+    """
+    from core.tools.truncation import read_artifact_meta
+
+    lines: list[str] = []
+    for f in files:
+        meta = read_artifact_meta(f)
+        if not meta or meta.get("source_complete", True):
+            continue
+        unit = meta.get("unit", "bytes")
+        total = meta.get("source_total")
+        held = f"{int(meta.get('captured') or 0):,} {unit}"
+        of = f" of {int(total):,} {unit}" if total is not None else f" {unit}; the source total is unknown"
+        lines.append(
+            f"- {f.name}: holds {held}{of}, cut at {meta.get('truncation_reason') or 'an acquisition cap'} "
+            f"(original source: {meta.get('source', 'unknown')})"
+        )
+    if not lines:
+        return ""
+    return (
+        "INCOMPLETE SOURCE — one or more inputs are a bounded capture, not the whole source:\n"
+        + "\n".join(lines)
+        + "\nAnswer only about what is present, and say plainly which parts of the question the "
+        "available text cannot settle. Do not describe this as an analysis of the complete source."
+    )
+
+
 def _resolve_prior_run(continue_from: str) -> tuple[str | None, Path | None, dict | None]:
     """Validate a continue_from run id -> (error, prior_dir, manifest).
 
@@ -449,6 +486,12 @@ def rlm_process(task: str, source, model: str = "", continue_from: str = "", _co
     except ValueError as e:
         return f"Error: {e}"
 
+    # Inherit, do not upgrade: a source that is itself a bounded capture stays
+    # a bounded capture through the analysis and into the answer's header.
+    incomplete_notice = source_completeness_notice(files)
+    if incomplete_notice:
+        task = f"{incomplete_notice}\n\n{task}"
+
     total_bytes = len(inline_text.encode("utf-8", "ignore")) if inline_text else sum(f.stat().st_size for f in files)
     if total_bytes > MAX_SOURCE_BYTES:
         return f"Error: source is {total_bytes} bytes; the RLM cap is {MAX_SOURCE_BYTES}. Split the input."
@@ -683,6 +726,8 @@ def rlm_process(task: str, source, model: str = "", continue_from: str = "", _co
     )
     if result.partial:
         header += " (best-effort answer — the run did not submit a final answer before ending)"
+    if incomplete_notice:
+        header += "\n" + incomplete_notice
     footer = f"\n\n(full trace: rlm/{run_id}/trace.jsonl in the workspace)"
     # Advertise continuation whenever the run left something worth reusing —
     # session a45fa830cef9's agent restarted from scratch because nothing told

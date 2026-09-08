@@ -17,6 +17,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 from config import settings
+from core.tools.truncation import MAX_OUTPUT, acquisition_meta, acquisition_note, write_artifact
 
 logger = logging.getLogger("pernix.ext.web")
 
@@ -466,6 +467,69 @@ def _reliability_reroute(domain: str | None) -> str | None:
     )
 
 
+def _finish_fetch(url: str, content: str, cap: int, stop_reason: str, declared: str | None) -> str:
+    """Clip a fetched body to the cap and say honestly what happened to it.
+
+    A partial fetch also earns a durable artifact. Without one there is no
+    handle to hand rlm_process, and the audit's route from "I fetched a long
+    page" to "the RLM analysed the whole page" ran through a preview that had
+    silently lost its tail.
+
+    ``declared`` is the response's content-length, which for a chunked or
+    streamed response is absent. That absence is reported as an unknown total
+    rather than back-filled with the captured size.
+    """
+    kept = content[:cap]
+    total: int | None = None
+    if declared and str(declared).isdigit():
+        total = int(declared)
+    elif not stop_reason:
+        # Read to EOF inside every limit: what arrived IS the whole source.
+        total = len(content.encode("utf-8", "ignore"))
+
+    meta = acquisition_meta(
+        source=f"http_get {url}",
+        captured=len(kept.encode("utf-8", "ignore")),
+        source_total=total,
+        unit="bytes",
+        truncation_reason=stop_reason or "an acquisition cap",
+    )
+    if stop_reason:
+        # acquisition_meta calls a fetch complete when captured >= total, but
+        # a stop reason is direct evidence that the read ended early — a
+        # deadline can fire on the last chunk of a body whose content-length
+        # we already matched, and "complete" would then be a guess.
+        meta["source_complete"] = False
+        meta["truncation_reason"] = stop_reason
+    if not meta["source_complete"] or len(kept) > MAX_OUTPUT:
+        meta["artifact"] = write_artifact(kept, "http_get", meta=meta)
+    note = acquisition_note(meta)
+    return kept + ("\n" + note if note else "")
+
+
+def _clip_html_for_extraction(html: str, url: str, cap: int | None = None) -> tuple[str, dict]:
+    """Bound the DOM handed to the extractor, and record what that cost.
+
+    Extraction over 5 MB of markup is CPU the event loop cannot afford, so the
+    cap stays. What changes is that the markdown produced from a clipped DOM
+    no longer reads as a rendering of the whole page: the conclusion of a long
+    article past the cap was simply absent, with nothing saying so.
+    """
+    limit = _MAX_HTML_BYTES if cap is None else cap
+    if len(html) <= limit:
+        return html, acquisition_meta(
+            source=f"page HTML for {url}", captured=len(html), source_total=len(html), unit="chars"
+        )
+    logger.warning("HTML truncated to %d chars before extraction for %s", limit, url)
+    return html[:limit], acquisition_meta(
+        source=f"page HTML for {url}",
+        captured=limit,
+        source_total=len(html),
+        unit="chars",
+        truncation_reason=f"the {limit:,}-char pre-extraction cap",
+    )
+
+
 def http_get(url: str, force: bool = False, _context: dict | None = None) -> str:
     """Fetch content from a URL. Returns plain text, max 100KB."""
     allow_loopback = _loopback_allowed()
@@ -517,23 +581,29 @@ def http_get(url: str, force: bool = False, _context: dict | None = None) -> str
 
                     chunks: list[bytes] = []
                     total = 0
-                    truncated = False
+                    # Which limit stopped the read, not merely that one did.
+                    # Both branches used to end in the same "[truncated at
+                    # {cap} bytes]" line, so a 3 KB body cut short by the
+                    # whole-exchange deadline claimed it had filled the 100 KB
+                    # cap — a fetch that should be retried reading as a fetch
+                    # that returned everything worth having.
+                    stop_reason = ""
                     for chunk in resp.iter_bytes():
                         chunks.append(chunk)
                         total += len(chunk)
                         if total > cap:
-                            truncated = True
+                            stop_reason = f"the {cap:,}-byte fetch cap"
                             break
                         if time.monotonic() > deadline:
-                            truncated = True
+                            stop_reason = f"the {_HTTP_GET_DEADLINE_S:.0f}s whole-exchange deadline"
                             break
                     raw = b"".join(chunks)
                     content = raw.decode(resp.encoding or "utf-8", errors="replace")
 
                 _record_fetch(domain, not _WALL_RE.search(content[:8000]), method="http")
-                if truncated or len(content) > cap:
-                    content = content[:cap] + f"\n[truncated at {cap} bytes]"
-                return content
+                if len(content) > cap and not stop_reason:
+                    stop_reason = f"the {cap:,}-byte fetch cap"
+                return _finish_fetch(url, content, cap, stop_reason, declared)
             _record_fetch(domain, False, method="http")
             return f"Error fetching {url}: too many redirects"
     except ValueError as e:
@@ -778,10 +848,10 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
         diag.append(f"[pageerror] {e}")
     diag.extend(console_msgs)
 
-    # Cap HTML size before extraction to prevent OOM
-    if len(html) > _MAX_HTML_BYTES:
-        html = html[:_MAX_HTML_BYTES]
-        logger.warning("HTML truncated to %d bytes before extraction for %s", _MAX_HTML_BYTES, url)
+    # Cap HTML size before extraction to prevent OOM. The extracted markdown
+    # inherits whatever this clip cost — the extractor cannot report a section
+    # it was never shown.
+    html, html_meta = _clip_html_for_extraction(html, url)
 
     # Trafilatura — pure CPU over up to 5MB of DOM, on the event loop until
     # now. A heavy page froze every SSE stream, state transition and API
@@ -840,8 +910,24 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
             content = "(Failed to extract content)"
 
     max_size = settings.max_fetch_size
+    extract_meta = acquisition_meta(
+        source=f"extracted text for {final_url}",
+        captured=min(len(content), max_size),
+        source_total=len(content),
+        unit="chars",
+        truncation_reason=f"the {max_size:,}-char extracted-text cap",
+    )
     if len(content) > max_size:
-        content = content[:max_size] + f"\n\n[truncated at {max_size} bytes]"
+        content = content[:max_size]
+    if not extract_meta["source_complete"] or not html_meta["source_complete"]:
+        # A partial page is exactly the input a whole-source analysis must not
+        # be run over unannounced, so give it a handle with its status
+        # attached rather than a bare "[truncated]" line.
+        extract_meta["artifact"] = write_artifact(content, "browse_web", meta=extract_meta)
+
+    notes = "\n".join(n for n in (acquisition_note(html_meta), acquisition_note(extract_meta)) if n)
+    if notes:
+        content = content + "\n\n" + notes
 
     header = f"# {title}\n**URL:** {final_url}\n\n---\n\n" if title else f"**URL:** {final_url}\n\n---\n\n"
 
