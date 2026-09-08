@@ -3,7 +3,7 @@
 Validates that:
 1. Ollama and OpenRouter requests use separate semaphores
 2. Concurrency limits are enforced independently per provider
-3. Fallback from OpenRouter to Ollama acquires the Ollama semaphore
+3. One-shot fallback takes the BACKUP provider's semaphore, not always Ollama's
 4. Semaphore stats correctly report per-provider state
 5. Stream semaphore is held for the full stream and released on completion
 """
@@ -109,13 +109,20 @@ class TestRouterSemaphores:
         # attribute aliases above are kept for direct assertions.
         router._providers = {"ollama": router._ollama, "openrouter": router._openrouter}
         router._semaphores = {"ollama": router._ollama_semaphore, "openrouter": router._openrouter_semaphore}
+        # Per-MODEL resolution by default (the registry's own heuristic).
+        # A blanket return_value cannot tell "routed the backup correctly"
+        # from "hard-coded one provider" — which is how the router shipped a
+        # remote backup to Ollama for months. Individual tests still override.
+        router.registry.resolve_provider.side_effect = lambda model: "openrouter" if "/" in model else "ollama"
+        router.registry.get_model_info.return_value = None
+        router.registry.resolve_model_id.side_effect = lambda model: model
 
         return router
 
     @pytest.mark.asyncio
     async def test_ollama_uses_ollama_semaphore(self):
         router = self._make_router(ollama_max=1, openrouter_max=1)
-        router.registry.resolve_provider.return_value = "ollama"
+        router.registry.resolve_provider.side_effect = lambda model: "ollama"
 
         # Before: both available
         assert router._ollama_semaphore.available == 1
@@ -131,7 +138,7 @@ class TestRouterSemaphores:
     @pytest.mark.asyncio
     async def test_openrouter_uses_openrouter_semaphore(self):
         router = self._make_router(ollama_max=1, openrouter_max=1)
-        router.registry.resolve_provider.return_value = "openrouter"
+        router.registry.resolve_provider.side_effect = lambda model: "openrouter" if "/" in model else "ollama"
 
         resp = await router.chat([{"role": "user", "content": "hi"}], model="anthropic/claude-sonnet-4")
 
@@ -221,7 +228,7 @@ class TestRouterSemaphores:
     @pytest.mark.asyncio
     async def test_stream_holds_and_releases_semaphore(self):
         router = self._make_router(ollama_max=1)
-        router.registry.resolve_provider.return_value = "ollama"
+        router.registry.resolve_provider.side_effect = lambda model: "ollama"
 
         events = []
         async for event in router.chat_stream([{"role": "user", "content": "hi"}], model="test"):
@@ -250,7 +257,7 @@ class TestRouterSemaphores:
         from core.llm.errors import FailoverError, FailoverReason
 
         router = self._make_router(ollama_max=1, openrouter_max=1)
-        router.registry.resolve_provider.return_value = "openrouter"
+        router.registry.resolve_provider.side_effect = lambda model: "openrouter" if "/" in model else "ollama"
 
         # OpenRouter raises a rate limit error
         router._openrouter.chat = AsyncMock(side_effect=FailoverError(FailoverReason.RATE_LIMIT, "429"))
@@ -275,7 +282,7 @@ class TestRouterSemaphores:
         from core.llm.errors import FailoverError, FailoverReason
 
         router = self._make_router(ollama_max=1, openrouter_max=1)
-        router.registry.resolve_provider.return_value = "openrouter"
+        router.registry.resolve_provider.side_effect = lambda model: "openrouter" if "/" in model else "ollama"
 
         router._openrouter.chat = AsyncMock(side_effect=FailoverError(FailoverReason.RATE_LIMIT, "429"))
 
@@ -303,12 +310,14 @@ class TestRouterSemaphores:
         )
 
     @pytest.mark.asyncio
-    async def test_fallback_stream_releases_primary_semaphore_before_ollama(self):
-        """Streaming fallback: OpenRouter semaphore must be FREE during Ollama stream."""
+    async def test_stream_failure_releases_its_slot_and_routes_nothing_itself(self):
+        """Streaming failover moved up to stream_with_failover, which knows the
+        model it is switching to. The router's job on a pre-output failure is
+        to release its own slot, touch no other provider, and let the typed
+        error through to the ladder."""
         from core.llm.errors import FailoverError, FailoverReason
 
         router = self._make_router(ollama_max=1, openrouter_max=1)
-        router.registry.resolve_provider.return_value = "openrouter"
 
         async def failing_stream(*args, **kwargs):
             raise FailoverError(FailoverReason.RATE_LIMIT, "429")
@@ -316,10 +325,10 @@ class TestRouterSemaphores:
 
         router._openrouter.chat_stream = MagicMock(side_effect=failing_stream)
 
-        or_available_during_fallback = []
+        ollama_streams = []
 
         async def spy_ollama_stream(*args, **kwargs):
-            or_available_during_fallback.append(router._openrouter_semaphore.available)
+            ollama_streams.append(kwargs.get("model"))
             yield StreamEvent(type=StreamEventType.TOKEN, content="fallback")
             yield StreamEvent(type=StreamEventType.DONE)
 
@@ -329,16 +338,13 @@ class TestRouterSemaphores:
             mock_settings.llm_model = "test"
             mock_settings.fallback_model = "llama3"
 
-            events = []
-            async for event in router.chat_stream([{"role": "user", "content": "hi"}], model="anthropic/claude"):
-                events.append(event)
+            with pytest.raises(FailoverError) as exc:
+                async for _event in router.chat_stream([{"role": "user", "content": "hi"}], model="anthropic/claude"):
+                    pass
 
-        assert len(events) >= 1
-        # Critical: OpenRouter semaphore was released BEFORE Ollama stream
-        assert or_available_during_fallback == [1], (
-            f"OpenRouter semaphore should be available=1 during fallback stream, " f"got {or_available_during_fallback}"
-        )
-        # Both semaphores fully released after
+        assert exc.value.reason == FailoverReason.RATE_LIMIT
+        assert ollama_streams == [], "the router must not pick the backup for a stream"
+        # Both semaphores fully released
         assert router._openrouter_semaphore.available == 1
         assert router._ollama_semaphore.available == 1
 
@@ -346,7 +352,7 @@ class TestRouterSemaphores:
     async def test_semaphore_released_on_provider_error(self):
         """Semaphore is released even if the provider raises an unexpected error."""
         router = self._make_router(ollama_max=1)
-        router.registry.resolve_provider.return_value = "ollama"
+        router.registry.resolve_provider.side_effect = lambda model: "ollama"
         router._ollama.chat = AsyncMock(side_effect=RuntimeError("boom"))
 
         with pytest.raises(RuntimeError, match="boom"):
@@ -362,7 +368,7 @@ class TestRouterSemaphores:
 
         reason = FailoverReason[reason_name]
         router = self._make_router(ollama_max=1, openrouter_max=1)
-        router.registry.resolve_provider.return_value = "openrouter"
+        router.registry.resolve_provider.side_effect = lambda model: "openrouter" if "/" in model else "ollama"
         router._openrouter.chat = AsyncMock(side_effect=FailoverError(reason, "fail"))
 
         with patch("core.llm.router.settings") as mock_settings:
@@ -383,7 +389,7 @@ class TestRouterSemaphores:
 
         reason = FailoverReason[reason_name]
         router = self._make_router(ollama_max=1, openrouter_max=1)
-        router.registry.resolve_provider.return_value = "openrouter"
+        router.registry.resolve_provider.side_effect = lambda model: "openrouter" if "/" in model else "ollama"
         router._openrouter.chat = AsyncMock(side_effect=FailoverError(reason, "config"))
 
         with patch("core.llm.router.settings") as mock_settings:
