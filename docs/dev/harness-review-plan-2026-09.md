@@ -186,8 +186,55 @@ running turns first; `git pull && docker compose up -d --build`; verify
 curl `/api/health`; grep the container for one new line per fix; run the
 live assertions (repro scripts adapted to the box where state permits).
 
+## Outcome (2026-09-08, same day)
+
+All 11 fixes landed on `next-3.2-testing` as one commit each (eleven
+commits after this plan), every one with a dated regression test that was
+shown red against the unfixed source. Six Opus agents implemented them in
+parallel worktrees; the cherry-picks merged without a conflict.
+
+Things the implementation found that the review did not name:
+
+- **F05 had a second half.** The rejection rows were written *before* the
+  assistant row, and `normalize_for_openrouter` is a single forward pass that
+  drops a tool message whose id it has not yet seen. Pairing alone would
+  still have lost the feedback at dispatch. The gate now queues refusals and
+  flushes them right after the assistant row is saved. Refused calls carry a
+  `_rejected` marker so no reader counts them as executed.
+- **F07 needed the per-tool counters scoped.** Signals 7/11 now score only
+  when the current response calls the failing tool or path. That alone fixes
+  the worker deliverable case; the bounded recovery pass (two per turn) is
+  what saves the gate-rejection + `ask_user` case.
+- **F10 has a new failure mode by design.** A fallback whose window cannot
+  hold the prompt floor now raises `ContextBudgetError` naming the fallback
+  instead of sending a request the fallback rejects. Not a live risk on the
+  box (cloud fallback, large window).
+- **F03's release routine** (`_settle_cancelled_awaiting_workers`) is shared
+  by the resume re-check, a `CancelledError` handler around the locked prep,
+  and both cancel routes' no-task branch.
+- **F04's compiled-version snapshot is a `run_agent` local**, not a
+  `TurnState` field, because reflect/eval retries re-enter `run_agent`
+  without a fresh `TurnState`.
+- **F01 also closes the pool-saturation branch**, whose own comment admitted
+  a queued call could run with nobody awaiting it.
+
 ## Follow-ups (out of scope)
 
+- **New (W5):** a burst of three or more messages queued behind a running
+  turn re-runs the middle ones once as false orphans, because
+  `_sweep_db_pending` only fires when the queue is empty and by then the
+  rows read as user-followed-by-user. `swept_orphan_ids` stops the second
+  recurrence; cost is one duplicate run per burst.
+- **New (W6):** the released parent keeps `cancel_requested=True` (matches
+  the old top guard). `prompt()` clears it; `_process_pending` does not, so
+  a message swept onto a released parent would abort at `_pre_round_gate`.
+  Narrow, since cancel clears the queue.
+- **New (W4):** `_end_turn_on_stream_error` still consults
+  `db.get_active_goal(session_id)` for its `goal_create` advice, so a worker
+  on a budget-cut turn is told to create a goal it already inherits.
+- **New (W1):** refused calls now add tokens to every later compiled
+  request in the turn. Intended, but watch a round that hallucinates many
+  calls with large argument bodies.
 - Router-level fallback swap on rate limits also feeds a primary-sized
   prompt to the fallback (`core/llm/router.py`).
 - A rehydrated worker has `active_goal_id=None`, so its spend is not
