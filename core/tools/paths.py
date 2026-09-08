@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from contextvars import ContextVar
 from pathlib import Path
 
 from config import settings
+
+logger = logging.getLogger("pernix.tools.paths")
 
 # Per-call workspace override, set by ToolRegistry.execute_sync from the
 # session's workspace_override before invoking a tool function and reset
@@ -318,19 +321,78 @@ def _resolve_within(path: str, roots: list[Path], create_roots: bool = False) ->
     # which is the loop above.
     scan_roots = _relative_resolution_roots(roots) if prefer_existing else roots
     first_valid: Path | None = None
+    parent_exists: Path | None = None
     for root in scan_roots:
         candidate = (root / path).resolve()
         if candidate.is_relative_to(root):
             if not prefer_existing or candidate.exists():
                 check_protected(candidate, roots)
                 return candidate
+            # A file that does not exist yet still belongs next to its
+            # siblings: prefer the root where the containing directory is
+            # already there. Without this, a NEW file always fell to the
+            # space home even when the directory it named lived at the
+            # workspace root — which is how the Agent Mesh build wrote
+            # `spaces/agent-mesh/impl/Makefile` into
+            # <home>/spaces/agent-mesh/impl/ instead of the impl/ directory
+            # holding the rest of the package (2026-09-08).
+            if parent_exists is None and candidate.parent.is_dir():
+                parent_exists = candidate
             if first_valid is None:
                 first_valid = candidate
+    if parent_exists is not None:
+        check_protected(parent_exists, roots)
+        return parent_exists
     if first_valid is not None:
+        redirected = _redirect_doubled_home_path(path, roots)
+        if redirected is not None:
+            check_protected(redirected, roots)
+            return redirected
         check_protected(first_valid, roots)
         return first_valid
 
     raise ValueError(f"Path not within allowed directories: {path}")
+
+
+def _redirect_doubled_home_path(path: str, roots: list[Path]) -> Path | None:
+    """Catch a relative path that repeats the space home's own prefix.
+
+    A session in a space has its file-tool root at the space home, e.g.
+    <workspace>/spaces/agent-mesh. Writing the workspace-relative path
+    `spaces/agent-mesh/impl/x.py` from there produces
+    <workspace>/spaces/agent-mesh/spaces/agent-mesh/impl/x.py — a phantom tree
+    that looks right in every listing until you notice the doubling. The agent
+    that hit this then spent rounds trying to delete the orphan.
+
+    Nobody means to nest a space inside itself, so when the relative path
+    starts with the home's own workspace-relative prefix, resolve it against
+    the workspace root instead and say so in the log.
+    """
+    home = WORKSPACE_HOME.get()
+    if not home or WORKSPACE_OVERRIDE.get() is not None:
+        return None
+    try:
+        ws = workspace()
+        resolved_home = Path(home).resolve()
+        prefix = resolved_home.relative_to(ws)
+    except (ValueError, OSError):
+        return None  # home is not under the workspace — no doubling to detect
+    if prefix == Path("."):
+        return None
+    rel = Path(path)
+    if not rel.parts[: len(prefix.parts)] == prefix.parts:
+        return None
+    candidate = (ws / rel).resolve()
+    if not candidate.is_relative_to(ws):
+        return None
+    logger.info(
+        "Path %r repeats this session's space prefix %r — resolving against the "
+        "workspace root (%s) rather than nesting the space inside itself",
+        path,
+        str(prefix),
+        candidate,
+    )
+    return candidate
 
 
 def safe_read_path(path: str) -> Path:
