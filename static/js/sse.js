@@ -34,7 +34,7 @@ const EVENT_TYPES = [
     // Tools / context / scout
     'tool.start', 'tool.call', 'tool.call.intercepted',
     'context.compacting', 'context.compacted', 'context.reset',
-    'context.view_pruned',
+    'context.view_pruned', 'context.trim_floor',
     'scout.start', 'scout.step', 'scout.done',
     // Session lifecycle
     'session.queued', 'session.title', 'session.cancelled',

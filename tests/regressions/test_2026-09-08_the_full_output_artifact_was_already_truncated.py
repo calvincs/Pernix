@@ -52,6 +52,15 @@ def ws(tmp_path, monkeypatch):
     return work
 
 
+def _bash(cmd, **kw):
+    """bash returns (text, metadata) once a process launches (H05, 084c16a).
+
+    Pre-launch refusals still return a bare string, so unpack defensively.
+    """
+    out = core_tools.bash(cmd, **kw)
+    return out[0] if isinstance(out, tuple) else out
+
+
 def _artifacts(tmp_path: Path, prefix: str) -> list[Path]:
     out = tmp_path / "tool_output"
     if not out.exists():
@@ -69,7 +78,7 @@ def test_an_end_marker_past_the_preview_cap_survives_in_the_raw_artifact(ws, tmp
     # ~600 KB of output: twelve times the 50 KB preview cap, with the marker
     # only at the very end.
     cmd = f"for i in $(seq 1 8000); do echo \"line $i {'x' * 60}\"; done; echo {MARKER}"
-    result = core_tools.bash(cmd)
+    result = _bash(cmd)
 
     assert MARKER not in result, "precondition: the marker is past the preview cap"
     arts = _artifacts(tmp_path, "bash_stdout")
@@ -87,7 +96,7 @@ def test_an_end_marker_past_the_preview_cap_survives_in_the_raw_artifact(ws, tmp
 def test_repeated_line_collapse_never_reaches_the_persisted_evidence(ws, tmp_path):
     """Collapse is a readability transform. The artifact is not a rendering."""
     cmd = f"for i in $(seq 1 2000); do echo 'WARNING: deprecated'; done; echo {MARKER}"
-    result = core_tools.bash(cmd)
+    result = _bash(cmd)
 
     assert "identical lines omitted" in result, "precondition: collapse ran on the preview"
     assert result.count("WARNING: deprecated") < 10
@@ -107,7 +116,7 @@ def test_stdout_and_stderr_are_captured_and_reported_independently(ws, tmp_path)
         f"for i in $(seq 1 3000); do echo \"err $i {'e' * 40}\" >&2; done; "
         f"echo ERR_{MARKER} >&2"
     )
-    core_tools.bash(cmd)
+    _bash(cmd)
 
     out_arts = _artifacts(tmp_path, "bash_stdout")
     err_arts = _artifacts(tmp_path, "bash_stderr")
@@ -124,7 +133,7 @@ def test_a_capture_past_the_artifact_cap_reports_the_true_source_total(ws, tmp_p
     monkeypatch.setattr(core_tools, "_CAPTURE_ARTIFACT_CAP", 40_000)
     monkeypatch.setattr(core_tools, "_CAPTURE_READ_CAP", 40_000)
     cmd = f"for i in $(seq 1 4000); do echo \"line $i {'x' * 60}\"; done; echo {MARKER}"
-    result = core_tools.bash(cmd)
+    result = _bash(cmd)
 
     arts = _artifacts(tmp_path, "bash_stdout")
     assert len(arts) == 1
@@ -145,7 +154,7 @@ def test_a_capture_past_the_artifact_cap_reports_the_true_source_total(ws, tmp_p
 def test_a_complete_small_command_says_nothing_new(ws, tmp_path):
     """Completeness reporting is for clipped acquisitions; an ordinary command
     keeps its ordinary output."""
-    result = core_tools.bash("echo hello")
+    result = _bash("echo hello")
     assert result.endswith("hello\n") or result.rstrip().endswith("hello")
     assert "source_complete" not in result
     assert _artifacts(tmp_path, "bash_") == []

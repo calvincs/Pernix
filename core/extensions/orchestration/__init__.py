@@ -789,17 +789,13 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
             # worker-authored sentinel used to suppress a real escalate.
             if _report.is_our_stamp(worker_id, ref):
                 return _served(ref.label + _cap(body, ref) + trust.footer())
-            return _served(
-                ref.label + trust.header() + _kind_warn(body) + _cap(body, ref) + trust.footer()
-            )
+            return _served(ref.label + trust.header() + _kind_warn(body) + _cap(body, ref) + trust.footer())
 
     # Fallback: last assistant message, always wrapped in a quality header.
     messages = db.get_messages(worker_id)
     for m in reversed(messages):
         if m["role"] == "assistant" and m.get("content"):
-            return _served(
-                trust.header() + _kind_warn(m["content"]) + _cap(m["content"]) + trust.footer()
-            )
+            return _served(trust.header() + _kind_warn(m["content"]) + _cap(m["content"]) + trust.footer())
 
     # Retention took the transcript, but not the work. Checked before the "no
     # output" line below, which is what the parent used to be told about a

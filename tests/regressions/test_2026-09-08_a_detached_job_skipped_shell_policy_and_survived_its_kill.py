@@ -205,7 +205,9 @@ def test_a_command_bash_refuses_is_refused_by_job_start(monkeypatch, jobs, mode,
 @pytest.mark.parametrize("mode", ["permissive", "strict"])
 def test_a_command_bash_admits_still_runs_as_a_job(monkeypatch, jobs, mode):
     monkeypatch.setattr("config.settings.shell_security_mode", mode)
-    assert "ok-in-bash" in bash("echo ok-in-bash", timeout=10, _context=jobs.ctx)
+    bash_out = bash("echo ok-in-bash", timeout=10, _context=jobs.ctx)
+    # bash returns (text, metadata) once a process launches (H05, 084c16a).
+    assert "ok-in-bash" in (bash_out[0] if isinstance(bash_out, tuple) else bash_out)
 
     job_id = jobs.start("echo ok-in-job", wall_seconds=30)
     assert _wait_state(job_id, "done")["exit_code"] == 0

@@ -4335,6 +4335,13 @@ function handleEvent(event) {
         if (state.sid) updateSessionActivity(state.sid, `goal continuation ${event.ordinal || ''}`);
     }
 
+    else if (type === 'context.trim_floor') {
+        // A long single turn hit the context ceiling where compaction has
+        // nothing older than the live turn to summarize. The compiler's trim
+        // carries it instead — the turn continues, it is not an error.
+        updateStatus(`Context ${Math.round((event.utilization || 0) * 100)}% — trimmed ${event.trimmed} message(s) to keep going`);
+    }
+
     else if (type === 'context.view_pruned') {
         // Budget-gated view pruning stubbed oversized tool results out of the
         // compiled view (the stored transcript is untouched).

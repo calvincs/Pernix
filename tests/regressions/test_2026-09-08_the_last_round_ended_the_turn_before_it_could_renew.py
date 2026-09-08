@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -365,7 +366,13 @@ async def test_a_round_exhausted_worker_does_not_look_finished(monkeypatch):
     from sessions import manager as _manager
 
     assert '_loop_walls = ("round_ceiling", "stuck_loop")' in inspect.getsource(_reflect)
-    assert 'if reason in ("round_ceiling", "stuck_loop", "compaction_failed"):' in inspect.getsource(_manager)
+    # Both guards are function-local, so this reads the source. Match the
+    # membership test rather than one exact tuple: the set grew when worker
+    # trust moved into orchestration, and the invariant is that a round-capped
+    # worker is reported INCOMPLETE, not the order of the strings beside it.
+    _mgr_src = inspect.getsource(_manager)
+    assert "INCOMPLETE" in _mgr_src
+    assert re.search(r'in \([^)]*"round_ceiling"[^)]*\)', _mgr_src), "manager no longer treats round_ceiling as a cap"
 
 
 # ---------------------------------------------------------------------------
