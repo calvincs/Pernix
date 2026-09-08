@@ -487,6 +487,10 @@ class SessionManager:
         # carrying the session-level values it displaced so they can be put
         # back rather than nulled.
         self._active_exec: dict[str, _AppliedExec] = {}
+        # Every live turn task, not just the one session.task happens to point
+        # at. Shutdown drains this: session.task is overwritten by the next
+        # turn, so a snapshot taken from it misses anything admitted since.
+        self._live_turn_tasks: set[asyncio.Task] = set()
 
     def _spawn_detached(self, coro, label: str) -> asyncio.Task:
         """Schedule a fire-and-forget task, retaining a reference to it.
@@ -517,6 +521,74 @@ class SessionManager:
 
         task.add_done_callback(_done)
         return task
+
+    # ------------------------------------------------------------------
+    # Admission gate, turn registry, per-turn execution options
+    # ------------------------------------------------------------------
+
+    def close_admission(self, reason: str = "shutdown") -> None:
+        """Refuse every new turn from here on.
+
+        Called BEFORE the shutdown drain takes its snapshot. The flag used to
+        go up at the same point but only guarded the pending dispatch and the
+        worker resume — prompt() itself never read it, so a cron fire or a
+        heartbeat landing in the window between the snapshot and the loop
+        stopping created a brand new agent task that the drain had already
+        walked past. Producers that live on tool threads (orchestration's
+        message_worker / resume_worker, which reach the loop through
+        run_coroutine_threadsafe) are never cancelled by shutdown at all, so
+        the gate has to be inside prompt() to cover them.
+        """
+        self.shutting_down = True
+        logger.info("Session admission closed (%s)", reason)
+
+    def _start_turn_task(self, session: AgentSession, coro) -> asyncio.Task:
+        """Create a turn task and register it for the shutdown drain."""
+        task = asyncio.create_task(coro)
+        self._live_turn_tasks.add(task)
+        task.add_done_callback(self._live_turn_tasks.discard)
+        return task
+
+    def live_turn_tasks(self) -> list[asyncio.Task]:
+        return [t for t in self._live_turn_tasks if not t.done()]
+
+    async def drain_turns(self, timeout: float = 5.0) -> int:
+        """Cancel and await every live turn, re-collecting until none are left.
+
+        Admission must already be closed, or this races the producers it is
+        trying to outlive. Re-collecting is what makes it a drain rather than
+        a snapshot: a dispatch that was past the gate and mid-persist when
+        admission closed still creates its task, and that task has to be
+        awaited before the LLM client, the MCP bridge and the browser go away.
+        Returns the number of distinct tasks it cancelled.
+        """
+        if not self.shutting_down:
+            raise RuntimeError("close_admission() must run before drain_turns()")
+        deadline = time.monotonic() + timeout
+        seen: set[asyncio.Task] = set()
+        while True:
+            live = self.live_turn_tasks()
+            # Belt and braces: a turn task created by something that bypassed
+            # _start_turn_task is still reachable through the session.
+            for sid in self.active_session_ids():
+                sess = self.get(sid)
+                task = getattr(sess, "task", None) if sess is not None else None
+                if task is not None and not task.done() and task not in live:
+                    live.append(task)
+            if not live:
+                return len(seen)
+            seen.update(live)
+            for task in live:
+                task.cancel()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("%d agent task(s) still running at the drain deadline", len(live))
+                return len(seen)
+            try:
+                await asyncio.wait_for(asyncio.gather(*live, return_exceptions=True), timeout=remaining)
+            except asyncio.TimeoutError:
+                logger.warning("%d agent task(s) did not stop within the drain window", len(live))
+                return len(seen)
 
     def _reject_admission(
         self,
@@ -1656,6 +1728,12 @@ class SessionManager:
             # Options with nothing to run: there would be no row to hang the
             # execution on and no turn to apply them to.
             return self._reject_admission(execution, self.get(session_id), session_id, "empty_message")
+        # Admission closes before the shutdown drain snapshots anything. Every
+        # start path funnels through here, including the orchestration tool
+        # threads that hop onto the loop with run_coroutine_threadsafe and are
+        # not cancelled by shutdown at all.
+        if self.shutting_down:
+            return self._reject_admission(execution, self.get(session_id), session_id, "shutting_down")
         # Cancel Snooze if running (user work takes priority). Snooze-
         # transparent sessions (canary sweeps) skip both signals — a 3am
         # sweep must not cancel the very snooze cycle it coexists with.
@@ -1669,6 +1747,10 @@ class SessionManager:
         session = self.get_or_create(session_id)
 
         async with session.lock:
+            # Recheck under the lock: admission can close while this coroutine
+            # waits for it, and by then the drain has taken its snapshot.
+            if self.shutting_down:
+                return self._reject_admission(execution, session, session_id, "shutting_down")
             # v2 state-aware prompt acceptance. IDLE_READY / AWAITING_USER
             # accept immediately (AWAITING_USER routes the prompt as
             # "answer-received" via _run_agent_safe's start-state detection).
@@ -1930,10 +2012,18 @@ class SessionManager:
                 session.last_user_msg_at = _time.monotonic()
                 session.current_turn_user_msg_id = _new_id
                 _started_id = _new_id
+            # Last gate, after the persistence hop and still under the lock:
+            # nothing awaits between here and create_task, so a shutdown that
+            # has not closed admission by now cannot miss this task. The row
+            # stays on disk unanswered — the orphan sweep re-offers it after
+            # the restart rather than the message being silently lost.
+            if self.shutting_down:
+                return self._reject_admission(execution, session, session_id, "shutting_down")
             execution.msg_id = _started_id
             execution.mark_running()
-            session.task = asyncio.create_task(
-                self._run_agent_safe(session, message, system_prompt, pre_saved=bool(message), execution=execution)
+            session.task = self._start_turn_task(
+                session,
+                self._run_agent_safe(session, message, system_prompt, pre_saved=bool(message), execution=execution),
             )
             return Admission(ADMIT_STARTED, session_id, execution, msg_id=_started_id)
 
@@ -3281,11 +3371,17 @@ class SessionManager:
                 elif current_v2 is sv2.SessionStateV2.AWAITING_WORKERS:
                     # Parent is suspended waiting — start a new agent turn directly.
                     # _run_agent_safe detects AWAITING_WORKERS and uses reason="workers-complete".
+                    if self.shutting_down:
+                        logger.info(
+                            "Session %s: worker resume abandoned — admission is closed",
+                            parent.session_id[:12],
+                        )
+                        return
                     parent.cancel_requested = False
                     parent.turn = TurnState()
                     parent.error = None
                     parent.termination_reason = None
-                    parent.task = asyncio.create_task(self._run_agent_safe(parent, resume_msg, None))
+                    parent.task = self._start_turn_task(parent, self._run_agent_safe(parent, resume_msg, None))
                 elif current_v2 is sv2.SessionStateV2.IDLE_READY:
                     # Parent already returned to idle; push as a pending message so
                     # it's processed on the next available slot (Gap 1 auto-resume).
@@ -3333,6 +3429,10 @@ class SessionManager:
         if self.shutting_down:
             return
         async with session.lock:
+            # Recheck under the lock — admission may have closed while this
+            # coroutine waited for it, after the drain snapshot was taken.
+            if self.shutting_down:
+                return
             # Anything that left the queue without running (the pending-message
             # endpoint, a purge) settles its handle here rather than leaving a
             # caller waiting on work that no longer exists.
@@ -3428,14 +3528,15 @@ class SessionManager:
             _exec = self._take_pending_exec(session.session_id, entry.msg_id)
             if _exec is not None:
                 _exec.mark_running()
-            session.task = asyncio.create_task(
+            session.task = self._start_turn_task(
+                session,
                 self._run_agent_safe(
                     session,
                     entry.message,
                     entry.system_prompt,
                     pre_saved=entry.pre_saved,
                     execution=_exec,
-                )
+                ),
             )
             # Settle the claim now that the turn exists. A crash before this
             # leaves the row 'claimed', and boot recovery re-offers it with a

@@ -294,6 +294,7 @@ async def test_canary_prompt_does_not_cancel_snooze(monkeypatch):
     monkeypatch.setattr("core.snooze.get_snooze", lambda: fake_snooze)
 
     mgr = SessionManager.__new__(SessionManager)
+    mgr.shutting_down = False  # the admission gate reads it before anything else
     canary = SimpleNamespace(session_type="canary")
     mgr._sessions = {"c1": canary}
     # Stop after the snooze gate: get_or_create raises to end the call.
