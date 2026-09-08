@@ -227,3 +227,104 @@ here and we do not claim it:
   would remove it entirely.
 - `/api/context/{sid}` and `/payload` return HTTP 200 for a session that does
   not exist, compiling a full system prompt and tool schemas to do it.
+
+---
+
+## Outcome — 2026-09-08
+
+**All 22 findings fixed, shipped and live.** 27 commits `4dd2e80..HEAD` on
+`next-3.2-testing`, pushed. `check.sh` green: black, ruff, flake8, and 4,343
+tests at 77.22% coverage.
+
+Box rebuilt to build `7af1b5fb2c59`, `--dangerous` intact, zero tracebacks,
+schema version **41** applied to the real production database (it was at 40)
+with `idx_sessions_recency` present. 21/21 live assertions pass inside the
+container. A real smoke turn (`9803b58d8819`) ran scout → bash → answer:
+`[cwd: data/workspace] [exit: 0] pernix-322-smoke`. Not merged to `main`.
+
+### The merge
+
+**Eight parallel streams, zero conflicts.** Grouping by code region held for a
+third batch running, including on the two files two streams each edited:
+`file-panel.js` (W2's viewer vs W3's editor) and `sessions/manager.py` (W5's
+admission contract vs W4's writer predicate). Both auto-merged correctly, and
+both were checked for the silent-drop failure that cost a whole finding in the
+3.2.1 batch — the shipped file carries both halves and both streams' tests pass
+together.
+
+The one gate failure was a lint disagreement, not a defect: black wanted an
+expression packed tight and flake8's E228 wanted it spaced. Restructuring the
+line ended the argument rather than picking a side.
+
+### What the batch cost us to learn
+
+**Git stashes are shared across worktrees.** Two agents' `git stash pop` calls
+crossed, and each ended up holding the other's working tree. Nothing was lost —
+one agent detected it, reverted the foreign files and restored its own work
+from the dangling commit — but it is a silent, whole-worktree corruption with
+no warning from git. **Never `git stash` in a shared-repo worktree.** Use
+`git show <rev>:<path>` or a file copy to hold a baseline. Every later stream
+was told, and every later stream verified its pre-fix failure without stash.
+
+**Tests behave differently outside the main checkout.** Every agent
+independently reported 63-98 failures and had to spend effort proving they were
+pre-existing. They are: `settings.workspace_dir` resolves to the checkout root
+in a worktree, so relative file writes miss their monkeypatched destination.
+The same tests pass in the main checkout, which is where `check.sh` runs. Two
+agents wasted real time on this; a third nearly concluded that this morning's
+path-contract test was vacuous. Tell parallel agents up front.
+
+**A probe that matches a comment is not a probe.** Three of the first 21 live
+assertions failed against correct code: one matched the phrase
+`prefix.match(/```/g)` inside the comment explaining the bug it was checking
+was gone, and two called functions with the wrong signature. Same failure mode
+as the 3.2.1 batch. A live assertion has to be checked against a known-good
+deployment before its failures mean anything.
+
+### Corrections the implementers made to this plan
+
+Two briefs were wrong and were corrected by the agents holding the code:
+
+- **S07.** The brief said to pass `strict=True`. That is not sufficient:
+  `_working_sessions` skips the snooze-transparent types in *both* branches, so
+  `strict=True` still looks straight through a running canary — the case the
+  verifier reproduced. W4 added a separate `has_database_writers()` question
+  rather than duplicate the busy rule in the router.
+- **S13.** W1 measured the fence rescan at 5.9M/23.5M/94.1M parser characters
+  across 500/1000/2000 ticks and reduced it to **18, constant** — but declined
+  to claim a latency win, because the audit's own ~304 ms figure stands and it
+  cost nothing before, since S12 meant the paints never happened.
+
+### Deliberate holes, stated rather than hidden
+
+- **No device or browser acceptance.** S22 asks for a physical touch run and
+  S21 for measured heap; the UI gate has no swipe primitive and seeds no image,
+  and it stubs out `EventSource` entirely so it cannot see S01-S04, S12 or S13.
+  The eight browser findings are covered by pytest-driving-node harnesses that
+  slice byte-exact function source out of the shipping files — real behavioural
+  coverage under `check.sh` for the first time, but not a browser.
+- **S02 residual.** A round that both completes and persists strictly inside
+  the boundary→transcript window can render its tail twice until the mid-turn
+  re-read settles it. Closing it needs message identity on `stream.done`, a
+  `/status` protocol change.
+- **S01 residual.** A second Enter during new-session creation can still start
+  a second submission. It predates this work and is not in the filing.
+- **S12/S13.** `.stream-open-fence` has no CSS rule yet and inherits `pre`
+  styling. It wants a designer's eye.
+
+### Follow-ups
+
+- The five other non-cancellable `run_coroutine_threadsafe` bridges. W7's
+  `AsyncOpScope` is reachable from any tool's `_context` and needs no import to
+  adopt; a test pins that contract. None has remote side effects.
+- `has_active_work()` still sees only in-memory agent sessions; roughly 237
+  `connect_sessions()` call sites are invisible to it. Agent turns deliberately
+  do not participate in the new database gate — making a user's next message
+  wait on a rebuild would trade a measured 0.70 s stall for an unbounded one.
+- `DELETE /pending/{message_id}` removes a queue entry without settling its
+  execution handle; `_process_pending` reaps it lazily on the next drain.
+- The sidebar row still sends `s.*` whole. Trimming columns would cut the
+  remaining payload but changes a client contract.
+- `ContextBudgetError` from `compile_context` still surfaces as a 500.
+- Whether `settings.workspace_dir` resolving to the checkout root outside the
+  main tree is worth hardening, or is correctly a developer-environment quirk.
