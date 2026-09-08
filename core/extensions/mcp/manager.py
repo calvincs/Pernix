@@ -56,6 +56,20 @@ class MCPUnavailable(RuntimeError):
     """The server can't take this call right now (disabled, degraded, closed)."""
 
 
+class MCPCallCancelled(Exception):
+    """The owning dispatch stopped this call BEFORE the request was sent.
+
+    Only raised on the loop, from the checks either side of ensure_ready(),
+    where "nothing reached the server" is a fact rather than a hope. A call
+    cancelled after that point cannot make the same claim — transport
+    cancellation says nothing about what the remote already did — and is
+    reported as the uncertain case it is. Deliberately a plain Exception:
+    a CancelledError raised inside a task marks the task cancelled, and the
+    concurrent future on the bridge thread would then see a bare cancel with
+    this distinction erased.
+    """
+
+
 def describe_error(e: BaseException) -> str:
     """Human-readable root cause for UI/status surfaces.
 
@@ -174,12 +188,28 @@ class MCPConnection:
             raise MCPUnavailable(f"MCP server '{self.cfg.name}' is {self.status}: {self.error}")
         return self._session
 
-    async def call_tool(self, remote_name: str, arguments: dict | None):
+    async def call_tool(self, remote_name: str, arguments: dict | None, *, cancel_check=None):
         """One tool call. Transport failures trip an immediate reconnect;
-        repeated protocol failures trip the breaker."""
+        repeated protocol failures trip the breaker.
+
+        `cancel_check` is the owning dispatch's stop flag, read here on the
+        loop rather than on the tool thread that submitted this coroutine.
+        ensure_ready() can park for the whole connect timeout waking an idle
+        or degraded server; a stop that lands during that wait used to be
+        paid out as a real remote call the moment readiness arrived. Both
+        checks sit before the request is written, so raising here is a
+        guarantee that nothing was sent — see MCPCallCancelled.
+        """
         from mcp.shared.exceptions import MCPError
 
+        if cancel_check is not None and cancel_check():
+            raise MCPCallCancelled(f"MCP call '{remote_name}' on '{self.cfg.name}' was cancelled before it was sent")
         session = await self.ensure_ready()
+        if cancel_check is not None and cancel_check():
+            raise MCPCallCancelled(
+                f"MCP call '{remote_name}' on '{self.cfg.name}' was cancelled while the server "
+                "was becoming ready; nothing was sent"
+            )
         self.last_used = time.time()
         self._inflight += 1
         try:
