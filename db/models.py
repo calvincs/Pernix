@@ -1926,14 +1926,27 @@ def get_last_partial(session_id: str) -> dict | None:
         return dict(row) if row else None
 
 
-def add_compaction(session_id: str, summary: str, compacted_up_to: int, original_count: int) -> int:
-    """Add a compaction marker message with metadata in dedicated column."""
+def add_compaction(
+    session_id: str,
+    summary: str,
+    compacted_up_to: int,
+    original_count: int,
+    coverage: dict | None = None,
+) -> int:
+    """Add a compaction marker message with metadata in dedicated column.
+
+    ``coverage`` records what the summarizer was actually shown: the id range
+    it covered, how many calls it took, and every body that reached it
+    clipped. The boundary alone cannot say that — it is one id, and it used
+    to be written for rows no summarizer had ever seen.
+    """
     import json
 
     meta = json.dumps(
         {
             "compacted_up_to": compacted_up_to,
             "original_count": original_count,
+            **({"coverage": coverage} if coverage else {}),
         }
     )
     with connect_sessions() as conn:

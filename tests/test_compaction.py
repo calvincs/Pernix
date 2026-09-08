@@ -5,7 +5,8 @@ import json
 import pytest
 
 from core.context.compaction import (
-    _serialize_messages,
+    CompactionOutcome,
+    _chunk_slice,
     apply_view_pruning,
     compact_with_llm,
     exclude_orphans,
@@ -115,39 +116,59 @@ def test_exclude_orphans_no_tool_calls():
 
 
 # ---------------------------------------------------------------------------
-# _serialize_messages
+# _chunk_slice (coverage-aware serialization)
 # ---------------------------------------------------------------------------
 
 
 def test_serialize_basic():
     messages = [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "world"},
+        {"id": 1, "role": "user", "content": "hello"},
+        {"id": 2, "role": "assistant", "content": "world"},
     ]
-    result = _serialize_messages(messages)
-    assert "[user] hello" in result
-    assert "[assistant] world" in result
+    chunks = _chunk_slice(messages)
+    assert len(chunks) == 1
+    assert "[user #1] hello" in chunks[0].text
+    assert "[assistant #2] world" in chunks[0].text
+    assert chunks[0].msg_ids == [1, 2]
+    assert chunks[0].clips == []
 
 
-def test_serialize_truncates_long():
-    messages = [
-        {"role": "user", "content": "x" * 3000},
-    ]
-    result = _serialize_messages(messages)
-    assert len(result) <= 2050  # 2000 char content + role prefix
+def test_serialize_records_a_clipped_body():
+    """A clipped body is still covered, but the omission is written down with
+    a pointer — a prefix is never silently equated with the whole message."""
+    messages = [{"id": 7, "role": "user", "content": "x" * 9000}]
+    chunk = _chunk_slice(messages)[0]
+    assert "session_read(7)" in chunk.text
+    assert chunk.clips == [{"msg_id": 7, "role": "user", "kept": 4000, "total": 9000}]
 
 
-def test_serialize_budget():
-    messages = [{"role": "user", "content": "x" * 500} for _ in range(100)]
-    result = _serialize_messages(messages, max_chars=2000)
-    assert "truncated" in result
-    assert len(result) <= 3000  # slightly over due to last line + marker
+def test_serialize_chunks_instead_of_truncating():
+    """The old serializer stopped at one aggregate cutoff and the boundary
+    advanced over everything past it. Nothing is dropped now — the slice is
+    split across as many chunks as it takes."""
+    messages = [{"id": i, "role": "user", "content": "x" * 500} for i in range(1, 101)]
+    chunks = _chunk_slice(messages, chunk_chars=2000, max_chunks=99)
+    assert len(chunks) > 1
+    covered = [mid for c in chunks for mid in c.msg_ids]
+    assert covered == [m["id"] for m in messages]
+    assert all("truncated" not in c.text for c in chunks)
+
+
+def test_serialize_stops_at_the_chunk_ceiling():
+    """Bounded work per compaction: groups past the ceiling stay in the live
+    window rather than riding into an unbounded number of calls."""
+    messages = [{"id": i, "role": "user", "content": "x" * 500} for i in range(1, 101)]
+    chunks = _chunk_slice(messages, chunk_chars=2000, max_chunks=3)
+    assert len(chunks) == 3
+    covered = {mid for c in chunks for mid in c.msg_ids}
+    assert covered != {m["id"] for m in messages}
 
 
 def test_serialize_list_content():
     """Handle list-format content (vision messages)."""
     messages = [
         {
+            "id": 3,
             "role": "user",
             "content": [
                 {"type": "text", "text": "describe this"},
@@ -155,8 +176,40 @@ def test_serialize_list_content():
             ],
         },
     ]
-    result = _serialize_messages(messages)
-    assert "describe this" in result
+    assert "describe this" in _chunk_slice(messages)[0].text
+
+
+def test_serialize_keeps_a_tool_group_whole():
+    """A chunk boundary may not fall between an assistant's tool_calls and
+    the rows that answered them."""
+    messages = [
+        {"id": 1, "role": "user", "content": "y" * 1990},
+        {
+            "id": 2,
+            "role": "assistant",
+            "content": "",
+            "tool_calls": json.dumps([{"id": "tc1", "name": "bash", "arguments": '{"command": "pytest -q"}'}]),
+        },
+        {"id": 3, "role": "tool", "tool_call_id": "tc1", "content": "ok"},
+    ]
+    chunks = _chunk_slice(messages, chunk_chars=2000)
+    group_chunk = next(c for c in chunks if 2 in c.msg_ids)
+    assert group_chunk.msg_ids == [2, 3]
+    assert "pytest -q" in group_chunk.text
+
+
+def test_serialize_marks_a_rejected_call_as_never_run():
+    messages = [
+        {
+            "id": 5,
+            "role": "assistant",
+            "content": "",
+            "tool_calls": json.dumps([{"id": "tc1", "name": "nope", "arguments": "{}", "_rejected": True}]),
+        },
+        {"id": 6, "role": "tool", "tool_call_id": "tc1", "content": "Tool 'nope' does not exist"},
+    ]
+    text = _chunk_slice(messages)[0].text
+    assert "REJECTED" in text
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +284,8 @@ async def test_compact_with_llm_uses_session_sched_identity(mock_llm_client):
 
 
 async def test_compact_with_llm_too_few_messages(mock_llm_client):
-    """Rejects compaction if fewer than 4 messages."""
+    """Rejects compaction if fewer than 4 messages — as a refusal, not a
+    failure: there is nothing older than the live turn to fold."""
     from db import models as db
 
     sid = db.create_session(title="Short")
@@ -240,8 +294,10 @@ async def test_compact_with_llm_too_few_messages(mock_llm_client):
 
     messages = db.get_messages(sid)
     msg_dicts = [{"role": m["role"], "content": m["content"], "id": m["id"]} for m in messages]
-    result = await compact_with_llm(sid, msg_dicts)
+    outcome = CompactionOutcome()
+    result = await compact_with_llm(sid, msg_dicts, outcome=outcome)
     assert result is False
+    assert outcome.reason == "nothing_to_summarize"
 
 
 async def test_compact_with_llm_failure(mock_llm_client):
@@ -261,8 +317,10 @@ async def test_compact_with_llm_failure(mock_llm_client):
 
     messages = db.get_messages(sid)
     msg_dicts = [{"role": m["role"], "content": m["content"], "id": m["id"]} for m in messages]
-    result = await compact_with_llm(sid, msg_dicts)
+    outcome = CompactionOutcome()
+    result = await compact_with_llm(sid, msg_dicts, outcome=outcome)
     assert result is False
+    assert outcome.reason == "failed"
 
 
 def _summary_response():
