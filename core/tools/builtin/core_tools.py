@@ -779,8 +779,14 @@ def _read_capture(f) -> str:
         return ""
 
 
-def bash(command: str, timeout: int | None = None, _context: dict | None = None) -> str:
+def bash(command: str, timeout: int | None = None, _context: dict | None = None) -> str | tuple[str, dict]:
     """Execute a shell command in the workspace.
+
+    Returns (output, metadata) once a process was launched — exit_code,
+    timed_out, cwd and truncation — so the executor reads the outcome from
+    the process rather than guessing at the text. A refusal that never
+    launched anything (empty command, shell policy) returns the bare "Error:"
+    string it always did.
 
     timeout: optional per-call override (seconds) for the shell timeout. Use
     when a single long-running command (Whisper transcription, large clone,
@@ -807,6 +813,10 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
     # — the toolchain is shared, only the working directory moves.
     run_dir = _workspace_home()
     run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cwd_display = str(run_dir.relative_to(Path.cwd()))
+    except ValueError:
+        cwd_display = str(run_dir)
 
     # Non-invasive advisory: flag duplicate-workspace-prefix mistakes in the
     # output so the agent notices without us rewriting arbitrary shell.
@@ -895,7 +905,17 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
                         "timeout, job_start runs it detached with no wall limit on "
                         "your turn — poll job_status/job_tail while you keep working."
                     )
-                return msg
+                # An infrastructure failure, not a command that failed: the
+                # tool never got a verdict out of the process. It keeps the
+                # "Error:" prefix and counts against bash's own health.
+                return msg, {
+                    "exit_code": None,
+                    "timed_out": True,
+                    "cwd": cwd_display,
+                    "truncated": False,
+                    "total_chars": len(partial),
+                    "was_error": True,
+                }
             finally:
                 if _session and _proc_handle is not None:
                     _session.release_process(_proc_handle)
@@ -913,22 +933,42 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
 
         output = _collapse_repeated_lines(output)
 
+        trunc = {"truncated": False, "total_chars": len(output)}
         if len(output) > MAX_OUTPUT:
-            output, _meta = truncate_output(output, "bash")
+            output, trunc = truncate_output(output, "bash")
 
-        if process.returncode != 0 and not output:
-            output = f"Exit code: {process.returncode}"
+        rc = process.returncode
 
-        # Prepend CWD context so the agent always knows what directory bash runs in
-        try:
-            cwd_display = run_dir.relative_to(Path.cwd())
-        except ValueError:
-            cwd_display = run_dir
-        prefix = f"[cwd: {cwd_display}]\n"
+        # Prepend CWD context so the agent always knows what directory bash
+        # runs in, and the exit status so it never has to infer the outcome
+        # from the prose. The status used to appear only when the command
+        # printed nothing at all — so "3 failed, 0 passed" and exit 1 read
+        # exactly like a pass, to the model and to the harness alike.
+        prefix = f"[cwd: {cwd_display}] [exit: {rc}]\n"
         if _path_hint:
             prefix = f"{_path_hint}\n{prefix}"
 
-        return prefix + (output or "(no output)")
+        # The structured channel the executor already supports for (str, dict)
+        # returns. `was_error` is the tool's own verdict on the call and
+        # overrides the executor's string-prefix guess, which the cwd header
+        # had defeated for every command bash ever ran.
+        meta = {
+            "exit_code": rc,
+            "timed_out": False,
+            "cwd": cwd_display,
+            "truncated": bool(trunc.get("truncated")),
+            "total_chars": int(trunc.get("total_chars") or len(output)),
+            "was_error": rc != 0,
+        }
+        if rc != 0:
+            # The command failed; bash did not. Kept apart so tool health and
+            # the stuck detector are not told the shell is broken every time a
+            # test fails or a grep finds nothing.
+            from core.tools.executor import COMMAND_FAILED_MARKER
+
+            meta[COMMAND_FAILED_MARKER] = True
+
+        return prefix + (output or "(no output)"), meta
     except subprocess.TimeoutExpired:
         return "Error: Command timed out"
     except Exception as e:
@@ -1079,4 +1119,8 @@ def register(reg) -> None:
         max_timeout=BASH_MAX_TIMEOUT,
         parallel_safe=False,
         safety_level="caution",
+        # Identical command text is not identical state: a job finished, a
+        # file changed, a server came up. The cross-round dedup cache must
+        # never answer a shell call from a previous round's output.
+        idempotent=False,
     )

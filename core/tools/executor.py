@@ -133,6 +133,23 @@ MISS_MARKER = "miss"
 MISS_PREFIX = "[miss]"
 
 
+# A shell command ran to completion and exited non-zero. That is an error the
+# agent must see — but bash worked, so it is not evidence about the tool, and
+# it must not arm the stuck detector's error-retry signals: `grep` exits 1 on
+# no match and a reproduction test is meant to fail. A tool signals it in the
+# structured metadata it returns alongside its output.
+COMMAND_FAILED_MARKER = "command_failed"
+
+# Where a structured result states its own outcome. Present means the tool
+# knows whether the call failed and the executor must not guess from prose.
+OUTCOME_KEY = "was_error"
+
+
+def is_command_failure(result: ToolExecutionResult) -> bool:
+    """True when the command failed but the tool that ran it did not."""
+    return bool((result.metadata or {}).get(COMMAND_FAILED_MARKER))
+
+
 def is_miss(result: ToolExecutionResult) -> bool:
     """True when the tool correctly reported that the target does not exist."""
     if (result.metadata or {}).get(MISS_MARKER):
@@ -624,18 +641,31 @@ async def _execute_single(
         # is settled before the error test and leaves per-tool health alone.
         unavailable = isinstance(result, str) and result.startswith(UNAVAILABLE_PREFIX)
         miss = isinstance(result, str) and result.startswith(MISS_PREFIX)
-        was_error = miss or (
-            (not unavailable) and ((not result) or result.startswith("Error:") or _is_failure_verdict(result))
-        )
+        # A tool that returns structured metadata states its own outcome, and
+        # that verdict wins. Prefix classification stays the fallback for the
+        # bare-string tools, which are most of them — but it is a guess, and
+        # bash's `[cwd: ...]` header defeated it for every command bash ever
+        # ran, so a failing test suite was booked as a successful call.
+        declared = metadata.get(OUTCOME_KEY) if isinstance(metadata, dict) else None
+        command_failed = bool(metadata.get(COMMAND_FAILED_MARKER)) if isinstance(metadata, dict) else False
+        if isinstance(declared, bool):
+            was_error = miss or declared
+        else:
+            was_error = miss or (
+                (not unavailable) and ((not result) or result.startswith("Error:") or _is_failure_verdict(result))
+            )
 
         if unavailable:
             metadata = {**(metadata or {}), UNAVAILABLE_MARKER: True}
         elif miss:
             # An error for the agent, but not a mark against the tool.
             metadata = {**(metadata or {}), MISS_MARKER: True}
-        elif was_error:
+        elif was_error and not command_failed:
             registry.metrics[name].record_failure(result, latency)
         else:
+            # The failed command included: the tool did its job. Health
+            # metrics that said otherwise would mint a "bash degraded"
+            # routing hint out of tests that were meant to fail.
             registry.metrics[name].record_success(latency)
 
         _credit_long_call(context, latency)

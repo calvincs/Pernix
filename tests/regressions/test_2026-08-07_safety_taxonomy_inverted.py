@@ -156,7 +156,7 @@ def test_bash_child_env_excludes_secrets(monkeypatch, tmp_path):
     monkeypatch.setenv("PERNIX_TEST_FAKE_API_KEY", "sk-should-not-leak")
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     monkeypatch.setattr("config.settings.shell_env_mode", "allowlist")
-    out = core_tools.bash("env")
+    out, _meta = core_tools.bash("env")
     assert "sk-should-not-leak" not in out
     assert "PATH=" in out  # the sandbox env is still usable
 

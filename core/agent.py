@@ -27,7 +27,7 @@ from core.llm.router import OPENAI_FORMAT_PROVIDERS
 from core.llm.semaphore import PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
 from core.llm.stream_ladder import stream_with_failover
 from core.llm.types import REJECTED_CALL_KEY, is_rejected_call
-from core.tools.executor import execute_tool_round
+from core.tools.executor import execute_tool_round, is_command_failure
 from core.tools.registry import get_registry
 from db import models as db
 from sessions.state import AgentSession, turn_state
@@ -537,11 +537,13 @@ def _rejected_call_args(raw) -> str:
 _SEMANTIC_DEDUP_TOOLS = {"call_model"}
 
 # Tools excluded from cross-round hard dedup — cheap reads where fresh state matters.
-# bash is intentionally absent: repeated bash calls (e.g. re-running transcription) are the primary target.
-# Caveat: bash output also depends on workspace file contents, so a cached bash
-# result goes stale the moment the agent edits a file. _STATE_MUTATING_TOOLS +
-# _invalidate_bash_dedup below clear those stale entries so an "edit → re-run the
-# same command" cycle re-executes instead of short-circuiting to the pre-edit result.
+# bash is absent from this set but registers idempotent=False, which _dedup
+# honors ahead of it: command text equality never proved the environment was
+# unchanged, and the invalidators below could only ever catch the changes that
+# arrived through a file tool in an EARLIER round. They stay because they are
+# still correct for any caller that does cache a shell result, and because the
+# mutation-epoch bump they pair with is what keeps edit-then-rerun from
+# reading as a tool cycle.
 _CROSS_ROUND_DEDUP_EXCLUDED = {"file_read", "glob"}
 
 # Tools that mutate workspace files. When one of these succeeds, any cached bash
@@ -2441,7 +2443,7 @@ def record_tool_outcome(turn, result) -> None:
     refusal at least means the model tried something it should not have, while
     an unavailable tool simply cannot apply here and says so.
     """
-    from core.tools.executor import is_miss, is_policy_refusal, is_unavailable
+    from core.tools.executor import is_command_failure, is_miss, is_policy_refusal, is_unavailable
 
     refused = is_policy_refusal(result)
     unavailable = (not refused) and is_unavailable(result)
@@ -2449,6 +2451,11 @@ def record_tool_outcome(turn, result) -> None:
     # something that does not exist: counted as `misses`, previewed so reflect
     # can see the wrong ask, never a failure of the tool.
     miss = (not refused) and (not unavailable) and is_miss(result)
+    # A shell command that ran and exited non-zero is counted as itself
+    # (core.tools.executor.is_command_failure). It is an error the agent must
+    # see, but `failures` means the TOOL is unreliable, and a reproduction
+    # test that fails on purpose is no evidence of that.
+    command_failed = (not refused) and (not unavailable) and (not miss) and is_command_failure(result)
     entry = turn.tool_summary.setdefault(
         result.tool_name,
         {"calls": 0, "failures": 0, "refusals": 0, "errors": [], "total_latency_ms": 0},
@@ -2468,6 +2475,12 @@ def record_tool_outcome(turn, result) -> None:
         entry["misses"] = int(entry.get("misses") or 0) + 1
         preview = result.content[:300] if result.content else "miss"
         previews = entry.setdefault("miss_errors", [])
+        if preview not in previews:
+            previews.append(preview)
+    elif command_failed:
+        entry["command_failures"] = int(entry.get("command_failures") or 0) + 1
+        preview = result.content[:300] if result.content else "non-zero exit"
+        previews = entry.setdefault("command_errors", [])
         if preview not in previews:
             previews.append(preview)
     elif result.was_error:
@@ -2490,6 +2503,8 @@ def record_tool_outcome(turn, result) -> None:
         a_entry["refusals"] += 1
     elif unavailable:
         a_entry["unavailable"] = int(a_entry.get("unavailable") or 0) + 1
+    elif command_failed:
+        a_entry["command_failures"] = int(a_entry.get("command_failures") or 0) + 1
     elif result.was_error:
         a_entry["failures"] += 1
 
@@ -2551,6 +2566,7 @@ async def _record_round_results(
         # window of results can be read back per tool without joining the
         # assistant's tool_calls (the candor hint producer corroborates its
         # ledger against the last two weeks of these rows).
+        from core.tools.executor import is_command_failure as _is_cmd_fail
         from core.tools.executor import is_miss as _is_miss
         from core.tools.executor import is_unavailable as _is_unavail
 
@@ -2559,6 +2575,8 @@ async def _record_round_results(
             _tm["miss"] = True
         if _is_unavail(result):
             _tm["unavailable"] = True
+        if _is_cmd_fail(result):
+            _tm["command_failed"] = True
         tool_meta = json.dumps(_tm)
 
         # If the gate corrected this call (aliased name, coerced argument
@@ -2616,13 +2634,20 @@ async def _record_round_results(
             event_data["metadata"] = result.metadata
         session.emit_event(event_data)
 
-        # Track failures and update stuck detector
-        if result.was_error:
+        # Track failures and update stuck detector. A command that ran and
+        # exited non-zero is deliberately NOT a tool failure here: the tool
+        # worked, and signals 3/6/11 all watch for a tool that does not. A
+        # reproduction test is meant to fail and a `grep` exits 1 on no match,
+        # so charging those would score the very rerun the agent is supposed
+        # to make — the second half of edit-then-rerun — as an error loop.
+        # The result is still an error the model sees, and still not cached.
+        if result.was_error and not is_command_failure(result):
             tool_failures.setdefault(result.tool_name, []).append(_hash_args(tc.get("arguments", "")))
             stuck.mark_failure(tool_name=result.tool_name, args=item["parsed_args"])
         else:
             stuck.mark_success(tool_name=result.tool_name, args=item["parsed_args"])
-            gate.remember_success(result.tool_name, tc.get("arguments", ""), tool_round, result.content)
+            if not result.was_error:
+                gate.remember_success(result.tool_name, tc.get("arguments", ""), tool_round, result.content)
         # Semantic-streak observation (signals 8-10): records the result body's
         # "low info" status and hostname for the search-spiral / bot-wall /
         # same-domain-grind signals. Cheap bookkeeping only.
