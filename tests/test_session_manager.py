@@ -1209,19 +1209,23 @@ async def test_spawn_detached_ignores_cancellation():
 def test_no_bare_create_task_in_manager():
     """Regression guard: every detached task must go through _spawn_detached.
 
-    Two call shapes are legitimate and excluded:
+    Three call shapes are legitimate and excluded:
       * `session.task = asyncio.create_task(...)` — an owned turn handle;
         the session itself holds the strong reference.
       * the single call inside _spawn_detached, which is the wrapper.
+      * the single call inside _start_turn_task, the turn wrapper: it holds
+        its own strong reference in _live_turn_tasks so the shutdown drain
+        can find turns that session.task has already been overwritten past.
     """
     import ast
     import pathlib
 
     tree = ast.parse(pathlib.Path("sessions/manager.py").read_text())
 
+    wrappers = {"_spawn_detached", "_start_turn_task"}
     offenders: list[int] = []
     for fn in ast.walk(tree):
-        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) or fn.name == "_spawn_detached":
+        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) or fn.name in wrappers:
             continue
         # Assignment targets of the form <something>.task = ... are owned.
         owned_calls = {

@@ -349,28 +349,43 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
-    # 3. Cancel any running agent tasks.
+    # 3. Close admission, stop the producers, then drain.
     #
-    # The flag goes up FIRST. Cancelling a parent cascades to its workers,
+    # Admission closes FIRST. Cancelling a parent cascades to its workers,
     # whose completion callbacks resume the parent and dispatch its pending
     # queue — starting a fresh turn against an LLM client that is about to
     # close, and leaving a half-written SCOUTING row for the next boot to
-    # report as an interrupted session.
-    _mgr.shutting_down = True
-    cancelled = []
-    for sid in _mgr.active_session_ids():
-        s = _mgr.get(sid)
-        if s and s.task and not s.task.done():
-            s.task.cancel()
-            cancelled.append(s.task)
+    # report as an interrupted session. The flag used to guard only those two
+    # recovery paths: prompt() itself never read it, so a cron fire or a
+    # heartbeat landing after the snapshot below created a fresh agent task
+    # that nothing here would ever cancel. It is a gate in prompt() now, which
+    # is also the only place that covers the orchestration tool threads —
+    # they reach the loop with run_coroutine_threadsafe and shutdown never
+    # cancels them.
+    _mgr.close_admission()
 
-    # Wait for the cancellations to actually land rather than guessing at a
-    # fixed delay; bounded so a wedged task cannot hold up the shutdown.
-    if cancelled:
-        try:
-            await asyncio.wait_for(asyncio.gather(*cancelled, return_exceptions=True), timeout=5.0)
-        except asyncio.TimeoutError:
-            logger.warning("%d agent task(s) did not stop within 5s", len(cancelled))
+    # Stop the scheduling producer BEFORE collecting tasks, not last. APScheduler
+    # kept firing cron jobs and heartbeats straight through the drain.
+    try:
+        from core.extensions.scheduling import _get_scheduler
+
+        sched = _get_scheduler()
+        if sched and hasattr(sched, "running") and sched.running:
+            sched.shutdown(wait=False)
+            logger.info("Scheduler shut down")
+    except Exception:
+        pass
+
+    # Drain rather than snapshot: a dispatch that was already past the gate and
+    # mid-persist when admission closed still creates its task, and session.task
+    # only ever points at the newest turn. drain_turns re-collects until nothing
+    # is left, bounded so a wedged task cannot hold up the shutdown.
+    try:
+        cancelled_count = await _mgr.drain_turns(timeout=5.0)
+        if cancelled_count:
+            logger.info("Drained %d agent task(s)", cancelled_count)
+    except Exception:
+        logger.exception("Agent task drain failed")
     # Brief pause to let SSE generators finish their current iteration
     await asyncio.sleep(0.5)
 
@@ -380,15 +395,6 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await notifier.stop()
-    except Exception:
-        pass
-    try:
-        from core.extensions.scheduling import _get_scheduler
-
-        sched = _get_scheduler()
-        if sched and hasattr(sched, "running") and sched.running:
-            sched.shutdown(wait=False)
-            logger.info("Scheduler shut down")
     except Exception:
         pass
     try:
