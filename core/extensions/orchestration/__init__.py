@@ -639,6 +639,21 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
         "# AUTO-STAMPED (",
     )
 
+    def _served(body: str) -> str:
+        """Mark the result consumed on the way out.
+
+        This call IS the consumption event, and retention needs to know it
+        happened: an uncollected report is unfinished business, a collected
+        one is a transcript that has done its job. Recorded only on the paths
+        that actually return a result — telling the parent "no output" is not
+        a reason to start anyone's deletion clock.
+        """
+        try:
+            db.mark_worker_result_consumed(worker_id)
+        except Exception as e:
+            logger.debug("Could not mark worker %s result consumed: %s", worker_id, e)
+        return body
+
     # Per-worker summary file (new convention). The file itself is trusted
     # (either written by the worker, or auto-stamped with a marker header).
     per_worker = workspace / f".worker_{worker_id[:12]}_summary.md"
@@ -647,25 +662,63 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
         # If the summary already carries a sentinel marker from _finalize_worker,
         # don't double up — just return as-is (the stamp already encodes state).
         if body.startswith(_SENTINELS):
-            return _cap(body)
-        return _gate_header() + _ceiling_note() + _kind_warn(body) + _cap(body)
+            return _served(_cap(body))
+        return _served(_gate_header() + _ceiling_note() + _kind_warn(body) + _cap(body))
 
     # Backward compat: shared summary.md from pre-fix workers
     legacy_path = workspace / "summary.md"
     if legacy_path.exists():
         _legacy_body = legacy_path.read_text()
-        return _gate_header() + _ceiling_note() + _kind_warn(_legacy_body) + _cap(_legacy_body)
+        return _served(_gate_header() + _ceiling_note() + _kind_warn(_legacy_body) + _cap(_legacy_body))
 
     # Fallback: last assistant message, always wrapped in a quality header.
     messages = db.get_messages(worker_id)
     for m in reversed(messages):
         if m["role"] == "assistant" and m.get("content"):
-            return _gate_header() + _ceiling_note() + _kind_warn(m["content"]) + _cap(m["content"])
+            return _served(_gate_header() + _ceiling_note() + _kind_warn(m["content"]) + _cap(m["content"]))
+
+    # Retention took the transcript, but not the work. Checked before the "no
+    # output" line below, which is what the parent used to be told about a
+    # worker that had finished and filed a report: "produced no output. It may
+    # have failed silently or timed out. Consider retrying" — three claims,
+    # all false, about work that was sitting in a manifest.
+    archived = _archived_result(worker_id)
+    if archived:
+        return archived
 
     # No output at all
     if _worker_obj and _worker_obj.error:
         return f"Worker {worker_id[:8]} FAILED with error: {_worker_obj.error}. Consider retrying with retry_worker()."
     return f"Worker {worker_id[:8]} produced no output. It may have failed silently or timed out. Consider retrying with retry_worker()."
+
+
+def _archived_result(worker_id: str) -> str:
+    """A pruned worker's result manifest, rendered for the parent, or "".
+
+    The transcript is gone and cannot be retried into existence, so the header
+    says what happened and points at the durable record rather than inviting a
+    retry that would redo work already done.
+    """
+    try:
+        manifest = db.get_worker_manifest(worker_id)
+    except Exception as e:
+        logger.warning("Could not read worker manifest for %s: %s", worker_id, e)
+        return ""
+    if not manifest:
+        return ""
+    header = (
+        f"# ARCHIVED (worker transcript removed by retention on "
+        f"{str(manifest.get('archived_at') or '')[:10]}; this is its preserved result manifest)\n"
+        f"# Worker: {manifest.get('title') or 'untitled'} — last active "
+        f"{str(manifest.get('last_active_at') or '')[:10]}"
+        + (f", ended by {manifest['termination_reason']}" if manifest.get("termination_reason") else "")
+        + f"\n# Result source: {manifest.get('result_source') or 'unknown'}. The full transcript is not "
+        f"recoverable; retry_worker would redo the work, not retrieve it.\n\n"
+    )
+    body = manifest.get("result") or ""
+    if not body.strip():
+        return header + "(the manifest records no result text for this worker)\n"
+    return header + body
 
 
 def get_worker_transcript(
@@ -1128,6 +1181,15 @@ def message_worker(worker_id: str, message: str, _context: dict | None = None) -
 def cancel_worker(worker_id: str, _context: dict | None = None) -> str:
     """Cancel a running worker."""
     from sessions.manager import get_manager
+
+    # Cancellation is the parent explicitly giving up on this task, which is
+    # what retention needs in order to ever release a worker it is otherwise
+    # protecting as unfinished business. Recorded before the cancel itself so
+    # it holds even if the loop-affine part below finds nothing to stop.
+    try:
+        db.mark_worker_abandoned(worker_id)
+    except Exception as e:
+        logger.debug("Could not mark worker %s abandoned: %s", worker_id, e)
 
     manager = get_manager()
     session = manager.get(worker_id)

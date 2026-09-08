@@ -561,7 +561,18 @@ class Settings:
     rlm_run_retention_days: int = 30  # workspace/rlm/<run_id> purge age
     # Worker sessions (spawned by spawn_worker) had no retention at all: the
     # live box held 36, eleven older than a month, with 7 MB of messages.
+    # This is the TRANSCRIPT window, and it only starts once the work has
+    # reached a resting place: the result was read, or the task was abandoned.
     worker_session_retention_days: int = 30
+    # The abandonment horizon. Protecting unread and non-terminal workers
+    # would otherwise retain every worker forever, which is its own defect —
+    # past this, a task nobody came back for is treated as abandoned and its
+    # transcript becomes prunable (its result manifest is kept regardless).
+    worker_abandoned_after_days: int = 180
+    # Result-manifest retention, deliberately far longer than the transcript
+    # window: the manifest is small and it is the last record of what a worker
+    # produced. A title-and-date digest is not a research result.
+    worker_result_manifest_retention_days: int = 365
     # Dream hypotheses accumulate ~57/day on the live box and nothing pruned
     # them; the readers cap their scans at 500 rows, so old rows also fell
     # out of dedup/evidence silently. Terminal statuses only (refuted,
