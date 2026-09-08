@@ -214,6 +214,13 @@ async def chat_with_backup(client: "LLMClient", *, model: str, **kwargs) -> "Cha
         backup = settings.fallback_model
         if not backup or backup == model:
             raise
+        # The router falls back on its own for one-shot calls, and when that
+        # attempt is the one that failed, the exception arriving here already
+        # IS the backup's. Retrying it would pay for the same failure twice
+        # and double the latency of a turn that is already going badly.
+        if getattr(first_err, "_pernix_backup_attempted", False):
+            logger.warning("chat failed on %s and on backup %s (%s); not retrying the backup", model, backup, first_err)
+            raise
         logger.warning("chat failed on %s (%s); retrying once on backup %s", model, first_err, backup)
         return await client.chat(model=backup, **kwargs)
 
@@ -303,6 +310,22 @@ class LLMClient:
     def resolve_provider(self, model: str = "") -> str:
         """Return provider name ('ollama' or 'openrouter') for a model."""
         return self.router.resolve_provider(model)
+
+    def effective_provider(self, model: str = "") -> str:
+        """The provider that will ACTUALLY serve this model.
+
+        resolve_provider answers from the registry — the intent. The router
+        downgrades to Ollama when the resolved provider reports unavailable
+        (a lost API key, chiefly), and usage booked against the intent then
+        records free local tokens as paid remote spend. Accounting asks this
+        one; routing questions still ask resolve_provider.
+        """
+        try:
+            return getattr(self.router.get_provider(model or settings.llm_model), "name", "") or self.resolve_provider(
+                model
+            )
+        except Exception:
+            return self.resolve_provider(model)
 
     def has_capacity(self, model: str = "") -> bool:
         """Check if the provider for this model has an available semaphore slot."""
