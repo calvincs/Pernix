@@ -200,7 +200,9 @@ def list_sessions_enriched(
     indexed query over `sessions` alone — no aggregate touches a message
     until the rows are known — and the enrichment then runs against that
     fixed id list. Unrelated and archived history no longer costs anything:
-    on the reference fixture the same page went from 352.9 ms to 3.2 ms.
+    measured at 1,622 sessions / ~116,000 messages, a 25-row page went from
+    150.9 ms to 0.44 ms with no space configured, and from 307.9 ms to
+    9.3 ms with a 900-session space unioned back in.
 
     Space sessions are long-lived by contract: any that fall outside the
     recency window are unioned back in, so the sidebar's space groups never
