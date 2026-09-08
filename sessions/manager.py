@@ -1303,8 +1303,10 @@ class SessionManager:
             # racing case above, the previous turn's _finalize_turn is still
             # reading all three to classify its own completion; clearing them
             # from the incoming turn would make a failed turn look clean.
-            # prompt() and _resume_from_workers clear them under the session
-            # lock instead, where no prior turn can still be in flight.
+            # The three dispatch sites clear them under the session lock
+            # instead, where no prior turn can still be in flight: prompt(),
+            # _process_pending (the queued-popped path) and
+            # _resume_from_workers.
             session.turn = TurnState()
 
             # --- Scout phase ---
@@ -2505,6 +2507,23 @@ class SessionManager:
                     _reset_budget(session.session_id)
                 except Exception as _e:
                     logger.debug("Budget reset failed for %s: %s", session.session_id, _e)
+
+            # Retire the previous turn's outcome. session.error and
+            # session.termination_reason are session-scoped, and prompt()
+            # clears both before an immediately dispatched turn; a queued
+            # turn entered here and inherited them. A turn that drained the
+            # queue behind a failed one then finished clean still read as
+            # errored: reflect and evaluate both return at their
+            # `if session.error` guard, the round-cap auto-continuation
+            # refuses to continue, and /status plus worker.done report the
+            # dead turn's error. The previous turn is done classifying
+            # itself by now — _turn_in_flight above says so — so this is the
+            # same safe point prompt() uses. cancel_requested is deliberately
+            # left alone: prompt() clears it because the user's new message
+            # is itself the intent to proceed, whereas a cancel that lands
+            # while this queue drains is a stop this turn must still honour.
+            session.error = None
+            session.termination_reason = None
 
             # Start a new agent task for the pending message while lock is held
             session.task = asyncio.create_task(
