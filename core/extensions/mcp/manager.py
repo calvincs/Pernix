@@ -113,6 +113,13 @@ class MCPConnection:
         self._session = None
         self._task: asyncio.Task | None = None
         self._closing = False
+        # Set once teardown has definitely happened, by close() or abandon().
+        # A cancelled shutdown has to know which connections it actually
+        # finished with, and status alone can't say: the supervisor writes
+        # "stopped" on its own way out too.
+        self._closed = False
+        # Which manager generation owns this connection. Set by _spawn.
+        self.generation = 0
         self._suspend_requested = False
         self._inflight = 0
         self._was_ready = False
@@ -152,6 +159,32 @@ class MCPConnection:
                 self._task.cancel()
             except Exception:
                 pass
+        self.status = "stopped"
+        self._session = None
+        self._closed = True
+
+    def abandon(self) -> None:
+        """Synchronous last resort for a teardown that could not be awaited.
+
+        api/app.py bounds shutdown() with wait_for(..., timeout=8). The
+        cancellation lands on the gather of close() coroutines — and the ones
+        that had not yet run a single line never set _closing at all, so their
+        supervisor tasks, and any stdio child their transport holds, outlived
+        the manager that spawned them. Cancelling the supervisor is the
+        strongest thing a caller can do without awaiting: the anyio scopes
+        unwind on the loop and the child dies with its transport.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._closing = True
+        self._resume_evt.set()
+        self._drop_evt.set()
+        self._resolve_waiters(MCPUnavailable(f"MCP server '{self.cfg.name}' was shut down"))
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
         self.status = "stopped"
         self._session = None
 
@@ -513,6 +546,29 @@ class MCPManager:
         # landed in self.connections — the other kept a live supervisor and
         # a child process nothing could reach.
         self._server_locks: dict[str, asyncio.Lock] = {}
+        # Those locks serialize CRUD on ONE server and say nothing about the
+        # global transitions. shutdown() published started=False, awaited the
+        # closes, and only then cleared the dict — so a concurrent start()
+        # (mcp_enabled toggled off and back on in Settings) saw a stopped
+        # manager, spawned its replacements into that same dict, and had them
+        # wiped out of it by the clear() that followed. The supervisors and
+        # their stdio children stayed alive with nothing tracking them, while
+        # the tool bridge told the model the server was "no longer
+        # configured".
+        #
+        # Two mechanisms, deliberately not one lock:
+        #   _lifecycle serializes start() against shutdown(). Neither waits on
+        #     a per-server lock while holding it, so no CRUD call can deadlock
+        #     against a global transition.
+        #   _generation gives every connection an owner. A CRUD call captures
+        #     the generation before it awaits a close() and passes it to
+        #     _spawn; if a global transition ran in the meantime the spawn is
+        #     refused outright, because the dict it would land in is one its
+        #     generation no longer owns. That covers reload_server, which
+        #     holds only its own per-server lock and would otherwise re-create
+        #     the same orphan from the other direction.
+        self._lifecycle = asyncio.Lock()
+        self._generation = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self.started = False
 
@@ -520,23 +576,54 @@ class MCPManager:
 
     async def start(self) -> None:
         """Load configs and spawn supervisors. Never blocks on any server."""
-        self._loop = asyncio.get_running_loop()
-        self.started = True
-        configs = load_server_configs()
-        if len(configs) > settings.mcp_max_servers:
-            keep = dict(sorted(configs.items())[: settings.mcp_max_servers])
-            skipped = sorted(set(configs) - set(keep))
-            logger.warning(
-                "mcp_servers.json has %d servers; cap is %d — skipping: %s",
-                len(configs),
-                settings.mcp_max_servers,
-                ", ".join(skipped),
-            )
-            configs = keep
-        for cfg in configs.values():
-            self._spawn(cfg)
-        if configs:
-            logger.info("MCP manager started: %d server(s) configured", len(configs))
+        async with self._lifecycle:
+            if self.started:
+                # start() re-reads the file and spawns unconditionally, so a
+                # second call replaced every tracked connection with a fresh
+                # one and left the first generation's supervisors running with
+                # nothing pointing at them — no concurrency required.
+                logger.debug("MCP manager is already started; ignoring a duplicate start()")
+                return
+            self._loop = asyncio.get_running_loop()
+            self._generation += 1
+            gen = self._generation
+            self.started = True
+            # Nothing should be tracked here: shutdown() untracks everything
+            # it owned, on the cancelled path too. If something is, it is a
+            # connection from a previous generation, and spawning over it is
+            # exactly the orphan this guard exists to prevent — retire it
+            # first, synchronously, so start() still never blocks on a server.
+            stragglers = [c for c in self.connections.values()]
+            if stragglers:
+                logger.warning(
+                    "MCP manager start found %d connection(s) from a previous generation; retiring them: %s",
+                    len(stragglers),
+                    ", ".join(sorted(c.cfg.name for c in stragglers)),
+                )
+                for c in stragglers:
+                    c.abandon()
+                self.connections.clear()
+            configs = load_server_configs()
+            if len(configs) > settings.mcp_max_servers:
+                keep = dict(sorted(configs.items())[: settings.mcp_max_servers])
+                skipped = sorted(set(configs) - set(keep))
+                logger.warning(
+                    "mcp_servers.json has %d servers; cap is %d — skipping: %s",
+                    len(configs),
+                    settings.mcp_max_servers,
+                    ", ".join(skipped),
+                )
+                configs = keep
+            for cfg in configs.values():
+                try:
+                    self._spawn(cfg, generation=gen)
+                except Exception as e:
+                    # One unspawnable server must not abort the others, and it
+                    # must not leave a half-tracked entry behind either —
+                    # _spawn untracks anything it could not start.
+                    logger.warning("MCP server '%s' could not be started: %s", cfg.name, describe_error(e))
+            if configs:
+                logger.info("MCP manager started: %d server(s) configured", len(self.connections))
 
     async def shutdown(self) -> None:
         """Close every connection (kills stdio children). Tools stay registered;
@@ -547,19 +634,74 @@ class MCPManager:
         server in register_server_tools), so an mcp_enabled off→on cycle
         replaces the tools in place instead of duplicating them.
         """
-        self.started = False
-        conns = list(self.connections.values())
-        if conns:
-            await asyncio.gather(*(c.close() for c in conns), return_exceptions=True)
-        self.connections.clear()
-        logger.info("MCP manager stopped")
+        async with self._lifecycle:
+            # Retire this generation BEFORE the first await. A CRUD call
+            # parked in its own close() then finds its generation stale and
+            # refuses to spawn a replacement into the dict this call is about
+            # to empty.
+            self._generation += 1
+            self.started = False
+            conns = list(self.connections.values())
+            try:
+                if conns:
+                    await asyncio.gather(*(c.close() for c in conns), return_exceptions=True)
+            finally:
+                # Runs on the cancelled path too. api/app.py bounds this call
+                # with wait_for(..., timeout=8), and that cancellation landed
+                # on the gather — so the untracking below never happened and
+                # the manager was left stopped with half-closed connections
+                # still tracked, for the next start() to spawn straight over.
+                # Force-close anything the gather did not finish, then drop
+                # exactly what this generation owned (by identity, never by
+                # clear()) so ownership is released only after teardown is
+                # guaranteed.
+                for c in conns:
+                    c.abandon()
+                    if self.connections.get(c.cfg.name) is c:
+                        del self.connections[c.cfg.name]
+            logger.info("MCP manager stopped")
 
-    def _spawn(self, cfg: MCPServerConfig) -> MCPConnection:
+    def _spawn(self, cfg: MCPServerConfig, *, generation: int | None = None) -> MCPConnection:
+        """Track and start one connection under an explicit generation.
+
+        Callers that awaited anything first — add/reload both close the old
+        connection before spawning — must pass the generation they captured
+        before that await. If a global transition ran in between, this spawn
+        is refused rather than leaving a live supervisor in a dict its owner
+        has already emptied. There is no await between the check and the
+        insert, so on a single-threaded loop the pair is atomic.
+        """
+        gen = self._generation if generation is None else generation
+        if gen != self._generation:
+            raise MCPUnavailable(
+                f"the MCP manager was stopped or restarted while server '{cfg.name}' was being started; "
+                "nothing was spawned — re-apply the change once it is running again"
+            )
         conn = MCPConnection(cfg, self)
+        conn.generation = gen
         self.connections[cfg.name] = conn
         if cfg.enabled:
-            conn.start()
+            try:
+                conn.start()
+            except Exception:
+                # Never leave a tracked connection with no supervisor behind it.
+                if self.connections.get(cfg.name) is conn:
+                    del self.connections[cfg.name]
+                raise
         return conn
+
+    def _check_generation(self, gen: int, name: str) -> None:
+        """Bail out of a CRUD call whose generation was retired mid-await.
+
+        Without this, the persist that follows would write the connections
+        dict a shutdown has just emptied — turning a concurrent disable into
+        an erased mcp_servers.json.
+        """
+        if gen != self._generation:
+            raise MCPUnavailable(
+                f"the MCP manager was stopped or restarted while server '{name}' was being updated; "
+                "the change was not applied — re-apply it once it is running again"
+            )
 
     # --- server CRUD (call on the event loop) ---
 
@@ -577,6 +719,7 @@ class MCPManager:
         tells the caller exactly what went wrong.
         """
         async with self._lock_for(cfg.name):
+            gen = self._generation
             existing = self.connections.get(cfg.name)
             if existing is None and len(self.connections) >= settings.mcp_max_servers:
                 raise ValueError(
@@ -589,8 +732,9 @@ class MCPManager:
                 # 2026-09-01 on every UI "Save changes").
                 await existing.close()
                 self._unregister_tools(existing)
+            self._check_generation(gen, cfg.name)
             self._persist()  # snapshot current set first so a crash keeps the file coherent
-            conn = self._spawn(cfg)
+            conn = self._spawn(cfg, generation=gen)
             self._persist()
             if cfg.enabled:
                 await conn.ensure_ready()
@@ -598,11 +742,13 @@ class MCPManager:
 
     async def remove_server(self, name: str) -> bool:
         async with self._lock_for(name):
+            gen = self._generation
             conn = self.connections.pop(name, None)
             if conn is None:
                 return False
             await conn.close()
             self._unregister_tools(conn)
+            self._check_generation(gen, name)
             self._persist()
             return True
 
@@ -632,6 +778,7 @@ class MCPManager:
         """Full reconnect: re-reads this server's entry from disk (picking up
         hand edits), drops the connection, and waits for ready."""
         async with self._lock_for(name):
+            gen = self._generation
             conn = self.connections.get(name)
             if conn is None:
                 raise KeyError(f"No MCP server named '{name}'")
@@ -642,7 +789,12 @@ class MCPManager:
                 raise ValueError(f"MCP server '{name}' is disabled — enable it first")
             await conn.close()
             self._unregister_tools(conn)
-            fresh = self._spawn(conn.cfg)
+            # The other door onto the same orphan: this call holds only its
+            # own server's lock, so a shutdown can have cleared the whole dict
+            # while it sat in close() above. Spawning under the captured
+            # generation makes _spawn refuse rather than leave a live
+            # supervisor nothing tracks.
+            fresh = self._spawn(conn.cfg, generation=gen)
             await fresh.ensure_ready()
             return fresh
 
