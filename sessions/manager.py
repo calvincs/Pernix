@@ -2229,9 +2229,26 @@ class SessionManager:
         from pathlib import Path as _P
 
         from core.extensions.orchestration import report as _wreport
+        from core.extensions.orchestration import worker_trust as _worker_trust
+
+        reason = session.termination_reason
 
         existing = await asyncio.to_thread(_wreport.resolve_report, session.session_id)
         if existing is not None:
+            # The worker wrote its own report: leave the bytes alone, but bind
+            # this run's grade to them. That binding is what lets a later read
+            # say "this changed after it was graded" instead of serving an
+            # edited artifact under an old verdict (H10).
+            _trust = await asyncio.to_thread(
+                _worker_trust, session.session_id, term_reason=reason, include_history=False
+            )
+            await asyncio.to_thread(
+                _wreport.record_grade,
+                session.session_id,
+                verdict=_trust.verdict,
+                verification=_trust.verification,
+                artifact=existing.path,
+            )
             return
 
         _run = await asyncio.to_thread(_wreport.load_run, session.session_id)
@@ -2252,56 +2269,27 @@ class SessionManager:
         except Exception as e:
             logger.debug("Worker finalize: could not read messages for %s: %s", session.session_id, e)
 
-        # Classify from termination_reason, which survives the turn's return
-        # to IDLE_READY. The state itself says nothing here — the finally
-        # block has already transitioned home before we reach this point.
-        reason = session.termination_reason
-        # Pull the most recent reflect verdict (if any) to embed in the header.
-        # Reflect is the quality gate: when verdict != 'pass' (or reflect never
-        # ran) the stamped output should clearly say so, not just "auto-stamped"
-        # which reads as success.
-        reflect_verdict: str | None = None
-        reflect_reason: str = ""
-        try:
-            msgs = await asyncio.to_thread(db.get_messages, session.session_id, last=100)
-            for _m in reversed(msgs):
-                if _m.get("role") == "reflect":
-                    import json as _json
-
-                    try:
-                        _r = _json.loads(_m.get("content") or "{}")
-                        reflect_verdict = _r.get("verdict")
-                        reflect_reason = _r.get("reasoning", "")
-                    except (ValueError, TypeError):
-                        pass
-                    break
-        except Exception as _e:
-            logger.debug("Worker finalize: reflect lookup failed: %s", _e)
-
-        if reason in ("round_ceiling", "stuck_loop", "compaction_failed"):
-            header = f"# INCOMPLETE (worker terminated: {reason})\n"
-        elif reason == "cancelled":
-            header = "# CANCELLED (worker was cancelled before completion)\n"
-        elif reason == "error" or (reason is None and session.error):
-            err = session.error or "unknown"
-            header = f"# ERROR (worker exited with error: {err})\n"
-        elif reflect_verdict == "escalate":
-            header = (
-                f"# ESCALATED (reflect verdict: escalate)\n"
-                f"# Reason: {reflect_reason or '(no reasoning provided)'}\n"
-                f"# Output below is the last assistant message — may not be the "
-                f"actual deliverable. Use get_worker_transcript for the full stream.\n"
+        # The header is the SAME record-derived state get_worker_result and the
+        # parent's resume manifest read. Three independently-written headers is
+        # how a cancelled run came to be stamped under an earlier run's pass.
+        # termination_reason survives the turn's return to IDLE_READY; the
+        # state itself says nothing by now.
+        trust = await asyncio.to_thread(
+            _worker_trust,
+            session.session_id,
+            term_reason=reason,
+            error=session.error or "",
+            include_history=False,
+        )
+        header = trust.interruption_note() + trust.verification_note()
+        if trust.verdict == "escalate":
+            header += (
+                "# Output below is the last assistant message — may not be the "
+                "actual deliverable. Use get_worker_transcript for the full stream.\n"
             )
-        elif reflect_verdict == "retry":
-            header = (
-                f"# UNVERIFIED (reflect verdict: retry, retries exhausted)\n"
-                f"# Reason: {reflect_reason or '(no reasoning provided)'}\n"
-            )
-        elif reflect_verdict == "pass":
+        if not header:
+            # A clean, current, verified pass. This file is ours and says so.
             header = "# AUTO-STAMPED (reflect=pass; worker did not write an explicit summary)\n"
-        else:
-            # No reflect verdict recorded (reflect disabled or hook never ran).
-            header = "# UNVERIFIED (no reflect verdict recorded — quality not gated)\n"
 
         truncated = len(last_text) > self._STAMP_MAX_CHARS
         body = last_text[: self._STAMP_MAX_CHARS] if last_text else "(no assistant output)"
@@ -2314,6 +2302,17 @@ class SessionManager:
 
         try:
             await asyncio.to_thread(_write)
+            # Record that WE wrote this header, over these exact bytes. That
+            # record is what makes the stamp recognizable without trusting the
+            # file's first line — the line a worker can author itself.
+            await asyncio.to_thread(_wreport.record_stamp, session.session_id, artifact=summary_path, header=header)
+            await asyncio.to_thread(
+                _wreport.record_grade,
+                session.session_id,
+                verdict=trust.verdict,
+                verification=trust.verification,
+                artifact=summary_path,
+            )
             logger.info(
                 "Auto-stamped worker summary for %s (reason=%s, truncated=%s)",
                 session.session_id,
@@ -2679,19 +2678,20 @@ class SessionManager:
         for wid in inventory:
             w = self.get(wid)
             row = db.get_session(wid) or {}
+            # Run-scoped: a grade recorded below this run's message boundary
+            # graded earlier output, so it does not certify what the parent is
+            # about to synthesize (H10). The same scoping get_worker_result and
+            # the finalize stamp use — three readers, one record.
             verdict: str | None = None
             try:
-                import json as _json
+                from core.extensions.orchestration import report as _wreport
 
-                for m in reversed(db.get_messages(wid, last=100)):
-                    if m.get("role") == "reflect":
-                        try:
-                            verdict = _json.loads(m.get("content") or "{}").get("verdict")
-                        except (ValueError, TypeError):
-                            pass
-                        break
-            except Exception:
-                pass
+                _current, _stale, _stale_seq = _wreport.run_scoped_reflect(wid)
+                verdict = (_current or {}).get("verdict")
+                if verdict is None and _stale:
+                    verdict = "stale"
+            except Exception as _e:
+                logger.debug("resume manifest verdict lookup failed for %s: %s", wid, _e)
             # Terminal metadata comes from the durable log whenever memory has
             # none — a hydrated worker's object is real but incomplete, and the
             # old `w is None` test could never reach the durable answer.
@@ -2718,6 +2718,9 @@ class SessionManager:
                 problem_workers.append(wid)
             elif verdict == "retry":
                 lines.append(f"  - {wid}{suffix}: UNVERIFIED (retries exhausted)")
+                problem_workers.append(wid)
+            elif verdict == "stale":
+                lines.append(f"  - {wid}{suffix}: UNVERIFIED (its last grade was of an earlier run)")
                 problem_workers.append(wid)
             elif tr in ("round_ceiling", "stuck_loop", "budget_exhausted", "compaction_failed"):
                 lines.append(f"  - {wid}{suffix}: INCOMPLETE ({tr} — a hard cap, not completion)")
