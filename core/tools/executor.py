@@ -281,6 +281,109 @@ class _DispatchGate:
             return self._running
 
 
+class DispatchCancelled(asyncio.CancelledError):
+    """A tool discovered, from its own thread, that its dispatch is over.
+
+    Tools that hand work to the event loop cannot be recalled by the
+    dispatcher's fut.cancel(): that cancels the wrapper future, never the
+    coroutine behind it. They cooperate instead — they watch their dispatch's
+    scope and raise this the moment it closes.
+
+    It derives from CancelledError on purpose. A tool that returns a string
+    saying "the call was cancelled" hands the model a normal tool result and
+    the round continues as if nothing happened; raising unwinds the round the
+    same way a stop that landed one instruction earlier would.
+    """
+
+
+class AsyncOpScope:
+    """Ownership link between one dispatch and the loop-side work it started.
+
+    A sync tool on a pool thread marshals a coroutine onto the event loop with
+    run_coroutine_threadsafe and blocks on the returned
+    concurrent.futures.Future. Nothing the dispatcher holds reaches that
+    future: cancelling the task that awaits the pool, killing the call's
+    subprocesses, and claiming the gate all miss it. So a stop, a dispatch
+    timeout, or a saturated-pool give-up left the coroutine running to
+    completion — for MCP that means a remote request transmitted after the
+    user pressed stop — and left the pool thread parked on it for the tool's
+    whole timeout.
+
+    Every dispatch now carries a scope. The tool registers its future here;
+    cancelling the scope cancels each registered future, which both wakes the
+    blocked thread at once and propagates cancellation into the coroutine on
+    the loop. Registration and cancellation share one lock, so a future
+    registered after the scope closed is cancelled on the spot rather than
+    slipping through the gap between the two.
+
+    The cooperative flag lives here too, so one object answers "is this
+    dispatch over?" for both kinds of tool: those with a loop-side future
+    register it, those with nothing to cancel poll `event`.
+    """
+
+    __slots__ = ("_lock", "_cancelled", "_futures", "event")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._futures: list = []
+        # The same threading.Event that has always ridden in ctx["_cancel_event"].
+        self.event = threading.Event()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def register(self, fut) -> bool:
+        """Take ownership of a loop-side future.
+
+        False means the dispatch was already over — the future is cancelled
+        here rather than handed back, because the caller is on a pool thread
+        and the window it lost is exactly the one that leaks an operation.
+        """
+        with self._lock:
+            if self._cancelled:
+                fut.cancel()
+                return False
+            self._futures.append(fut)
+            return True
+
+    def unregister(self, fut) -> None:
+        """Terminal path for one operation — result, error, or timeout."""
+        with self._lock:
+            try:
+                self._futures.remove(fut)
+            except ValueError:
+                pass
+
+    def cancel(self) -> None:
+        """Dispatcher: this call is over. Idempotent, because several terminal
+        paths can run for one dispatch (a timeout whose caller then cancels)."""
+        with self._lock:
+            self._cancelled = True
+            futures, self._futures = self._futures, []
+        self.event.set()
+        for fut in futures:
+            try:
+                fut.cancel()
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Could not cancel a registered async op", exc_info=True)
+
+
+def dispatch_cancelled(context: dict | None) -> bool:
+    """Whether the dispatch that owns this tool call is over.
+
+    The read side of AsyncOpScope for code running on a pool thread. Safe on a
+    context that carries neither the scope nor the flag (a direct
+    execute_sync, a test), which simply means nothing has cancelled it.
+    """
+    scope = (context or {}).get("_async_ops")
+    if scope is not None and scope.cancelled:
+        return True
+    ev = (context or {}).get("_cancel_event")
+    return bool(ev is not None and ev.is_set())
+
+
 def _kill_tool_subprocess(context: dict | None, call_id: str) -> None:
     """Kill the subprocesses spawned by ONE dispatch call after its timeout.
 
@@ -552,8 +655,11 @@ async def _execute_single(
     # inside a tool, and it does nothing at all for pure-Python work: an
     # http_get whose dispatch timed out kept fetching, holding a pool slot and
     # an open socket, long after the model was told the call had ended. Tools
-    # that can unwind read this flag at their own safe points.
-    cancel_event = threading.Event()
+    # that can unwind read this flag at their own safe points; tools that
+    # marshal a coroutine onto the loop register its future on the scope, so
+    # cancelling this dispatch reaches the coroutine too.
+    scope = AsyncOpScope()
+    cancel_event = scope.event
     try:
         # Capture the running event loop so tools on worker threads can
         # schedule coroutines back onto it via run_coroutine_threadsafe().
@@ -564,6 +670,7 @@ async def _execute_single(
         # timeout kills this call's children and nobody else's.
         ctx["_call_id"] = call_id
         ctx["_cancel_event"] = cancel_event
+        ctx["_async_ops"] = scope
         if workspace_override:
             ctx["workspace_override"] = workspace_override
         if workspace_home:
@@ -614,7 +721,7 @@ async def _execute_single(
             # it at the pool thread even when fut.cancel() loses the race to
             # a dequeue.
             gate.cancel()
-            cancel_event.set()
+            scope.cancel()
             fut.cancel()
             latency = int((time.monotonic() - start) * 1000)
             registry.metrics[name].record_timeout(latency)
@@ -699,9 +806,10 @@ async def _execute_single(
         _credit_long_call(context, latency)
         # The worker thread is still blocked in the tool and cannot be
         # cancelled. Kill any subprocess it spawned so it unwinds instead of
-        # holding a tool-executor thread for the child's full runtime, and
-        # raise the cooperative flag for tools with no subprocess to kill.
-        cancel_event.set()
+        # holding a tool-executor thread for the child's full runtime, raise
+        # the cooperative flag for tools with no subprocess to kill, and
+        # cancel any coroutine this call left running on the event loop.
+        scope.cancel()
         _kill_tool_subprocess(context, call_id)
         return ToolExecutionResult(
             tool_name=name,
@@ -720,8 +828,14 @@ async def _execute_single(
         # then fut.cancel(), which succeeds only while the item is still
         # queued. Only if the tool really was already running is there a
         # child to kill or anything to record against the tool.
+        #
+        # scope.cancel() is the third lever, for a tool already inside a
+        # loop-side operation: it cancels the coroutine that tool is blocked
+        # on, which is the only way to stop an MCP request that has not yet
+        # been transmitted and the only way to get the pool thread back
+        # before that call's own timeout.
         was_running = gate.cancel()
-        cancel_event.set()
+        scope.cancel()
         fut.cancel()
         if was_running:
             registry.metrics[name].record_failure("cancelled", latency)

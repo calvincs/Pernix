@@ -6,6 +6,12 @@ loop via run_coroutine_threadsafe, and formats the CallToolResult back into
 the registry's (str, metadata) shape. Formatting happens on the tool thread
 on purpose: execute_sync has already scoped WORKSPACE_OVERRIDE there, so
 saved blobs land in the calling session's workspace.
+
+The submitted future is registered on the dispatch's AsyncOpScope so a stop
+reaches the coroutine instead of only the thread waiting on it, and a
+cancelled call raises rather than returning an "Error: ... was cancelled"
+string — that string was a normal tool result, which let the round carry on
+after the user had stopped it.
 """
 
 from __future__ import annotations
@@ -68,12 +74,35 @@ def call_mcp_tool_sync(
     if loop is None or not loop.is_running():
         return "Error: MCP requires the event loop context. Internal error."
 
-    from core.extensions.mcp.manager import MCPUnavailable
+    from core.extensions.mcp.manager import MCPCallCancelled, MCPUnavailable
+    from core.tools.executor import DispatchCancelled, dispatch_cancelled
+
+    # This is the only tool family in Pernix whose calls have side effects on
+    # someone else's machine, so cancellation is checked three times: here,
+    # before anything is handed to the loop; again on the loop either side of
+    # ensure_ready(), which is where a stop during a slow wake-up used to turn
+    # into a real remote request; and once more by the scope, which cancels
+    # the coroutine outright if the stop lands while this thread is blocked.
+    scope = (_context or {}).get("_async_ops")
+
+    def _stopped() -> bool:
+        return dispatch_cancelled(_context)
+
+    if _stopped():
+        logger.info("MCP call '%s' on server '%s' dropped: the dispatch was already cancelled", remote_name, server)
+        raise DispatchCancelled(f"MCP call '{remote_name}' was cancelled before anything was sent to '{server}'")
 
     try:
-        fut = asyncio.run_coroutine_threadsafe(conn.call_tool(remote_name, arguments), loop)
+        fut = asyncio.run_coroutine_threadsafe(conn.call_tool(remote_name, arguments, cancel_check=_stopped), loop)
     except RuntimeError as e:
         return f"Error: MCP call could not be scheduled (loop not running): {e}"
+    if scope is not None and not scope.register(fut):
+        # The stop landed in the gap between the check above and the submit.
+        # register() cancelled the future on the way out; the coroutine's own
+        # cancel_check covers the case where it already had a head start.
+        logger.info("MCP call '%s' on server '%s' cancelled as it was scheduled", remote_name, server)
+        raise DispatchCancelled(f"MCP call '{remote_name}' on '{server}' was cancelled as it was scheduled")
+
     wait = conn.call_timeout + 10
     try:
         result = fut.result(timeout=wait)
@@ -83,12 +112,32 @@ def call_mcp_tool_sync(
             f"Error: MCP tool '{remote_name}' on server '{server}' timed out after {wait}s. "
             "The server may be overloaded; retry, or raise this server's timeout in its config."
         )
+    except MCPCallCancelled as e:
+        # Stopped on the loop, before the request was written.
+        logger.info("%s", e)
+        raise DispatchCancelled(str(e)) from None
     except _futures.CancelledError:
-        return f"Error: MCP call '{remote_name}' was cancelled."
+        # The dispatch was cancelled while this thread was blocked on the
+        # result: the request had already been handed to the connection, so
+        # whether the server acted on it is genuinely unknown. Say that,
+        # rather than implying the action was prevented.
+        logger.warning(
+            "MCP call '%s' on server '%s' was cancelled after dispatch — the request may already have "
+            "reached the server, so a remote side effect cannot be ruled out",
+            remote_name,
+            server,
+        )
+        raise DispatchCancelled(
+            f"MCP call '{remote_name}' on '{server}' was cancelled after dispatch; "
+            "it may already have been transmitted"
+        ) from None
     except MCPUnavailable as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error: MCP tool '{remote_name}' on server '{server}' failed: {e}"
+    finally:
+        if scope is not None:
+            scope.unregister(fut)
     return format_call_result(result, server=server, remote_name=remote_name)
 
 
