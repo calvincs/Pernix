@@ -1563,6 +1563,16 @@ async def run_agent(
     # gets settings.round_cap_auto_continue fresh budgets, mirroring the
     # length-truncation continuation above.
     _round_cap_continues = 0
+    _authorized_renewals = max(0, int(getattr(settings, "round_cap_auto_continue", 0) or 0))
+    # True only for the round the harness itself took the tools away on. The
+    # model answering in prose there is obeying an instruction, not reporting
+    # that the task is finished, so that round's tool-less reply must never be
+    # filed as "complete".
+    _forced_synthesis = False
+    # The current window has executed at least one tool round. A renewal is
+    # payment for observed progress: an empty or tool-less response must not
+    # buy one.
+    _window_did_tool_calls = False
 
     # Forced follow-ups used this turn (spec Feature 9). Bounded by
     # settings.forced_followup_max_per_turn so a genuinely finished task is
@@ -1612,14 +1622,55 @@ async def run_agent(
         except Exception:
             logger.debug("orphaned-RLM surfacing failed", exc_info=True)
 
+    # Two numbers, not one. `tool_round` indexes the CURRENT window
+    # (0..max_tool_rounds-1) and is what decides the tools-disabled terminal
+    # round; `_rounds_spent` counts every round this turn has actually
+    # consumed, across every window, and is what the periodic in-turn checks
+    # key on. They used to be the same variable, so a renewal reset the goal
+    # budget checkpoint cadence along with the window.
     tool_round = 0
+    _rounds_spent = 0
     while tool_round < settings.max_tool_rounds:
         # --- Pre-round checks ---
-        _gate_action = await _pre_round_gate(session, session_id, tool_round)
+        _gate_action = await _pre_round_gate(session, session_id, _rounds_spent)
         if _gate_action == "return":
             return
         if _gate_action == "break":
             break
+
+        # --- Round-budget renewal, decided BEFORE the terminal round ---
+        # The next round is this window's tools-disabled synthesis round. If
+        # an authorized renewal is still available, spend it here. The branch
+        # that used to do this sat AFTER tool execution, so reaching it needed
+        # the round that just executed tools to be the round tools had been
+        # taken away on: a provider that honours tools=None answers in prose
+        # instead, the loop reads "no tool calls" as done, and a 50-round turn
+        # ended at 50 with round_cap_auto_continue untouched (measured: 6 LLM
+        # calls, 0 renewals, termination_reason="complete").
+        if tool_round >= settings.max_tool_rounds - 1 and _window_did_tool_calls:
+            _renewals_left = _authorized_renewals - _round_cap_continues
+            _refusal = None if _renewals_left > 0 else "no renewal authorized"
+            if _refusal is None:
+                _refusal = await _round_renewal_refusal(session, session_id, stuck)
+            if _refusal is None:
+                _round_cap_continues += 1
+                await _grant_round_renewal(
+                    session,
+                    session_id,
+                    granted=_round_cap_continues,
+                    authorized=_authorized_renewals,
+                    rounds_spent=_rounds_spent,
+                )
+                tool_round = 0
+                _window_did_tool_calls = False
+                continue
+            logger.info(
+                "Session %s: round window spent at round %d (%d total) — no renewal: %s",
+                session_id,
+                tool_round,
+                _rounds_spent,
+                _refusal,
+            )
 
         # Re-resolve the effective model each round so an in-turn switch_model
         # call (which writes session.model_override) actually moves the next
@@ -1654,6 +1705,7 @@ async def run_agent(
             tool_round,
             context_budget=effective_budget,
             context_tokens=_last_context_tokens,
+            renewals_remaining=max(0, _authorized_renewals - _round_cap_continues),
         )
         # Read before the compile, not after: a combine landing while the
         # compiler is reading rows may or may not make it into this payload, and
@@ -1760,8 +1812,14 @@ async def run_agent(
         # "LAST ROUND (tools disabled)" copy in resource_status (tier at
         # remaining==1) already tells the model what to do — no second
         # compile needed.
+        #
+        # Reaching here with the window spent means the renewal check above
+        # declined, so this really is forced synthesis: remember it, because
+        # the prose it produces is an instruction being obeyed, not a report
+        # that the work is done.
         stream_tools = payload.tools
-        if tool_round == settings.max_tool_rounds - 1:
+        _forced_synthesis = tool_round == settings.max_tool_rounds - 1
+        if _forced_synthesis:
             stream_tools = None
 
         # --- Stream with retry/fallback ---
@@ -1865,6 +1923,7 @@ async def run_agent(
                 save_turn_msg=_save_turn_msg,
             )
             tool_round += 1  # this counts as a round consumed
+            _rounds_spent += 1
             continue  # back to top of tool_round loop
 
         # --- Native-format tool-call salvage ---
@@ -1925,6 +1984,7 @@ async def run_agent(
                 session.touch()
                 collected_content = ""
                 tool_round += 1
+                _rounds_spent += 1
                 continue
 
             # No tool calls — model has responded. Save and finish.
@@ -1982,11 +2042,17 @@ async def run_agent(
                 # pass, so it must not spend the turn's round budget.
                 continue
 
-            session.termination_reason = "complete"
+            # A tool-less reply on a round the harness disarmed is not evidence
+            # the task finished — the resource status literally instructed the
+            # model to stop calling tools and summarize. Keep the allowance
+            # exhaustion typed so reflect's ceiling-loop guard and the worker
+            # INCOMPLETE header both see the wall this turn hit.
+            session.termination_reason = "round_ceiling" if _forced_synthesis else "complete"
             return
 
         # --- Tool execution ---
         did_tool_calls = True
+        _window_did_tool_calls = True
 
         # A pending nudge answered with tool calls = the nudge worked.
         if _followup_pending:
@@ -2105,39 +2171,12 @@ async def run_agent(
         collected_content = ""
         collected_tool_calls = []
         tool_round += 1
-        if (
-            tool_round >= settings.max_tool_rounds
-            and _round_cap_continues < int(getattr(settings, "round_cap_auto_continue", 0) or 0)
-            and did_tool_calls
-            and not session.cancel_requested
-            and session.error is None
-            and stuck.repeat_count < 3
-        ):
-            _round_cap_continues += 1
-            logger.info(
-                "Session %s: round cap reached mid-task — granting continuation %d/%d",
-                session_id,
-                _round_cap_continues,
-                int(settings.round_cap_auto_continue),
-            )
-            try:
-                from core.llm.client import extend_session_budget
-
-                base = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else 0.0
-                if base > 0:
-                    extend_session_budget(session_id, base)
-            except Exception as _ext_err:
-                logger.debug("Round-cap continuation budget extend failed: %s", _ext_err)
-            await asyncio.to_thread(
-                db.add_message,
-                session_id,
-                "system",
-                f"[round cap reached — the harness granted one continuation "
-                f"({settings.max_tool_rounds} more rounds). Use it to FINISH: "
-                "complete the task or wrap up honestly with verified state. "
-                "No further continuations follow this one.]",
-            )
-            tool_round = 0
+        _rounds_spent += 1
+        # No renewal here any more: by the time a round has executed tools and
+        # incremented past the cap, the window's terminal round is behind us —
+        # which is exactly why this branch was unreachable for any provider
+        # that honours tools=None. The decision now happens at the top of the
+        # loop, before the terminal round is entered.
 
     # If we exit the tool loop without returning (max rounds hit, or stuck break),
     # make one final response call with tools=None to get a clean text answer.
@@ -2226,11 +2265,100 @@ async def _resolve_active_goal(session: AgentSession, session_id: str) -> None:
         session.active_goal_id = None
 
 
-async def _pre_round_gate(session: AgentSession, session_id: str, tool_round: int) -> str:
+async def _round_renewal_refusal(session: AgentSession, session_id: str, stuck) -> str | None:
+    """None when the round window may be renewed, else why it may not.
+
+    Everything here is a reason a fresh window would be wasted or unwanted,
+    checked in the order that matters: an explicit stop first, then a human
+    with something to say, then the goal's own ceiling. A renewal is authority
+    to keep spending, so it is granted only when nothing objects.
+    """
+    if session.cancel_requested:
+        return "cancel requested"
+    if session.error is not None:
+        return f"turn already errored ({session.error})"
+    if getattr(stuck, "repeat_count", 0) >= 3:
+        return "no progress — the stuck detector is repeating"
+    # The user's words outrank the machine's, the same rule
+    # _maybe_enqueue_goal_continuation follows: a queued message is direction
+    # this turn cannot read, so end the turn and let it be read.
+    if getattr(session, "pending_messages", None):
+        return "a user message is queued for the next turn"
+    if settings.goals_enabled and session.active_goal_id:
+        try:
+            exceeded = await asyncio.to_thread(_goal_budget_exceeded, session.active_goal_id)
+        except Exception as _e:
+            logger.debug("Round-renewal goal budget check failed: %s", _e)
+            exceeded = None
+        if exceeded:
+            return f"goal budget spent ({exceeded})"
+    return None
+
+
+async def _grant_round_renewal(
+    session: AgentSession,
+    session_id: str,
+    *,
+    granted: int,
+    authorized: int,
+    rounds_spent: int,
+) -> None:
+    """Open a fresh round window and tell the model what it actually has left."""
+    logger.info(
+        "Session %s: round window spent after %d round(s) — renewing %d/%d (%d fresh rounds)",
+        session_id,
+        rounds_spent,
+        granted,
+        authorized,
+        settings.max_tool_rounds,
+    )
+    try:
+        from core.llm.client import extend_session_budget
+
+        base = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else 0.0
+        if base > 0:
+            extend_session_budget(session_id, base)
+    except Exception as _ext_err:
+        logger.debug("Round-cap continuation budget extend failed: %s", _ext_err)
+    left = max(0, authorized - granted)
+    # The old copy said "No further continuations follow this one" whatever
+    # the configured allowance was, so an agent with three renewals left was
+    # told to wrap up on the first.
+    tail = (
+        f"{left} further renewal(s) can follow it."
+        if left
+        else "This is the LAST renewal — when these rounds run out the next "
+        "round is text-only synthesis with no tools."
+    )
+    await asyncio.to_thread(
+        db.add_message,
+        session_id,
+        "system",
+        f"[round budget renewed ({granted}/{authorized}) — {settings.max_tool_rounds} "
+        f"fresh tool rounds, granted because tool work is still progressing. Use "
+        f"them to FINISH: complete the task or wrap up honestly with verified "
+        f"state. {tail}]",
+    )
+    session.emit_event(
+        {
+            "type": "turn.round_renewal",
+            "granted": granted,
+            "authorized": authorized,
+            "rounds": settings.max_tool_rounds,
+        }
+    )
+    session.touch()
+
+
+async def _pre_round_gate(session: AgentSession, session_id: str, rounds_spent: int) -> str:
     """Decide whether the next tool round may start. "run" | "break" | "return".
 
     "break" leaves the loop through the final-answer path (the turn has work
     worth summarizing); "return" abandons it outright.
+
+    `rounds_spent` is the turn's TOTAL rounds consumed, not the current
+    window's index: the periodic goal-budget checkpoint below has to keep its
+    cadence across a round-budget renewal, which resets the window index to 0.
     """
     # Cooperative cancellation checkpoint
     if session.cancel_requested:
@@ -2242,7 +2370,7 @@ async def _pre_round_gate(session: AgentSession, session_id: str, tool_round: in
     # only BETWEEN turns, so a single turn could overshoot token/time budgets
     # without bound. Every third round is enough — the between-turns check
     # remains the authoritative settlement.
-    if settings.goals_enabled and session.active_goal_id and tool_round > 0 and tool_round % 3 == 0:
+    if settings.goals_enabled and session.active_goal_id and rounds_spent > 0 and rounds_spent % 3 == 0:
         try:
             exceeded = await asyncio.to_thread(_goal_budget_exceeded, session.active_goal_id)
         except Exception as _e:
@@ -3243,6 +3371,7 @@ def _build_resource_status(
     tool_round: int = 0,
     context_budget: int | None = None,
     context_tokens: int | None = None,
+    renewals_remaining: int = 0,
 ) -> str:
     """Build resource status for system prompt.
 
@@ -3255,6 +3384,12 @@ def _build_resource_status(
     nothing. Now: context fullness is the window-relative percentage,
     lifetime spend is a plain informational count, and tool rounds are
     named as the only binding limit.
+
+    `tool_round` indexes the current round WINDOW; `renewals_remaining` is how
+    many more windows the harness is still authorized to open. While that is
+    non-zero the window is not the binding limit and the last-round copy would
+    be a lie — the renewal happens before the tools-disabled round is entered,
+    so an agent told to wrap up would be wrapping up for nothing.
     """
     usage = db.get_session_usage(session_id)
     total_tokens = usage.get("total", 0)
@@ -3268,13 +3403,28 @@ def _build_resource_status(
     else:
         window = f"Context window: {budget:,} tokens (auto-compacted)"
     remaining = settings.max_tool_rounds - tool_round
+    renewals = max(0, int(renewals_remaining or 0))
+    if renewals:
+        limit_note = (
+            f"in this window, {renewals} automatic renewal(s) of " f"{settings.max_tool_rounds} rounds still authorized"
+        )
+    else:
+        limit_note = "the only binding limit"
     base = (
         f"[RESOURCE STATUS] {window} | "
         f"Session spend so far: {total_tokens:,} tokens over {calls} LLM call(s) "
         f"(informational only — not a limit) | "
-        f"Tool rounds remaining: {remaining}/{settings.max_tool_rounds} (the only binding limit)"
+        f"Tool rounds remaining: {remaining}/{settings.max_tool_rounds} ({limit_note})"
     )
-    if remaining == 1:
+    if renewals:
+        if remaining <= 2:
+            base += (
+                "\nThis round window is nearly spent, but the harness will renew "
+                f"it ({renewals} renewal(s) left) as long as tool work keeps "
+                "making progress. Keep going — do not wrap up — and keep any "
+                "finished deliverable written to disk as you go."
+            )
+    elif remaining == 1:
         base += (
             "\nLAST ROUND (tools disabled): summarize what you finished and "
             "explicitly state what is unfinished. Do not attempt tool calls."

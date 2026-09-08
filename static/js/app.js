@@ -4071,6 +4071,14 @@ function handleEvent(event) {
         appendMessage('system', '⟳ Late correction — your follow-up arrived after the answer was drafted; the agent is reading it now.');
     }
 
+    else if (type === 'turn.round_renewal') {
+        // The turn spent its window of tool rounds while still making
+        // progress, so the harness opened another one instead of forcing a
+        // wrap-up. Worth a visible line: it is the difference between "the
+        // agent stopped" and "the agent is still working".
+        appendMessage('system', `⟳ Round budget renewed ${event.granted}/${event.authorized} — ${event.rounds} more tool rounds; the agent is still working.`);
+    }
+
     else if (type === 'tool.call.intercepted') {
         // Gate-level corrections. Rejections already surface as error rows on
         // tool.call; alias rewrites are worth a visible line so users learn
