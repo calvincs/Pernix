@@ -863,6 +863,45 @@ SQL_SESSION_IS_IDLE = (
 )
 
 
+# The same rules again, for ONE id, at the moment of deletion.
+#
+# `list_purge_candidates` runs in a worker thread and hands back a snapshot;
+# the deletions then happen one at a time on the loop, and the world moves
+# while they do. A session that gets pinned, moved into a space, or starts a
+# turn between selection and deletion used to be deleted anyway, because
+# nothing looked again. `updated_at` is re-checked against the same cutoff
+# for the same reason — a chat the user has just reopened is no longer idle
+# — and `SQL_SESSION_IS_IDLE` is the codebase's existing definition of a
+# session that is not mid-turn.
+_PURGE_RECHECK_SQL = f"""SELECT
+    CASE
+        WHEN COALESCE(s.session_type, 'normal') != 'normal' THEN 'other_types'
+        WHEN COALESCE(s.pinned, 0) != 0 THEN 'pinned'
+        WHEN s.space_id IS NOT NULL THEN 'in_space'
+        WHEN s.updated_at >= ? THEN 'touched'
+        WHEN NOT {SQL_SESSION_IS_IDLE} THEN 'busy'
+        ELSE ''
+    END AS spared_by
+FROM sessions s
+WHERE s.id = ?"""
+
+
+def purge_candidate_spared_by(session_id: str, cutoff_iso: str) -> str | None:
+    """Why this session should NOT be deleted right now, or None to proceed.
+
+    'gone' means it is already deleted — nothing to do and nothing to
+    report as an error. The other buckets are the same names
+    `list_purge_candidates` reports under, so a re-check and a selection can
+    be added up without two vocabularies, plus 'touched' and 'busy', which
+    can only become true after a selection was made.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(_PURGE_RECHECK_SQL, (cutoff_iso, session_id)).fetchone()
+    if row is None:
+        return "gone"
+    return row["spared_by"] or None
+
+
 def get_sessions_in_state_v2(state_v2: str) -> list[dict]:
     """Return all sessions persisted with the given v2 state. Used by the
     boot-time reconcile sweep to find parents that were suspended on

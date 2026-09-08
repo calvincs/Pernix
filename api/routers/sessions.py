@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 
 from api.streaming import event_stream, sse_response
@@ -9,6 +11,7 @@ from db import models as db
 from sessions.manager import get_manager
 
 router = APIRouter(tags=["sessions"])
+logger = logging.getLogger("pernix.api.sessions")
 
 # Matches HISTORY_PAGE in static/js/app.js — the transcript window the client
 # asks for, and the fallback when a caller passes a cursor with no size.
@@ -874,6 +877,37 @@ async def purge_sessions(body: dict = {}):
 
     Both modes compute the same set from the same query, so a dry run is a
     promise the real run keeps.
+
+    Deletion goes through `delete_session_async`, one candidate at a time.
+    The synchronous `manager.delete_session` ran filesystem cleanup, a
+    recursive DB cascade, FTS deletion and a commit per session with no
+    yield anywhere: purging 995 sessions out of a 538 MB database held the
+    event loop for 8.98 seconds — three heartbeat ticks delivered where
+    1,798 were due, every stream on the box frozen for the batch. The async
+    form keeps phase 1 (which cancels the turn, and must stay loop-affine)
+    on the loop and phase 2 on a worker thread, and measured the same 995
+    deletions with a worst gap of 6.2 ms.
+
+    The candidate list is a snapshot taken in a thread, and the deletions
+    happen one at a time after it, so each id is re-checked against the same
+    rules immediately before it is deleted: a session that got pinned, moved
+    into a space, was touched, or started a turn in between is spared and
+    counted under `skipped_at_delete` rather than deleted anyway.
+
+    Partial completion is a reported outcome, not an exception. A failure
+    partway through used to discard the count of everything that HAD been
+    deleted — the route raised, the client got no body, and the user was told
+    the purge failed after 10 sessions were already gone. Now:
+
+      `would_delete`  the deletions this run set out to make
+      `purged`        the ones that actually happened, always reported
+      `skipped_at_delete`  spared by the re-check, by rule
+      `failed` / `failures`  how many could not be deleted, and why
+      `complete`      True when every intended deletion was made
+
+    and `purged + failed + sum(skipped_at_delete) == would_delete` always.
+    Cancellation (the client disconnecting mid-batch) still propagates —
+    there is no response to return it in — but logs what had been done.
     """
     body = body or {}
     keep_days = _non_negative_int(body.get("keep_days", 7), "keep_days")
@@ -891,10 +925,30 @@ async def purge_sessions(body: dict = {}):
     to_delete = candidates[keep_min:]
 
     purged = 0
+    failures: list[dict] = []
+    skipped_at_delete = {"gone": 0, "other_types": 0, "pinned": 0, "in_space": 0, "touched": 0, "busy": 0}
     if not dry_run:
         manager = get_manager()
         for s in to_delete:
-            manager.delete_session(s["id"])
+            sid = s["id"]
+            spared = await _asyncio.to_thread(db.purge_candidate_spared_by, sid, cutoff)
+            if spared:
+                skipped_at_delete[spared] += 1
+                continue
+            try:
+                await manager.delete_session_async(sid)
+            except _asyncio.CancelledError:
+                logger.warning(
+                    "Bulk purge cancelled after %d of %d deletions; %d already removed",
+                    purged + len(failures),
+                    len(to_delete),
+                    purged,
+                )
+                raise
+            except Exception as e:
+                logger.warning("Bulk purge: %s could not be deleted (%s: %s)", sid[:12], type(e).__name__, e)
+                failures.append({"id": sid, "error": f"{type(e).__name__}: {e}"})
+                continue
             purged += 1
 
     return {
@@ -905,6 +959,10 @@ async def purge_sessions(body: dict = {}):
         "candidates": len(candidates),
         "would_delete": len(to_delete),
         "purged": purged,
+        "failed": len(failures),
+        "failures": failures[:10],
+        "skipped_at_delete": skipped_at_delete,
+        "complete": dry_run or (purged == len(to_delete)),
         "sample": [{k: s[k] for k in ("id", "title", "updated_at", "message_count")} for s in to_delete[:10]],
         "skipped": found["skipped"],
     }
