@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import difflib
-import fcntl
 import logging
-import os
 import re
-import tempfile
 from pathlib import Path
 from typing import Generator
 
 from config import settings
+from core.tools.atomic import TargetBusy, WriteOutcome, atomic_write, target_lock
 from core.tools.paths import root_mismatch_hint
 from core.tools.paths import safe_write_path as _safe_path
 
@@ -320,29 +318,54 @@ def _make_diff(original: str, modified: str, filepath: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Atomic write helper
+# Reading the target, and checking it did not move under us
 # ---------------------------------------------------------------------------
 
 
-def _atomic_write(resolved: Path, content: str) -> None:
-    """Write content to resolved path atomically (tempfile + fsync + rename)."""
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(resolved.parent), suffix=".tmp", prefix=f".{resolved.name}.")
+def _read_target(resolved: Path) -> str:
+    """Read the file with its line endings intact.
+
+    newline='' so Python does NOT collapse \\r\\n / \\r / \\n — we need the raw
+    line endings to detect and preserve the style.
+    """
+    with open(resolved, "r", errors="replace", newline="") as f:
+        return f.read()
+
+
+def _stale_read_error(resolved: Path, path: str, original: str) -> str | None:
+    """Refuse the write if the file no longer holds what we read.
+
+    `target_lock` serializes every editor inside this process, but nothing
+    coordinates a shell `sed -i`, a second Pernix process, or a human with an
+    editor open. So the last thing an edit does before replacing the file is
+    read it back: an outside change that has already landed is caught here
+    and refused, leaving the outsider's version in place.
+
+    A change landing between this check and `os.replace` is still lost. That
+    residual race needs stronger isolation than an in-process lock and is
+    disclosed rather than claimed fixed.
+    """
     try:
-        # newline='' disables Python's write-side newline translation so
-        # the caller's line endings are written verbatim.
-        with os.fdopen(fd, "w", newline="") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, str(resolved))
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+        current = _read_target(resolved)
+    except OSError as e:
+        return f"Error: {path} could not be re-read before writing ({e}) — nothing was written."
+    if current == original:
+        return None
+    return (
+        f"Error: {path} changed on disk while this edit was being prepared — "
+        f"nothing was written, so the other change is still there. "
+        f"Call file_read(path='{path}') to see the current content before retrying."
+    )
+
+
+def _mode_note(outcome: WriteOutcome) -> str:
+    """Say out loud when the write declined to carry a bit forward."""
+    if outcome.dropped_setuid:
+        return (
+            "\n[note: the setuid bit was dropped — this tool does not re-grant setuid "
+            "to content it just wrote. Re-apply with chmod if you meant it.]"
+        )
+    return ""
 
 
 def _max_write_size() -> int:
@@ -385,6 +408,12 @@ def file_edit(path: str, old_string: str, new_string: str, replace_all: bool = F
     2. Whitespace-normalized match
     3. Indentation-flexible match
     4. Block-anchor match (first/last line anchors + fuzzy middle).
+
+    The read, the transform and the replace all happen under one lock on the
+    canonical target, so two editors in this process serialize instead of
+    both reading the same original and both reporting success. The file also
+    keeps whatever mode it had. Neither guard reaches outside this process —
+    see `_stale_read_error` for what is caught and what is not.
     """
     if old_string == new_string:
         return "No changes made (old_string and new_string are identical — treated as no-op)."
@@ -398,11 +427,27 @@ def file_edit(path: str, old_string: str, new_string: str, replace_all: bool = F
     except ValueError as e:
         return f"Error: {e}{root_mismatch_hint(path)}"
 
+    try:
+        with target_lock(resolved):
+            return _file_edit_locked(resolved, path, old_string, new_string, replace_all, cap)
+    except TargetBusy as e:
+        return f"Error: {e}"
+
+
+def _file_edit_locked(
+    resolved: Path,
+    path: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool,
+    cap: int,
+) -> str:
+    """The read-transform-replace interval, run with the target lock held."""
     if not resolved.exists():
         if not old_string:
             try:
-                _atomic_write(resolved, new_string)
-                logger.info("file_edit create path=%s bytes=%d", resolved, len(new_string))
+                outcome = atomic_write(resolved, new_string)
+                logger.info("file_edit create path=%s bytes=%d mode=%o", resolved, len(new_string), outcome.mode)
                 return f"Created new file: {resolved} ({len(new_string)} chars)"
             except Exception as e:
                 return f"Error creating file: {e}"
@@ -419,10 +464,7 @@ def file_edit(path: str, old_string: str, new_string: str, replace_all: bool = F
         return too_big
 
     try:
-        # Read with newline='' so Python does NOT collapse \r\n / \r / \n —
-        # we need the raw line endings to detect and preserve the style.
-        with open(resolved, "r", errors="replace", newline="") as f:
-            original = f.read()
+        original = _read_target(resolved)
     except Exception as e:
         return f"Error reading file: {e}"
 
@@ -457,21 +499,25 @@ def file_edit(path: str, old_string: str, new_string: str, replace_all: bool = F
 
     diff_text = _make_diff(original, result, path)
 
+    stale = _stale_read_error(resolved, path, original)
+    if stale:
+        return stale
+
     try:
-        _atomic_write(resolved, result)
+        outcome = atomic_write(resolved, result)
     except Exception as e:
         return f"Error writing file: {e}"
 
     added = sum(1 for l in diff_text.split("\n") if l.startswith("+") and not l.startswith("+++"))
     removed = sum(1 for l in diff_text.split("\n") if l.startswith("-") and not l.startswith("---"))
 
-    logger.info("file_edit path=%s strategy=%s +%d/-%d", resolved, strategy, added, removed)
+    logger.info("file_edit path=%s strategy=%s mode=%o +%d/-%d", resolved, strategy, outcome.mode, added, removed)
 
     strategy_note = ""
     if strategy and strategy != "exact":
         strategy_note = f" [fuzzy: {strategy}]"
 
-    return f"Edited {resolved}{strategy_note} (+{added}/-{removed} lines)\n\n{diff_text}"
+    return f"Edited {resolved}{strategy_note} (+{added}/-{removed} lines){_mode_note(outcome)}\n\n{diff_text}"
 
 
 def multiedit(path: str, edits: list[dict]) -> str:
@@ -479,6 +525,10 @@ def multiedit(path: str, edits: list[dict]) -> str:
 
     Each edit sees the result of the previous edit. Order matters. Any
     failure aborts the batch — no changes are written to disk.
+
+    The whole batch runs under one lock on the canonical target, so a
+    concurrent file_edit cannot land between the read and the replace and
+    have its change erased by the batch.
     """
     if not edits:
         return "Error: No edits provided."
@@ -488,6 +538,15 @@ def multiedit(path: str, edits: list[dict]) -> str:
     except ValueError as e:
         return f"Error: {e}{root_mismatch_hint(path)}"
 
+    try:
+        with target_lock(resolved):
+            return _multiedit_locked(resolved, path, edits)
+    except TargetBusy as e:
+        return f"Error: {e}"
+
+
+def _multiedit_locked(resolved: Path, path: str, edits: list[dict]) -> str:
+    """The read-transform-replace interval, run with the target lock held."""
     if not resolved.is_file():
         return f"Error: File not found: {path}{root_mismatch_hint(path)}"
 
@@ -499,11 +558,11 @@ def multiedit(path: str, edits: list[dict]) -> str:
         return too_big
 
     try:
-        with open(resolved, "r", errors="replace", newline="") as fh:
-            content = fh.read()
+        raw = _read_target(resolved)
     except Exception as e:
         return f"Error reading file: {e}"
 
+    content = raw
     eol = _detect_eol(content)
     if eol != "\n":
         content = _normalize_eol(content, eol)
@@ -546,8 +605,12 @@ def multiedit(path: str, edits: list[dict]) -> str:
 
     final = content.replace("\n", eol) if eol != "\n" else content
 
+    stale = _stale_read_error(resolved, path, raw)
+    if stale:
+        return stale
+
     try:
-        _atomic_write(resolved, final)
+        outcome = atomic_write(resolved, final)
     except Exception as e:
         return f"Error writing file: {e}"
 
@@ -556,10 +619,11 @@ def multiedit(path: str, edits: list[dict]) -> str:
     removed = sum(1 for l in diff_text.split("\n") if l.startswith("-") and not l.startswith("---"))
 
     logger.info(
-        "multiedit path=%s edits=%d strategies=%s +%d/-%d",
+        "multiedit path=%s edits=%d strategies=%s mode=%o +%d/-%d",
         resolved,
         applied,
         ",".join(strategies) or "-",
+        outcome.mode,
         added,
         removed,
     )
@@ -567,7 +631,10 @@ def multiedit(path: str, edits: list[dict]) -> str:
     fuzzy_used = [s for s in strategies if s != "exact"]
     strategy_note = f" [fuzzy: {','.join(sorted(set(fuzzy_used)))}]" if fuzzy_used else ""
 
-    return f"Applied {applied}/{len(edits)} edits to {path}{strategy_note}: +{added}/-{removed} lines\n\n{diff_text}"
+    return (
+        f"Applied {applied}/{len(edits)} edits to {path}{strategy_note}: "
+        f"+{added}/-{removed} lines{_mode_note(outcome)}\n\n{diff_text}"
+    )
 
 
 # ---------------------------------------------------------------------------

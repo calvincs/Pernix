@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from config import settings
+from core.tools.atomic import TargetBusy, atomic_write, file_revision, target_lock
 from core.tools.paths import (
     PROTECTED_DIRS,
     PROTECTED_FILES,
@@ -697,35 +698,68 @@ def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
         return f"Error reading file: {e}"
 
 
-def file_write(path: str, content: str) -> str:
-    """Write a file to the workspace."""
-    import fcntl
-    import tempfile
+def _revision_mismatch(resolved: Path, expected: str) -> str | None:
+    """Check a caller-supplied precondition against what is on disk.
 
+    A whole-file overwrite used as read-modify-write cannot detect a stale
+    read by locking its own final write — by then the caller's copy is
+    already old. `expected_sha256` is the caller saying which revision it
+    believes it is replacing; "absent" says it believes there is no file yet.
+    The rejection names the revision that is actually there so the caller can
+    re-read and decide rather than guess.
+    """
+    actual = file_revision(resolved)
+    if expected.strip().lower() == "absent":
+        if actual is None:
+            return None
+        return (
+            f"Error: {resolved} already exists (revision {actual}) but expected_sha256='absent' — "
+            f"nothing was written. Read it before overwriting."
+        )
+    if actual is None:
+        return (
+            f"Error: {resolved} does not exist, so it cannot match expected_sha256={expected} — "
+            f"nothing was written. Pass expected_sha256='absent' to create it."
+        )
+    if actual != expected.strip().lower():
+        return (
+            f"Error: {resolved} is at revision {actual}, not the expected {expected} — "
+            f"it changed since you read it, so nothing was written. "
+            f"Call file_read(path='{resolved}') and redo the change against the current content."
+        )
+    return None
+
+
+def file_write(path: str, content: str, expected_sha256: str | None = None) -> str:
+    """Write a file to the workspace.
+
+    Preserves the mode of a file it overwrites and creates new files at
+    `atomic.NEW_FILE_MODE`. Takes the same canonical-target lock file_edit
+    uses, so a write and an edit of one file serialize inside this process;
+    nothing coordinates a shell redirect or another process, which is what
+    `expected_sha256` is for.
+    """
     cap = int(getattr(settings, "max_file_write_size", MAX_WRITE_SIZE) or MAX_WRITE_SIZE)
     if len(content) > cap:
         return f"Error: content exceeds size cap ({len(content)} > {cap} bytes)"
     try:
         resolved = _safe_write_path(path)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic write: write to temp file, then rename
-        fd, tmp_path = tempfile.mkstemp(dir=str(resolved.parent), suffix=".tmp", prefix=f".{resolved.name}.")
-        try:
-            with os.fdopen(fd, "w") as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
-                f.write(content)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, str(resolved))
-        except Exception:
-            # Clean up temp file on failure
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-        logger.info("file_write path=%s bytes=%d", resolved, len(content))
-        return f"Written {len(content)} chars to {resolved}"
+        with target_lock(resolved):
+            if expected_sha256:
+                mismatch = _revision_mismatch(resolved, expected_sha256)
+                if mismatch:
+                    return mismatch
+            outcome = atomic_write(resolved, content)
+        logger.info("file_write path=%s bytes=%d mode=%o", resolved, len(content), outcome.mode)
+        note = ""
+        if outcome.dropped_setuid:
+            note = (
+                "\n[note: the setuid bit was dropped — this tool does not re-grant setuid "
+                "to content it just wrote. Re-apply with chmod if you meant it.]"
+            )
+        return f"Written {len(content)} chars to {resolved}{note}"
+    except TargetBusy as e:
+        return f"Error: {e}"
     except ValueError as e:
         return f"Error: {e}{root_mismatch_hint(path)}"
     except Exception as e:
@@ -1057,12 +1091,26 @@ def register(reg) -> None:
     reg.register(
         name="file_write",
         func=file_write,
-        description="Write content to a file in the workspace. Creates parent directories if needed.",
+        description=(
+            "Write content to a file in the workspace. Creates parent directories if needed. "
+            "Keeps the mode of a file it overwrites. When you are rewriting a file you read "
+            "earlier, pass expected_sha256 so a change someone else made in between is refused "
+            "instead of silently overwritten."
+        ),
         parameters={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Relative path within workspace"},
                 "content": {"type": "string", "description": "File content to write"},
+                "expected_sha256": {
+                    "type": "string",
+                    "description": (
+                        "Optional read-modify-write precondition: the sha256 of the file's "
+                        "current bytes (get it with bash `sha256sum <path>`), or 'absent' to "
+                        "require that the file does not exist yet. The write is refused if it "
+                        "does not match, and the error names the revision that is actually there."
+                    ),
+                },
             },
             "required": ["path", "content"],
         },
