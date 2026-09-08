@@ -29,6 +29,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from config import settings
+from db.exclusive import MaintenanceBusy
 
 router = APIRouter(tags=["storage"])
 
@@ -332,19 +333,84 @@ def _vacuum() -> tuple[int, int]:
     return before, after
 
 
+_ACTIVE_WORK_DETAIL = "A turn is running — compacting would block its writes. Try again when idle."
+
+
+def _turn_in_flight() -> bool:
+    """Is anything mid-turn on the database this rebuild is about to take?
+
+    Not `has_active_work()`, which is what this endpoint used to ask.
+    That routes through `snooze_transparent`, the idle-SCHEDULING rule: it
+    looks straight through canary sessions and through any session driven by
+    a goal auto-continuation, because snooze must not deadlock against its
+    own sweeps. Asked as proof of database quiescence it answered "idle"
+    while a canary turn and while an hours-long autonomous goal were both
+    mid-write, and `strict=True` — the codebase's own stricter reading —
+    still looks through the canary. A canary's INSERTs are INSERTs;
+    `has_database_writers()` is the reading with no exemptions in it.
+    """
+    from sessions.manager import get_manager
+
+    return get_manager().has_database_writers()
+
+
+def _guarded_vacuum() -> tuple[int, int]:
+    """Drain the announced background writers, re-check, then rebuild.
+
+    Runs on a thread with the exclusive slot ALREADY claimed by the caller,
+    and releases it here rather than there. That is the whole point of the
+    split: `asyncio.to_thread` cannot be cancelled once entered, so a client
+    that disconnects mid-rebuild leaves this function running — and if the
+    slot were released by the awaiting coroutine, the next `/optimize` would
+    be admitted straight into a `VACUUM` that is still holding the writer
+    lock.
+
+    The second `_turn_in_flight()` is the check the handler could not make.
+    The old code asked once and then yielded to a thread, so anything that
+    started in between ran against the rebuild; asking again from inside the
+    thread, immediately before the `VACUUM` statement, is the admission
+    decision the audit asks for — optimization declines rather than the turn
+    being made to wait.
+    """
+    from db.exclusive import get_gate
+
+    gate = get_gate()
+    try:
+        gate.drain()
+        if _turn_in_flight():
+            raise MaintenanceBusy(_ACTIVE_WORK_DETAIL)
+        return _vacuum()
+    finally:
+        gate.release()
+
+
 @router.post("/api/storage/optimize")
 async def optimize_database():
     """Rebuild the database file so the free pages go back to the filesystem.
 
-    Refused while a turn is in flight. VACUUM holds a write lock for the
-    whole rebuild; on a 168 MB database that is long enough for a running
-    agent's next write to time out, and losing a turn is a worse outcome
-    than a full disk five minutes later.
+    Refused while a turn is in flight, while another rebuild is in flight,
+    and while an announced background writer has not finished. VACUUM holds
+    the writer lock for the whole rebuild — 0.70 s at the 168 MB the box
+    actually runs at, and past four seconds by a gigabyte — so the cost of
+    admitting one at the wrong moment is a stall for every writer on the
+    database, and the cost of admitting two is two of them.
+
+    The slot is claimed here, synchronously, before any `await`: the gap
+    between the old check and the thread it handed off to was wide enough
+    for a second request to walk through it.
     """
-    from sessions.manager import get_manager
+    from db.exclusive import get_gate
 
-    if get_manager().has_active_work():
-        raise HTTPException(409, detail="A turn is running — compacting would block its writes. Try again when idle.")
+    if _turn_in_flight():
+        raise HTTPException(409, detail=_ACTIVE_WORK_DETAIL)
 
-    before, after = await asyncio.to_thread(_vacuum)
+    try:
+        get_gate().claim("storage.optimize")
+    except MaintenanceBusy as e:
+        raise HTTPException(409, detail=f"Compaction is already running ({e.holder}). Try again when it finishes.")
+
+    try:
+        before, after = await asyncio.to_thread(_guarded_vacuum)
+    except MaintenanceBusy as e:
+        raise HTTPException(409, detail=str(e))
     return {"bytes_before": before, "bytes_after": after}
