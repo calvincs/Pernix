@@ -177,6 +177,116 @@ def digest(path: Path) -> str:
         return ""
 
 
+def record_grade(worker_id: str, *, verdict: str | None, verification: str, artifact: Path | None) -> None:
+    """Bind this run's grade to the bytes it graded.
+
+    Called once a run's post-hooks have settled. Two things it makes possible:
+    a later read can tell that the artifact has changed since it was graded,
+    and a stamp this harness wrote can be recognized as ours without trusting
+    the file's own first line — which is a line a worker can type.
+    """
+    run = load_run(worker_id)
+    if run is None:
+        return
+    run["graded"] = {
+        "seq": int(run.get("seq") or 1),
+        "verdict": verdict,
+        "verification": verification,
+        "digest": digest(artifact) if artifact is not None else "",
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_run(worker_id, run)
+
+
+def record_stamp(worker_id: str, *, artifact: Path, header: str) -> None:
+    """Remember that WE wrote this artifact's header, and over which bytes."""
+    run = load_run(worker_id)
+    if run is None:
+        return
+    run["stamp"] = {
+        "seq": int(run.get("seq") or 1),
+        "digest": digest(artifact),
+        "header": header.splitlines()[0] if header else "",
+    }
+    save_run(worker_id, run)
+
+
+def is_our_stamp(worker_id: str, ref: "ReportRef | None") -> bool:
+    """True when the artifact is byte-for-byte the stamp this harness wrote
+    for the CURRENT run. Everything else — including a worker-authored
+    `# AUTO-STAMPED (reflect=pass...)` — is content, not a trust statement."""
+    if ref is None:
+        return False
+    run = load_run(worker_id)
+    stamp = (run or {}).get("stamp") or {}
+    if not stamp or int(stamp.get("seq") or 0) != int((run or {}).get("seq") or 0):
+        return False
+    return bool(stamp.get("digest")) and stamp["digest"] == digest(ref.path)
+
+
+def graded_artifact_changed(worker_id: str, ref: "ReportRef | None") -> bool:
+    """True when the artifact has been edited since its grade was recorded.
+
+    A verdict is a statement about bytes. If the bytes moved, the verdict did
+    not move with them, and the parent is entitled to know before it acts.
+    """
+    if ref is None:
+        return False
+    run = load_run(worker_id)
+    graded = (run or {}).get("graded") or {}
+    if int(graded.get("seq") or 0) != int((run or {}).get("seq") or 0):
+        return False
+    recorded = graded.get("digest") or ""
+    return bool(recorded) and recorded != digest(ref.path)
+
+
+def retired_reports(worker_id: str) -> list[dict]:
+    """Earlier runs' artifacts, newest last. Kept, never deleted — but they
+    are that run's output, not this one's, and are labelled by run number."""
+    run = load_run(worker_id)
+    out = []
+    for entry in (run or {}).get("retired") or []:
+        try:
+            if Path(entry["path"]).exists():
+                out.append(entry)
+        except (KeyError, OSError):
+            continue
+    return out
+
+
+def run_scoped_reflect(worker_id: str) -> tuple[dict | None, dict | None, int]:
+    """(this run's grade, an earlier run's grade, that grade's run number).
+
+    A verdict is a statement about the output the grader read. A resumed
+    worker's second run is different output, so run A's pass must not certify
+    it. With no run record nothing is KNOWN to be stale, so the newest grade is
+    returned as current — old workers keep the behaviour they were graded under.
+    """
+    try:
+        messages = db.get_messages(worker_id)
+    except Exception as e:
+        logger.warning("run_scoped_reflect: db.get_messages(%s) failed: %s", worker_id, e)
+        return None, None, 0
+    newest = None
+    newest_id = 0
+    for m in reversed(messages):
+        if m.get("role") == "reflect":
+            try:
+                newest = json.loads(m.get("content") or "{}")
+            except (ValueError, TypeError) as e:
+                logger.warning("run_scoped_reflect: malformed reflect row for %s: %s", worker_id, e)
+                return None, None, 0
+            newest_id = int(m.get("id") or 0)
+            break
+    if newest is None:
+        return None, None, 0
+    boundary = run_boundary(worker_id)
+    if boundary is None or newest_id > boundary:
+        return newest, None, 0
+    run = load_run(worker_id) or {}
+    return None, newest, max(int(run.get("seq") or 1) - 1, 1)
+
+
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import logging
 import secrets
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from config import settings
@@ -538,48 +539,167 @@ def _worker_is_mid_turn(worker_obj) -> bool:
         return False
 
 
-def _latest_reflect(worker_id: str) -> dict | None:
-    """Return the worker's most recent reflect row parsed to dict, or None.
+@dataclass
+class TrustState:
+    """What is actually known about a worker's current output.
 
-    Reflect is the quality gate: if it didn't run, or didn't verdict 'pass',
-    the worker's output should be served as UNVERIFIED so the parent can
-    decide whether to trust it or inspect the full transcript.
+    Assembled from records only — the run record, the state log, the grade
+    rows and the artifact's digest at grading time. Never from the artifact's
+    own first line: that is a line the worker can type, and a worker-authored
+    `# AUTO-STAMPED (reflect=pass...)` used to suppress the real verdict.
+
+    One builder serves get_worker_result, _finalize_worker's stamp and the
+    parent's resume manifest, because three readers of one record that
+    disagree is exactly the failure this replaces.
     """
-    try:
-        messages = db.get_messages(worker_id)
-    except Exception as e:
-        # Silent failures here surface later as verdict='unknown' in the
-        # manifest with no breadcrumb pointing back to the DB read. Log it.
-        logger.warning("_latest_reflect: db.get_messages(%s) failed: %s", worker_id, e)
-        return None
-    for m in reversed(messages):
-        if m.get("role") == "reflect":
-            try:
-                return json.loads(m.get("content") or "{}")
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning(
-                    "_latest_reflect: malformed reflect row for worker %s: %s",
-                    worker_id,
-                    e,
-                )
-                return None
-    return None
+
+    worker_id: str
+    term_reason: str | None = None
+    error: str = ""
+    verdict: str | None = None
+    reasoning: str = ""
+    verification: str = ""
+    verification_reason: str = ""
+    stale_verdict: str | None = None
+    stale_seq: int = 0
+    modified: bool = False
+    retired: list = field(default_factory=list)
+
+    _CAPS = ("round_ceiling", "stuck_loop", "budget_exhausted")
+
+    def interruption_note(self) -> str:
+        """How the turn ended, when it did not end by finishing. Emitted
+        regardless of verdict: reflect grading partial output as fine does not
+        un-truncate it, and `verdict == "pass"` used to return before this
+        check ever ran."""
+        r = self.term_reason
+        if r == "cancelled":
+            return "# CANCELLED (worker stopped before it finished)\n"
+        if r in self._CAPS:
+            return (
+                f"# INCOMPLETE (worker terminated: {r} — a hard cap, not completion)\n"
+                f"# Its final message should state what is unfinished; treat missing "
+                f"deliverables as NOT DONE, and use get_worker_transcript({self.worker_id[:12]!r}) "
+                f"or retry_worker to close the gap.\n"
+            )
+        if r == "error" or (r is None and self.error):
+            if self.error:
+                return f"# ERROR (worker exited with error: {self.error})\n"
+            return "# INCOMPLETE (worker terminated: error)\n"
+        if r in ("compaction_failed", "interrupted"):
+            return f"# INCOMPLETE (worker terminated: {r})\n"
+        return ""
+
+    def verification_note(self) -> str:
+        """What the grader said about THIS run's output. Empty only for a
+        clean, current, verified pass."""
+        if self.verdict == "escalate":
+            return (
+                f"# ESCALATED (worker reflect: verdict=escalate)\n"
+                f"# Reason: {self.reasoning or '(no reasoning provided)'}\n"
+                f"# Consider get_worker_transcript({self.worker_id[:12]!r}) to inspect "
+                f"the full work stream before trusting this output.\n"
+            )
+        if self.verdict == "retry":
+            return (
+                f"# UNVERIFIED (worker reflect: verdict=retry, retries exhausted)\n"
+                f"# Reason: {self.reasoning or '(no reasoning provided)'}\n"
+            )
+        if self.verdict == "pass":
+            return ""
+        if self.stale_verdict:
+            return (
+                f"# UNVERIFIED (this run has no grade of its own)\n"
+                f"# The last recorded verdict is {self.stale_verdict!r}, and it graded run "
+                f"{self.stale_seq} — different output. It does not carry.\n"
+            )
+        return "# UNVERIFIED (no reflect verdict recorded — quality not gated)\n"
+
+    def mutation_note(self) -> str:
+        """A verdict is a statement about bytes. If the bytes moved, it did not
+        move with them, and the parent is entitled to know before it acts."""
+        if not self.modified:
+            return ""
+        return (
+            "# MODIFIED SINCE VERIFICATION (the report changed after it was graded — "
+            "the verdict above describes the earlier bytes)\n"
+        )
+
+    def footer(self) -> str:
+        """Superseded artifacts, named by run. They are kept rather than
+        deleted, and labelled rather than served: an earlier run's report is
+        that run's output, not this one's."""
+        parts = [
+            f"\n[run {entry.get('seq')}'s report is retained at {entry.get('path')} — "
+            f"an earlier run's output, not this one's]"
+            for entry in self.retired
+        ]
+        return "".join(parts)
+
+    def header(self) -> str:
+        head = self.interruption_note() + self.verification_note() + self.mutation_note()
+        return head + "\n" if head else ""
+
+
+def worker_trust(
+    worker_id: str,
+    *,
+    term_reason: str | None = None,
+    error: str = "",
+    ref=None,
+    include_history: bool = True,
+) -> TrustState:
+    """Build a worker's trust state from the durable record."""
+    from core.extensions.orchestration import report as _report
+
+    current, stale, stale_seq = _report.run_scoped_reflect(worker_id)
+    grade = current or {}
+    return TrustState(
+        worker_id=worker_id,
+        term_reason=term_reason,
+        error=error or "",
+        verdict=grade.get("verdict"),
+        reasoning=grade.get("reasoning", "") or "",
+        verification=grade.get("verification", "") or "",
+        verification_reason=grade.get("verification_reason", "") or "",
+        stale_verdict=(stale or {}).get("verdict"),
+        stale_seq=stale_seq,
+        modified=include_history and _report.graded_artifact_changed(worker_id, ref),
+        retired=_report.retired_reports(worker_id) if include_history else [],
+    )
+
+
+def worker_termination_reason(worker_id: str, worker_obj=None) -> tuple[str | None, str]:
+    """(termination_reason, error) for a worker, memory first, log behind.
+
+    The in-memory object is the fresh source while a session is resident; after
+    a reap or a restart the durable state log answers. A live turn has no
+    ending yet, so it is never given a previous run's.
+    """
+    if worker_obj is None:
+        from sessions.manager import get_manager as _get_mgr
+
+        worker_obj = _get_mgr().get(worker_id)
+    reason = worker_obj.termination_reason if worker_obj else None
+    error = (worker_obj.error if worker_obj else "") or ""
+    if reason is None and not _worker_is_mid_turn(worker_obj):
+        try:
+            recent = db.recent_termination_reasons(worker_id, 1)
+            reason = recent[0] if recent else None
+        except Exception as e:
+            logger.debug("durable termination lookup failed for %s: %s", worker_id, e)
+    return reason, error
 
 
 def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
     """Get the final output from a completed worker.
 
-    Quality gate: if the worker's latest reflect verdict is not 'pass' (or no
-    reflect ran), the returned content is wrapped in an UNVERIFIED/ESCALATED
-    header with the reflect reasoning, so the parent knows the work needs
-    another look or a transcript scan.
+    Quality gate: the header is built from records — how the turn ended, the
+    grade recorded for THIS run, and whether the artifact still matches the
+    bytes that grade read. A verdict from an earlier run is reported as
+    history, never applied as certification.
     """
     from core.extensions.orchestration import report as _report
-
-    # Reflect verdict — the quality gate. Used by every return path below.
-    reflect = _latest_reflect(worker_id)
-    verdict = (reflect or {}).get("verdict")
-    reflect_reason = (reflect or {}).get("reasoning", "")
 
     # Typed-kind deterministic gate (Feature 4): a cheap, unambiguous check of
     # the kind's core contract (e.g. research output names zero sources).
@@ -595,66 +715,10 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
 
         return kind_gate_warning(_kind_name, body) or ""
 
-    # Check worker termination state (cancelled, errored, round-capped).
-    # The in-memory object is the fresh source; after a restart or reap the
-    # durable state log answers instead — a round-capped worker must not
-    # read as clean just because the process cycled (field case
-    # c11530758fbc: an INCOMPLETE worker diagnosed three reflections late).
     from sessions.manager import get_manager as _get_mgr
 
     _worker_obj = _get_mgr().get(worker_id)
-    term_reason = _worker_obj.termination_reason if _worker_obj else None
-    if term_reason is None and not _worker_is_mid_turn(_worker_obj):
-        # `_worker_obj is None` was the old guard, and hydration made it
-        # unreachable: a rehydrated worker IS in memory, with a None reason it
-        # never restored (H09). The real question is whether the worker has
-        # settled — a live turn has not ended, so it has no ending to report,
-        # and reading the previous run's would be worse than reading nothing.
-        try:
-            _recent = db.recent_termination_reasons(worker_id, 1)
-            term_reason = _recent[0] if _recent else None
-        except Exception:
-            term_reason = None
-
-    def _ceiling_note() -> str:
-        """Cap warning that survives a 'pass' verdict. A worker that hit its
-        round ceiling ended mid-work by definition — reflect grading the
-        partial output as fine does not un-truncate it, and the parent is
-        the one who pays for believing it was complete."""
-        if term_reason not in ("round_ceiling", "stuck_loop", "budget_exhausted"):
-            return ""
-        return (
-            f"# NOTE: worker ended by {term_reason} (hard cap, not completion) — "
-            f"its final message should state what is unfinished; treat missing "
-            f"deliverables as NOT DONE, and use get_worker_transcript({worker_id[:12]!r}) "
-            f"or retry_worker to close the gap.\n\n"
-        )
-
-    def _gate_header() -> str:
-        """Build a header that reflects the worker's trust state. Empty when
-        reflect passed cleanly — everything else gets a prefix the parent
-        cannot miss.
-        """
-        if verdict == "pass":
-            return ""
-        if verdict == "escalate":
-            return (
-                f"# ESCALATED (worker reflect: verdict=escalate)\n"
-                f"# Reason: {reflect_reason or '(no reasoning provided)'}\n"
-                f"# Consider get_worker_transcript({worker_id[:12]!r}) to inspect "
-                f"the full work stream before trusting this output.\n\n"
-            )
-        if verdict == "retry":
-            return (
-                f"# UNVERIFIED (worker reflect: verdict=retry, retries exhausted)\n"
-                f"# Reason: {reflect_reason or '(no reasoning provided)'}\n\n"
-            )
-        # No reflect row (cancelled / crashed before post-hooks)
-        if term_reason == "cancelled":
-            return "# CANCELLED (worker stopped before reflect ran)\n\n"
-        if term_reason in ("error", "round_ceiling", "stuck_loop", "compaction_failed"):
-            return f"# INCOMPLETE (worker terminated: {term_reason})\n\n"
-        return "# UNVERIFIED (no reflect verdict recorded — quality not gated)\n\n"
+    term_reason, _err = worker_termination_reason(worker_id, _worker_obj)
 
     def _cap(full_text: str, ref=None) -> str:
         """Truncate to 3000 chars WITH a visible marker — silently cutting a
@@ -671,19 +735,6 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
             out += f" — the complete report is on disk: file_read({str(ref.path)!r})"
         out += f", or get_worker_transcript({worker_id[:12]!r}, select='tail') for the end of the stream]"
         return out
-
-    # Exact sentinel prefixes _finalize_worker stamps. Matching any leading
-    # "#" here suppressed the quality gate whenever a worker began its own
-    # summary with a markdown heading ("# Results") — unverified output was
-    # then returned to the parent as trusted.
-    _SENTINELS = (
-        "# INCOMPLETE (",
-        "# CANCELLED (",
-        "# ERROR (",
-        "# ESCALATED (",
-        "# UNVERIFIED (",
-        "# AUTO-STAMPED (",
-    )
 
     def _served(body: str) -> str:
         """Mark the result consumed on the way out.
@@ -704,6 +755,7 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
     # filename covers workers that predate the record; the shared summary.md is
     # adopted only with provenance, and says so when it is (H08).
     ref = _report.resolve_report(worker_id)
+    trust = worker_trust(worker_id, term_reason=term_reason, error=_err, ref=ref)
     if ref is not None:
         try:
             body = ref.read()
@@ -711,19 +763,23 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
             logger.warning("get_worker_result: could not read %s: %s", ref.path, _read_err)
             body = ""
         if body:
-            # If the summary already carries a sentinel marker from
-            # _finalize_worker, don't double up — the stamp already encodes state.
-            if body.startswith(_SENTINELS):
-                return _served(ref.label + _cap(body, ref))
+            # A stamp THIS harness wrote for THIS run already encodes the state
+            # — don't double up. Recognized by the recorded digest, not by the
+            # file's first line: that line is one a worker can author, and a
+            # worker-authored sentinel used to suppress a real escalate.
+            if _report.is_our_stamp(worker_id, ref):
+                return _served(ref.label + _cap(body, ref) + trust.footer())
             return _served(
-                ref.label + _gate_header() + _ceiling_note() + _kind_warn(body) + _cap(body, ref)
+                ref.label + trust.header() + _kind_warn(body) + _cap(body, ref) + trust.footer()
             )
 
     # Fallback: last assistant message, always wrapped in a quality header.
     messages = db.get_messages(worker_id)
     for m in reversed(messages):
         if m["role"] == "assistant" and m.get("content"):
-            return _served(_gate_header() + _ceiling_note() + _kind_warn(m["content"]) + _cap(m["content"]))
+            return _served(
+                trust.header() + _kind_warn(m["content"]) + _cap(m["content"]) + trust.footer()
+            )
 
     # Retention took the transcript, but not the work. Checked before the "no
     # output" line below, which is what the parent used to be told about a
@@ -1712,8 +1768,13 @@ def cross_pollinate(_context: dict | None = None) -> str:
     # trusted — broadcasting it poisons siblings (real case: a preamble-only
     # worker was cross-pollinated and seeded confusion in parallel workers).
     sent_count = 0
+    from core.extensions.orchestration import report as _report
+
     for cwid in completed:
-        reflect = _latest_reflect(cwid)
+        # Run-scoped, like every other reader: a pass that graded an earlier
+        # run of a resumed worker is not a licence to broadcast this run's
+        # findings to its siblings.
+        reflect, _stale, _seq = _report.run_scoped_reflect(cwid)
         if not reflect or reflect.get("verdict") != "pass":
             logger.info(
                 "Skipping cross-pollination from worker %s — reflect verdict=%s " "(only 'pass' is propagated)",
