@@ -158,16 +158,17 @@ async def test_parked_session_degrades_to_follow_up(monkeypatch):
 
 
 async def test_idle_session_gets_prompt(monkeypatch):
-    sid = db.create_session(title="hb-idle")
+    from sessions.manager import SessionManager
+
+    mgr = SessionManager()
+    monkeypatch.setattr("sessions.manager._manager", mgr)
+    sid = mgr.create_session(title="hb-idle")
     prompts = []
 
-    async def _prompt(s, text):
-        prompts.append((s, text))
+    async def runner(session_id, message, session, **kw):
+        prompts.append((session_id, message))
 
-    monkeypatch.setattr(
-        "sessions.manager.get_manager",
-        lambda: SimpleNamespace(get=lambda _sid: None, prompt=_prompt),
-    )
+    mgr.set_agent_runner(runner)
     await sched._execute_heartbeat_job(_meta(sid))
     assert prompts and "[heartbeat:pulse]" in prompts[0][1]
     # Claim-before-deliver discipline: a completed cron_run row exists.

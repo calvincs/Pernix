@@ -13,6 +13,7 @@ import logging
 import re
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -698,90 +699,150 @@ def _pair_repair_tools(allow: frozenset[str]) -> frozenset[str]:
     return allow | frozenset(extra)
 
 
+# Terminal statuses a dispatch can report back. Everything except COMPLETED
+# is a non-success, and UNRESOLVED is not an outcome at all — it says the work
+# was admitted and was still going when this dispatch stopped waiting.
+DISPATCH_COMPLETED = "completed"
+DISPATCH_FAILED = "failed"
+DISPATCH_CANCELLED = "cancelled"
+DISPATCH_REJECTED = "rejected"
+DISPATCH_UNRESOLVED = "unresolved"
+
+
+@dataclass(frozen=True)
+class DispatchResult:
+    """What one scheduled dispatch actually achieved.
+
+    The old contract was a session id: the caller learned WHERE the work went
+    and nothing about whether it happened. `_dispatch_prompt` returned
+    normally when the session was cancelling, when the queue was full, when
+    the turn failed and when the wait merely gave up — and the cron executor
+    wrote 'completed' for all of them.
+    """
+
+    session_id: str
+    status: str
+    error: str | None = None
+    execution: object | None = None
+    queued: bool = False
+
+    @property
+    def completed(self) -> bool:
+        return self.status == DISPATCH_COMPLETED
+
+
+# EXEC_* results the manager settles on, mapped to dispatch statuses.
+_EXEC_TO_DISPATCH = {
+    "completed": DISPATCH_COMPLETED,
+    "failed": DISPATCH_FAILED,
+    "cancelled": DISPATCH_CANCELLED,
+    "dropped": DISPATCH_CANCELLED,
+    "absorbed": DISPATCH_CANCELLED,
+    "rejected": DISPATCH_REJECTED,
+}
+
+# Strong refs for the watchers that settle a run whose turn outlived the wait.
+_unresolved_watchers: set = set()
+
+
+def _build_exec_options(model: str = "", allowed_tools: list | None = None):
+    """Per-TURN execution settings for one scheduled fire.
+
+    These belong to the message, not to the session. Writing them onto
+    AgentSession before prompt() had decided whether the message would start
+    or queue is what handed a user's live turn the job's model pin and tool
+    charter while the job's own turn later ran with neither.
+    """
+    from sessions.manager import ExecOptions
+
+    allow = None
+    if allowed_tools:
+        allow = _pair_repair_tools(frozenset(str(t) for t in allowed_tools if t))
+    budget = None
+    if model:
+        # A model pin without its budget compiles the run against the previous
+        # model's context window — the two are documented as a pair on
+        # AgentSession and only one of them was ever set.
+        try:
+            from core.llm.budget import derive_model_budget
+
+            budget = derive_model_budget(model)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Could not derive a context budget for %s: %s", model, e)
+    options = ExecOptions(model=model or None, tool_allowlist=allow, context_budget=budget)
+    return None if options.is_empty() else options
+
+
 async def _dispatch_prompt(
     session_id: str | None,
     prompt: str,
     title: str = "",
     model: str = "",
     allowed_tools: list | None = None,
-) -> str:
-    """Open-or-reuse a session and send it one prompt under the cron bound.
+) -> DispatchResult:
+    """Open-or-reuse a session, admit one prompt, and report what became of it.
 
     The single dispatch path for scheduled work: cron fires and heartbeat
     ticks into an idle session are the same operation (a scheduled prompt IS
-    the turn), so they share the session handling, the model override, and the
-    cron_dispatch_timeout ceiling. Returns the session id used.
+    the turn), so they share the session handling, the execution options, and
+    the cron_dispatch_timeout ceiling.
 
-    allowed_tools, when set on the job, becomes the session's exclusive tool
-    allow-list for the dispatched turn (enforced in the schema builder and the
-    executor — see AgentSession.tool_allowlist). Set and cleared exactly like
-    the model override so a reused session isn't left constrained.
+    The options ride with the admitted message and are applied when its own
+    turn starts, so a job firing into a busy session no longer reconfigures
+    the turn already running there, and no longer runs unconstrained itself
+    once its message finally pops. Nothing here touches the session's own
+    settings, so nothing here can null a user's pinned model.
+
+    The wait is on the admitted execution, not on the mutable session.task —
+    which could be a different turn's, a stale done one from the turn before,
+    or None. A wait that expires returns UNRESOLVED: the turn is still going
+    and the caller has learned nothing about how it ends.
     """
     from sessions.manager import get_manager
 
     manager = get_manager()
-    # A session created for this dispatch is throwaway: nothing else will
-    # ever run in it, so its overrides need no clearing.
-    _created_fresh = not session_id
     session_id = _ensure_dispatch_session(session_id, title)
-    session = manager.get(session_id)
-    if session and model:
-        session.model_override = model
-    if session and allowed_tools:
-        session.tool_allowlist = _pair_repair_tools(frozenset(str(t) for t in allowed_tools if t))
+    options = _build_exec_options(model, allowed_tools)
 
+    deadline = time.monotonic() + settings.cron_dispatch_timeout
     try:
-        await asyncio.wait_for(
-            manager.prompt(session_id, prompt),
+        admission = await asyncio.wait_for(
+            manager.prompt(session_id, prompt, exec_options=options, origin="scheduled"),
             timeout=settings.cron_dispatch_timeout,
         )
-        # prompt() returns as soon as the turn TASK is created (manager.prompt
-        # ends in asyncio.create_task and does not await it). The per-dispatch
-        # overrides must outlive the TURN, not the enqueue — clearing right
-        # here silently unconstrained every scheduled run (field case: runs
-        # ecfd3f89c219 / 404eaba3c8d9 called file_edit/multiedit straight
-        # through the E1 allow-list because it was already cleared before the
-        # schema was built). Wait for the task, bounded by the same dispatch
-        # ceiling; shielded so a timeout stops the WAIT, never the turn.
-        session = manager.get(session_id)
-        task = getattr(session, "task", None) if session else None
-        if task is not None:
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=settings.cron_dispatch_timeout)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Scheduled dispatch for %s still running after %ds — "
-                    "clearing per-dispatch overrides while the turn continues",
-                    session_id[:12],
-                    settings.cron_dispatch_timeout,
-                )
-            except Exception:
-                pass  # _run_agent_safe owns its errors; the wait is best-effort
-    finally:
-        # Clear the model override and tool allow-list for reused sessions.
-        #
-        # Bound to the TURN, never to the timer above. When the shielded wait
-        # times out (an orchestrating job legitimately running past
-        # cron_dispatch_timeout) the turn is still going: clearing here handed
-        # it the full tool surface mid-run and let its next LLM call fall back
-        # to the default model, which violates the never-auto-switch rule. A
-        # fresh session is thrown away after the run, so it needs no clearing
-        # at all; a reused one gets a done-callback on its own task.
-        session = manager.get(session_id)
-        if session and (model or allowed_tools) and not _created_fresh:
+    except asyncio.TimeoutError:
+        logger.warning("Scheduled dispatch for %s could not be admitted in time", session_id[:12])
+        return DispatchResult(session_id, DISPATCH_UNRESOLVED, error="admission timed out")
 
-            def _clear(_task=None, _s=session):
-                if model:
-                    _s.model_override = None
-                if allowed_tools:
-                    _s.tool_allowlist = None
+    execution = admission.execution
+    if admission.rejected:
+        logger.warning(
+            "Scheduled dispatch for %s rejected: %s",
+            session_id[:12],
+            admission.reason,
+        )
+        return DispatchResult(session_id, DISPATCH_REJECTED, error=admission.reason, execution=execution)
 
-            task = getattr(session, "task", None)
-            if task is not None and not task.done():
-                task.add_done_callback(_clear)
-            else:
-                _clear()
-    return session_id
+    queued = admission.outcome == "queued"
+    if queued:
+        logger.info(
+            "Scheduled dispatch for %s queued behind a running turn — its options travel with it",
+            session_id[:12],
+        )
+
+    remaining = max(0.0, deadline - time.monotonic())
+    try:
+        await asyncio.wait_for(execution.wait(), timeout=remaining)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Scheduled dispatch for %s still unresolved after %ds — the turn continues",
+            session_id[:12],
+            settings.cron_dispatch_timeout,
+        )
+        return DispatchResult(session_id, DISPATCH_UNRESOLVED, execution=execution, queued=queued)
+
+    status = _EXEC_TO_DISPATCH.get(execution.result or "", DISPATCH_UNRESOLVED)
+    return DispatchResult(session_id, status, error=execution.error, execution=execution, queued=queued)
 
 
 async def _execute_cron_job(meta: dict):
