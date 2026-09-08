@@ -1569,10 +1569,49 @@ class MemoryStore:
             return 0
 
     def reindex(self) -> int:
-        """Rebuild FTS5 index from markdown files. Returns entry count."""
+        """Rebuild FTS5 index from markdown files. Returns entry count.
+
+        Takes the store's mutation lock for the whole rebuild, because a
+        rebuild IS a mutation of every file's index rows and has to queue with
+        the others. Without it, `add_entry` could read the old committed index
+        for its epoch-uniqueness check, append to markdown, and then block on
+        its `INSERT` behind the rebuild's write transaction. The rebuild then
+        scanned that same markdown, indexed the new entry, and committed; the
+        waiting insert woke up and added it a second time, with a second
+        `entry_count = entry_count + 1`. Measured: four markdown entries, five
+        index rows, one epoch twice, and `in_sync` False.
+
+        `add_entry` is the only writer that could double: update / delete /
+        write_file all publish through `_reindex_file`, which rebuilds a file's
+        rows absolutely (`DELETE … WHERE file_name = ?` then reinsert, count
+        set not incremented), so they overwrite the rebuild's answer correctly
+        when they unblock. What they suffered instead was the other half —
+        waiting on SQLite's 5s busy timeout and, past it, `OperationalError:
+        database is locked` raised *after* their markdown had already landed:
+        the entry present in the source of truth, absent from the index, and
+        the caller told the write had failed. The lock turns that timeout into
+        an ordinary wait.
+
+        Blocking writers for the length of the scan is not new — the `DELETE`
+        below opens a write transaction that already excluded every other
+        writer for exactly the same span. This only makes the waiting orderly
+        and the arithmetic correct.
+
+        The lock is non-reentrant, so nothing may call this while holding it.
+        `health_check` — the only non-test caller — deliberately does not.
+        """
+        with self._lock:
+            return self._reindex_locked()
+
+    def _reindex_locked(self) -> int:
+        """The rebuild itself. Caller must hold `self._lock`."""
         conn = self._connect()
         try:
-            # Clear existing index
+            # Clear existing index. This opens the write transaction that the
+            # scan below runs inside, and it stays open until the commit — so
+            # an exception anywhere in the scan rolls the whole rebuild back
+            # and the previous, usable index survives. Nothing here may be
+            # moved outside that transaction without a replacement protocol.
             conn.execute("DELETE FROM memory_fts")
             conn.execute("DELETE FROM memory_files")
 
@@ -1650,6 +1689,13 @@ class MemoryStore:
             )
             return total
         finally:
+            # `_connect` hands out a per-thread cached connection, so this
+            # closes the one this thread would otherwise reuse. That is safe
+            # only because no frame above us is mid-statement on it — the
+            # cache's liveness probe reopens for the next caller, and
+            # `_TrackedConnection._checkouts` guards eviction, not an explicit
+            # close like this one. `health_check` therefore holds no
+            # connection of its own across this call.
             conn.close()
 
     def repair_epoch_collisions(self) -> int:
@@ -1722,52 +1768,71 @@ class MemoryStore:
 
         return repaired
 
-    def health_check(self, fix: bool = False) -> dict:
-        """Check index health. Optionally auto-fix by reindexing and
-        repairing epoch collisions."""
+    def _survey(self) -> dict:
+        """Count the index against the markdown, once, from a fresh read.
+
+        Its own short-lived connection deliberately: the repair and rebuild
+        steps below it both close this thread's cached connection, so nothing
+        may hold one across them.
+        """
         conn = self._connect()
         try:
-            # Count indexed entries
             row = conn.execute("SELECT COUNT(*) as cnt FROM memory_fts").fetchone()
             indexed = row["cnt"] if row else 0
-
-            # Count markdown entries and per-file duplicate epochs
-            md_count = 0
-            collisions = 0
-            for md_path in self._dir.glob("*.md"):
-                if not _NAME_RE.match(md_path.stem):
-                    continue  # not indexable (see reindex) — not a drift signal either
-                try:
-                    raw = md_path.read_text(encoding="utf-8", errors="replace")
-                except OSError as e:
-                    logger.warning("Skipping unreadable memory file %s: %s", md_path.name, e)
-                    continue
-                entries = parse_entries_from_markdown(md_path.stem, raw)
-                md_count += len(entries)
-                epochs = [e.epoch for e in entries]
-                collisions += len(epochs) - len(set(epochs))
-
-            in_sync = indexed == md_count
-            result = {
-                "indexed_entries": indexed,
-                "markdown_entries": md_count,
-                "in_sync": in_sync,
-                "epoch_collisions": collisions,
-                "files": len(list(self._dir.glob("*.md"))),
-            }
-
-            if collisions and fix:
-                result["repaired_epoch_collisions"] = self.repair_epoch_collisions()
-                result["epoch_collisions"] = 0
-
-            if not in_sync and fix:
-                self.reindex()
-                result["action"] = "reindexed"
-                result["in_sync"] = True
-
-            return result
         finally:
             conn.close()
+
+        md_count = 0
+        collisions = 0
+        for md_path in self._dir.glob("*.md"):
+            if not _NAME_RE.match(md_path.stem):
+                continue  # not indexable (see reindex) — not a drift signal either
+            try:
+                raw = md_path.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                logger.warning("Skipping unreadable memory file %s: %s", md_path.name, e)
+                continue
+            entries = parse_entries_from_markdown(md_path.stem, raw)
+            md_count += len(entries)
+            epochs = [e.epoch for e in entries]
+            collisions += len(epochs) - len(set(epochs))
+
+        return {
+            "indexed_entries": indexed,
+            "markdown_entries": md_count,
+            "in_sync": indexed == md_count,
+            "epoch_collisions": collisions,
+            "files": len(list(self._dir.glob("*.md"))),
+        }
+
+    def health_check(self, fix: bool = False) -> dict:
+        """Check index health. Optionally auto-fix by reindexing and
+        repairing epoch collisions.
+
+        Deliberately holds no lock of its own. `repair_epoch_collisions` takes
+        `self._lock` per file and `reindex` takes it for the rebuild, and the
+        lock is not reentrant — wrapping this would deadlock on the first
+        repaired file.
+        """
+        result = self._survey()
+
+        if result["epoch_collisions"] and fix:
+            result["repaired_epoch_collisions"] = self.repair_epoch_collisions()
+            # The repair rewrote markdown (re-epoching duplicates, dropping
+            # identical twins) and re-indexed the files it touched, so the
+            # counts taken before it no longer describe the corpus. Deciding
+            # whether to rebuild from them meant deciding against numbers the
+            # repair had already invalidated.
+            # `epoch_collisions` is re-counted rather than assumed zero: a
+            # repair that could not resolve everything should say so.
+            result = {**result, **self._survey()}
+
+        if not result["in_sync"] and fix:
+            result["indexed_entries"] = self.reindex()
+            result["action"] = "reindexed"
+            result["in_sync"] = True
+
+        return result
 
 
 # ---------------------------------------------------------------------------
