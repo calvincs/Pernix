@@ -311,10 +311,12 @@
 
   /* -----------------------------------------
      2. Hero — the replay
-     A scripted walk through three real turns: the five phases on
-     the rail, the real state names in the badge, real tool names
-     in the transcript. Pauses on hover, on focus, off-screen and
-     on a hidden tab; reduced motion gets the finished transcript.
+     Three illustrative workflows, not live runs or captured data.
+     Requests, results, timings and context figures are scripted.
+     Rail phases: Request / Plan / Act / Review / Save. Optional
+     background review follows the answer, not a pre-answer gate.
+     Pauses on hover, on focus, off-screen and on a hidden tab;
+     reduced motion gets the finished illustrative transcript.
      ----------------------------------------- */
 
   const swBody = document.getElementById('sw-body');
@@ -333,92 +335,94 @@
 
     const SCENARIOS = [
       {
-        title: 'Morning brief',
-        say: 'Replay 1 of 3, a morning brief. The scout picks three tools; the agent fetches the forecast and the headlines, schedules a weekday 7am job, answers, and reflect passes.',
+        title: 'Coding: a small bug',
+        say: 'Illustrative workflow 1 of 3, not a live run or captured data. Inspect an empty-cart bug, edit the total calculation, and run focused tests. Answer first, then show an optional background review and a saved project note. Results and timings are fictional.',
         steps: [
           ['phase', 0], ['state', 'idle_ready'], ['ctx', '12%'],
-          ['user', 'build my morning brief before I wake'],
+          ['user', 'fix the empty-cart total bug and run the focused tests'],
           ['wait', 380],
           ['phase', 1], ['state', 'scouting'], ['wait', 820],
-          ['scout', 'scout — 3 tools, 840ms', [
-            ['approach', 'forecast, then headlines, then a standing job'],
-            ['tools', 'http_get · search_web · schedule_job'],
-            ['memory', 'prefers bullets · Austin, TX · nothing flagged'],
+          ['scout', 'plan · illustrative', [
+            ['approach', 'inspect the calculation, patch it, test the edge case'],
+            ['tools', 'file_read · file_edit · bash · remember'],
+            ['memory', 'project preference: keep fixes small'],
           ]],
           ['wait', 460],
           ['phase', 2], ['state', 'processing'], ['ctx', '19%'],
-          ['tool', 'http_get', 'api.open-meteo.com', '✓ 0.4s', 880],
-          ['tool', 'search_web', '"austin headlines"', '✓ 1.1s', 1240],
-          ['tool', 'schedule_job', 'morning-brief · 0 7 * * 1-5', '✓ 0.2s', 820],
+          ['tool', 'file_read', 'src/cart.js + tests/cart.test.js', 'example: inspected', 880],
+          ['tool', 'file_edit', 'src/cart.js · give reduce an initial value of 0', 'example: edited', 1240],
+          ['tool', 'bash', 'node --test tests/cart.test.js', 'example: 4 passed', 820],
           ['ctx', '31%'],
-          ['ans', 'Austin: overcast, high 100°F, precip 22%. Nothing flagged since yesterday.'],
-          ['ans', 'Three headlines below. The weekday 7:00 job is live — I dry-ran it once and it produced a correct brief.'],
+          ['ans', 'The empty cart now totals 0 instead of throwing. The reducer was missing its initial value.'],
+          ['ans', 'All 4 focused tests passed, including the empty-cart case. The full suite was not run.'],
           ['wait', 380],
           ['phase', 3], ['state', 'finalizing'],
-          ['meta', 'reflect.done · <b>pass</b>'],
+          ['meta', 'Optional background review · illustrative · answer already delivered'],
           ['wait', 500],
           ['phase', 4],
-          ['meta', 'session.title → “Morning brief” · 2 entries saved'],
+          ['tool', 'remember', 'cart totals · focused test command and edge case', 'example: saved', 620],
           ['wait', 620], ['state', 'idle_ready'], ['phase', 5],
           ['wait', 2200],
         ],
       },
       {
-        title: 'Auth branch',
-        say: 'Replay 2 of 3, a question about last week. The agent recalls a memory entry and searches past sessions, then answers and cites the file it came from with its age.',
+        title: 'Research: a saved report',
+        say: 'Illustrative workflow 2 of 3, not a live run or captured data. Search the web, read primary sources, and save a linked SQLite and Postgres comparison report. Answer before an optional background review. Source results, report contents and timings are fictional.',
         steps: [
           ['phase', 0], ['state', 'idle_ready'], ['ctx', '9%'],
-          ['user', 'what did we decide about the auth branch last week?'],
+          ['user', 'compare SQLite and Postgres for our small app; save a report with sources'],
           ['wait', 380],
           ['phase', 1], ['state', 'scouting'], ['wait', 760],
-          ['scout', 'scout — 2 tools, 610ms', [
-            ['approach', 'memory first, then the session archive'],
-            ['tools', 'recall · search_sessions'],
-            ['memory', 'auth branch · refresh tokens · mobile client'],
+          ['scout', 'plan · illustrative', [
+            ['approach', 'read primary docs, compare tradeoffs, save source links'],
+            ['tools', 'search_web · browse_web · file_write'],
+            ['scope', 'deployment, concurrent writes and backup needs'],
           ]],
           ['wait', 440],
           ['phase', 2], ['state', 'processing'], ['ctx', '17%'],
-          ['tool', 'recall', '"auth branch decision"', '✓ 0.3s', 820],
-          ['tool', 'search_sessions', '"auth branch"', '✓ 0.6s', 980],
-          ['ans', 'You dropped refresh-token rotation for now — the mobile client could not re-auth in the background, and the workaround was worse than the risk.'],
-          ['cite', 'pernix.decisions.md', '6d ago'],
+          ['tool', 'search_web', 'SQLite and Postgres · official documentation', 'example: sources found', 820],
+          ['tool', 'browse_web', 'sqlite.org/whentouse.html', 'example: read', 980],
+          ['tool', 'browse_web', 'postgresql.org/docs/current/mvcc.html', 'example: read', 980],
+          ['tool', 'file_write', 'reports/database-options.md · comparison + source links', 'example: saved', 820],
+          ['ans', 'SQLite is a simpler starting point for a single-host app with light write traffic. Postgres is worth considering for multiple app servers or heavier concurrent writes.'],
+          ['ans', 'Saved the comparison with source links and open questions. We still need your expected write load before choosing.'],
+          ['cite', 'reports/database-options.md', 'illustrative report'],
           ['wait', 460],
           ['phase', 3], ['state', 'finalizing'],
-          ['meta', 'reflect.done · <b>pass</b>'],
+          ['meta', 'Optional background review · illustrative · answer already delivered'],
           ['wait', 480],
           ['phase', 4],
-          ['meta', 'session.title → “Auth branch” · 1 entry saved'],
+          ['meta', 'Illustrative saved artifact · reports/database-options.md'],
           ['wait', 620], ['state', 'idle_ready'], ['phase', 5],
           ['wait', 2200],
         ],
       },
       {
-        title: 'context7',
-        say: 'Replay 3 of 3, wiring up an MCP server. Adding a server is a dangerous tool, so the session waits for approval, then queries the new server through its generated tool names.',
+        title: 'Recurring work: remembered',
+        say: 'Illustrative workflow 3 of 3, not a live run or captured data. Recall a saved briefing preference, schedule a weekday research brief, answer, and save the updated preference for future sessions. An optional background review follows the answer. No scheduled run or test run is shown; results and timings are fictional.',
         steps: [
           ['phase', 0], ['state', 'idle_ready'], ['ctx', '11%'],
-          ['user', 'wire up the context7 MCP server and check the FastAPI lifespan docs'],
+          ['user', 'send a weekday 7am research brief; use my saved format and skip repeats'],
           ['wait', 380],
           ['phase', 1], ['state', 'scouting'], ['wait', 780],
-          ['scout', 'scout — 3 tools, 720ms', [
-            ['approach', 'register the server, then read its docs tools'],
-            ['tools', 'mcp_add_server · mcp_context7_*'],
-            ['memory', 'remote MCP only on this box · never stdio'],
+          ['scout', 'plan · illustrative', [
+            ['approach', 'recall preferences, schedule the brief, retain the update'],
+            ['tools', 'recall · schedule_job · remember'],
+            ['memory', 'look up preferred topics and briefing format'],
           ]],
           ['wait', 420],
           ['phase', 2], ['state', 'processing'], ['ctx', '21%'],
-          ['ask', 'mcp_add_server is <b>dangerous</b> — add remote server “context7”?', 1600],
-          ['tool', 'mcp_add_server', 'context7 · remote', '✓ 0.9s', 900],
-          ['tool', 'mcp_context7_resolve_library_id', '"fastapi"', '✓ 0.3s', 760],
-          ['tool', 'mcp_context7_get_library_docs', '"lifespan"', '✓ 0.8s', 1000],
-          ['ans', 'context7 is registered — its tools are now mcp_context7_*, under the same scout curation and the same gate as the built-ins.'],
-          ['ans', 'Lifespan replaces @app.on_event: one async context manager, startup above the yield, shutdown below.'],
+          ['tool', 'recall', 'research brief · topics and format', 'example: 3 bullets + links', 900],
+          ['cite', 'briefing.preferences.md', 'illustrative memory'],
+          ['tool', 'schedule_job', 'research-brief · 0 7 * * 1-5 · compare prior briefs', 'example: scheduled', 1000],
+          ['ans', 'Scheduled for weekdays at 7:00 in the configured timezone, using your saved topics and three-bullet format with links.'],
+          ['ans', 'The job will consult prior briefs to avoid repeats. It has not run yet; the first brief still needs checking.'],
           ['wait', 360],
           ['phase', 3], ['state', 'finalizing'],
-          ['meta', 'reflect.done · <b>pass</b>'],
+          ['meta', 'Optional background review · illustrative · answer already delivered'],
           ['wait', 480],
           ['phase', 4],
-          ['meta', 'session.title → “context7” · 1 entry saved'],
+          ['tool', 'remember', 'briefing preference · skip previously covered stories', 'example: saved', 620],
           ['wait', 620], ['state', 'idle_ready'], ['phase', 5],
           ['wait', 2200],
         ],
@@ -1107,6 +1111,27 @@
     if (wide.addEventListener) wide.addEventListener('change', onWide);
     else if (wide.addListener) wide.addListener(onWide);
   }
+
+  // Preserve existing links to sections now inside collapsed details.
+  const revealLinkedSection = () => {
+    let id;
+    try { id = decodeURIComponent(location.hash.slice(1)); }
+    catch { return; }
+    const target = document.getElementById(id);
+    if (!target) return;
+    let container = target.closest('details');
+    while (container) {
+      container.open = true;
+      container = container.parentElement?.closest('details');
+    }
+    if (location.hash) requestAnimationFrame(() => target.scrollIntoView());
+  };
+  window.addEventListener('hashchange', revealLinkedSection);
+  document.addEventListener('click', (event) => {
+    const link = event.target.closest('a[href^="#"]');
+    if (link && link.getAttribute('href') === location.hash) revealLinkedSection();
+  });
+  revealLinkedSection();
 
   /* -----------------------------------------
      12. API code-sample language tabs
