@@ -58,6 +58,54 @@ export async function actionBtn(label, fn, refresh) {
     return btn;
 }
 
+/**
+ * One pending proposal, as a card.
+ *
+ * `payload_json` has two shapes in the wild and only one of them is a list:
+ * the adaptive engine and dream write an array of edits, while
+ * `core/canary/propose.py` writes an OBJECT — `{"canary": {...}}` — because a
+ * proposed canary is a spec, not a batch of entry edits. Iterating that object
+ * threw `edits is not iterable` and killed the render.
+ *
+ * So: iterate edits only when there ARE edits, and otherwise fall back to
+ * `summary`, which the server already computes for every shape
+ * (`describe_proposal` in core/adaptive/engine.py). Approving a canary is not
+ * an acknowledgement either — it materializes the CANARY.md and queues a
+ * vetting run — so the button says what it will do.
+ */
+export async function proposalCard(p, refresh) {
+    let payload = null;
+    try { payload = JSON.parse(p.payload_json || '[]'); } catch (_e) { /* rationale + summary carry it */ }
+    const edits = Array.isArray(payload) ? payload : [];
+    const isCanary = !!(payload && !Array.isArray(payload) && typeof payload === 'object' && payload.canary);
+    const applies = edits.length > 0 || isCanary;
+
+    const row = el('div', { class: 'adaptive-card proposal' });
+    row.appendChild(el('div', { class: 'adaptive-card-head' }, [
+        badge(p.producer), text(` #${p.id} · ${relTime(p.created_at)} — ${p.rationale || ''}`),
+    ]));
+    for (const ed of edits) {
+        row.appendChild(el('div', { class: 'adaptive-edit-line' }, [
+            badge(ed.kind), badge(ed.action),
+            text(` ${ed.title || ed.entry_id || ''}: ${ed.content || ''}`),
+        ]));
+    }
+    if (!edits.length && p.summary) {
+        row.appendChild(el('div', { class: 'adaptive-edit-line' }, [
+            isCanary ? badge('canary') : badge('review'), text(` ${p.summary}`),
+        ]));
+    }
+    const btns = el('div', { class: 'adaptive-card-actions' });
+    btns.appendChild(await actionBtn(applies ? 'Approve & apply' : 'Acknowledge', async () => {
+        await post(`/api/adaptive/proposals/${p.id}/approve`, {});
+    }, refresh));
+    btns.appendChild(await actionBtn('Reject', async () => {
+        await post(`/api/adaptive/proposals/${p.id}/reject`, {});
+    }, refresh));
+    row.appendChild(btns);
+    return row;
+}
+
 export async function renderAdaptiveTab(container) {
     clear(container);
     const refresh = () => renderAdaptiveTab(container);
@@ -103,27 +151,19 @@ export async function renderAdaptiveTab(container) {
         container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No proposals waiting — one appears here when the agent wants a change you have to allow, and applies itself if you do not veto it in time.')]));
     }
     for (const p of proposals) {
-        let edits = [];
-        try { edits = JSON.parse(p.payload_json || '[]'); } catch (_e) { /* render rationale only */ }
-        const row = el('div', { class: 'adaptive-card proposal' });
-        row.appendChild(el('div', { class: 'adaptive-card-head' }, [
-            badge(p.producer), text(` #${p.id} · ${relTime(p.created_at)} — ${p.rationale || ''}`),
-        ]));
-        for (const ed of edits) {
-            row.appendChild(el('div', { class: 'adaptive-edit-line' }, [
-                badge(ed.kind), badge(ed.action),
-                text(` ${ed.title || ed.entry_id || ''}: ${ed.content || ''}`),
+        // One card that throws used to take the whole tab with it: the count
+        // above survived, and every proposal, entry, batch and journal line
+        // below it silently never rendered. Per-card, so a payload shape this
+        // code has not met yet costs one row, and says so.
+        try {
+            container.appendChild(await proposalCard(p, refresh));
+        } catch (e) {
+            container.appendChild(el('div', { class: 'adaptive-card proposal' }, [
+                el('div', { class: 'adaptive-card-head' }, [
+                    badge(p.producer || '?'), text(` #${p.id} — could not be displayed: ${e.message || e}`),
+                ]),
             ]));
         }
-        const btns = el('div', { class: 'adaptive-card-actions' });
-        btns.appendChild(await actionBtn(edits.length ? 'Approve & apply' : 'Acknowledge', async () => {
-            await post(`/api/adaptive/proposals/${p.id}/approve`, {});
-        }, refresh));
-        btns.appendChild(await actionBtn('Reject', async () => {
-            await post(`/api/adaptive/proposals/${p.id}/reject`, {});
-        }, refresh));
-        row.appendChild(btns);
-        container.appendChild(row);
     }
 
     // --- Active entries by kind ---

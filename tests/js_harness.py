@@ -55,6 +55,10 @@ export const SSE = process.env.PERNIX_SSE_JS;
 export const RENDER = process.env.PERNIX_RENDER_JS;
 export const MARKER = process.env.PERNIX_RESULT_MARKER;
 
+/** Any other source under static/js, by path relative to it — so a test for
+ *  a component does not need a new environment variable of its own. */
+export const mod = rel => process.env.PERNIX_STATIC_JS + '/' + rel;
+
 /** The EXACT source text of one top-level function: the real bytes between
  *  `function NAME(` at column 0 and the matching `}` at column 0. */
 export function extract(file, name) {
@@ -297,12 +301,13 @@ export async function runScenario(build, body, { maxStubs = 120 } = {}) {
 """
 
 
-def run_js(scenario_src: str, tmp_path: Path, *, app_js: Path | None = None) -> dict:
+def run_js(scenario_src: str, tmp_path: Path, *, app_js: Path | None = None, static_js: Path | None = None) -> dict:
     """Execute one scenario module and return the object it reported.
 
     `app_js` lets a caller point the extraction at a copy of the source (for
     example one produced by `git show <rev>:static/js/app.js`) instead of the
-    working tree.
+    working tree; `static_js` does the same for everything `mod()` resolves,
+    which is how a regression test shows the pre-fix source still failing.
     """
     work = tmp_path / "js"
     work.mkdir(exist_ok=True)
@@ -313,6 +318,7 @@ def run_js(scenario_src: str, tmp_path: Path, *, app_js: Path | None = None) -> 
         "PERNIX_APP_JS": str(app_js or (STATIC_JS / "app.js")),
         "PERNIX_SSE_JS": str(STATIC_JS / "sse.js"),
         "PERNIX_RENDER_JS": str(STATIC_JS / "render.js"),
+        "PERNIX_STATIC_JS": str(static_js or STATIC_JS),
         "PERNIX_RESULT_MARKER": RESULT_MARKER,
     }
     proc = subprocess.run(
