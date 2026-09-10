@@ -1377,7 +1377,12 @@ class _CompactionController:
         self._session.touch()  # keep the reaper honest — COMPACTING can take seconds
         if compacted or self._refused or restore_state_on_failure:
             try:
-                _sv2.transition(self._session, _sv2.SessionStateV2.PROCESSING, "compact-done")
+                pause_pending = not self._session.pause_event.is_set()
+                _sv2.transition(
+                    self._session,
+                    _sv2.SessionStateV2.PAUSE_REQUESTED if pause_pending else _sv2.SessionStateV2.PROCESSING,
+                    "compact-done-paused" if pause_pending else "compact-done",
+                )
             except Exception as _e:
                 logger.error("compact-done (%s) transition failed: %s", transition_reason, _e)
         return compacted
@@ -1904,6 +1909,10 @@ async def run_agent(
                 save_turn_msg=_save_turn_msg,
             )
             return
+
+        # Only a successful provider response acknowledges the rows in this
+        # request. A failed/overflowed call leaves delivery pending for recovery.
+        await _acknowledge_delivery(session, payload)
 
         # --- Length-truncation continuation ---
         if (
@@ -3208,6 +3217,14 @@ async def _continue_after_length_truncation(
     session.touch()
 
 
+async def _acknowledge_delivery(session: AgentSession, payload) -> None:
+    """Acknowledge only managed rows present in a successful LLM request."""
+    delivered_ids = list(getattr(payload, "delivered_message_ids", ()))
+    if delivered_ids:
+        await asyncio.to_thread(db.set_message_delivery, session.session_id, delivered_ids, "consumed")
+        session.emit_event({"type": "message.consumed", "message_ids": delivered_ids})
+
+
 async def _stream_final_answer(
     *,
     session: AgentSession,
@@ -3281,6 +3298,8 @@ async def _stream_final_answer(
     if final.content:
         await save_turn_msg("assistant", final.content)
     if final.error is not None:
+        session.error = str(final.error)
+        session.termination_reason = "error"
         logger.error("Final response error: %s", final.error)
         session.emit_event({"type": "stream.error", "error": final.error})
         # The turn is over either way; the caller's model attribution is the
@@ -3293,6 +3312,8 @@ async def _stream_final_answer(
             }
         )
         return usage
+
+    await _acknowledge_delivery(session, payload)
 
     session.emit_event(
         {

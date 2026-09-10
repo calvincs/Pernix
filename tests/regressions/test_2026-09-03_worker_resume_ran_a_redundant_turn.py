@@ -113,8 +113,8 @@ async def test_a_parked_parent_is_never_skipped(mgr, monkeypatch):
     not collected them — the skip must not reach that path."""
     parent, worker_id = _parent_with_worker(mgr, collected=True)
     sv2.transition(parent, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
-    sv2.transition(parent, sv2.SessionStateV2.PROCESSING, "scout-complete")
-    sv2.transition(parent, sv2.SessionStateV2.AWAITING_WORKERS, "workers-suspend")
+    sv2.transition(parent, sv2.SessionStateV2.PROCESSING, "scout-done")
+    sv2.transition(parent, sv2.SessionStateV2.AWAITING_WORKERS, "workers-dispatched")
 
     started = _capture_turns(mgr, monkeypatch)
     await mgr._resume_from_workers(parent)

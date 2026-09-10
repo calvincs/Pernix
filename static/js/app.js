@@ -975,7 +975,7 @@ async function selectSession(sid) {
 
     _lastSeq = boundary || 0;
     if (status) {
-        _applyStateBadge(status.state || 'idle_ready', '');
+        _applyStateBadge(status.state || 'idle_ready', '', status.capabilities);
         _sessionModelOverride = status.model_override || null;
         _renderModelBadge();
 
@@ -2447,11 +2447,13 @@ async function _injectMessage(message) {
     msgEl.classList.add('queued');
     _injectedMessages.push(msgEl);
     try {
-        await post('/api/chat/inject', { session_id: state.sid, message });
+        const result = await post('/api/chat/inject', { session_id: state.sid, message });
+        if (result.message_id != null) msgEl.dataset.messageId = String(result.message_id);
+        _clearConsumedInjections();
         // Two cues for one act: the chip above the composer for whoever is
         // looking at it, and one polite announcement for whoever is not.
-        _setQueuedChip(message);
-        announce('Sent to the running turn');
+        if (_injectedMessages.includes(msgEl)) _setQueuedChip(message);
+        announce(result.status === 'injected' ? 'Sent to the running turn' : 'Follow-up accepted');
     } catch (e) {
         const idx = _injectedMessages.indexOf(msgEl);
         if (idx !== -1) _injectedMessages.splice(idx, 1);
@@ -3950,6 +3952,17 @@ function _clearToolStatus() {
     if (statusEl) statusEl.classList.remove('active');
 }
 let _injectedMessages = [];  // queued message DOM elements awaiting agent pickup
+const _consumedInjectionIds = new Set();
+
+function _clearConsumedInjections() {
+    _injectedMessages = _injectedMessages.filter(el => {
+        if (!_consumedInjectionIds.has(el.dataset.messageId)) return true;
+        el.classList.remove('queued');
+        el.querySelector('.queued-remove')?.remove();
+        return false;
+    });
+    if (!_injectedMessages.length) _setQueuedChip(null);
+}
 const _questionBubbles = new Map();  // question_id → DOM element for live Q&A bubbles
 
 /**
@@ -4272,13 +4285,15 @@ function handleEvent(event) {
     }
 
     else if (type === 'message.injected') {
-        // Agent will see this message at the next tool round — clear queued indicator
-        _setQueuedChip(null);
-        const msgEl = _injectedMessages.shift();
-        if (msgEl) {
-            msgEl.classList.remove('queued');
-            msgEl.querySelector('.queued-remove')?.remove();
-        }
+        // Admission is acknowledged by the POST's exact message ID. Events
+        // from workers or other tabs must not claim this tab's pending bubble.
+    }
+
+    else if (type === 'message.consumed') {
+        for (const id of event.message_ids || []) _consumedInjectionIds.add(String(id));
+        // The event can beat the POST response; retain a bounded receipt cache.
+        while (_consumedInjectionIds.size > 256) _consumedInjectionIds.delete(_consumedInjectionIds.values().next().value);
+        _clearConsumedInjections();
     }
 
     else if (type === 'dialog.question' || type === 'user_question') {
@@ -4755,13 +4770,8 @@ function handleEvent(event) {
             state.streaming = false;
             _showSendButton();
         }
-        // Clear any remaining queued indicators — turn is over
-        _setQueuedChip(null);
-        for (const el of _injectedMessages) {
-            el.classList.remove('queued');
-            el.querySelector('.queued-remove')?.remove();
-        }
-        _injectedMessages = [];
+        // Unread corrections can continue as queued work after this turn.
+        _clearConsumedInjections();
         _clearToolStatus();
         // Restore model name in case scout routed to a different model this turn
         _renderModelBadge();
@@ -4773,6 +4783,12 @@ function handleEvent(event) {
     }
 
     else if (type === 'session.cancelled') {
+        for (const el of _injectedMessages) {
+            el.classList.remove('queued');
+            el.querySelector('.queued-remove')?.remove();
+        }
+        _injectedMessages = [];
+        _setQueuedChip(null);
         _finalizeStreamingBubble();
         _dropEmptyStreamingBubble();
         _setStopPending(false);
@@ -4850,7 +4866,7 @@ async function _syncStreamingState() {
             await _softReload();
             return;
         }
-        _applyStateBadge(status.state || 'idle_ready', '');
+        _applyStateBadge(status.state || 'idle_ready', '', status.capabilities);
         const serverActive = status.status === 'processing' || status.status === 'scouting';
         if (serverActive && !state.streaming) {
             state.streaming = true;
@@ -4962,7 +4978,7 @@ async function _softReload({ notice = true, reconcile = false } = {}) {
         // Take the server's value even when it's 0/absent — after a server
         // restart keeping the old high _lastSeq would drop all future events.
         _lastSeq = status.event_seq || 0;
-        _applyStateBadge(status.state || 'idle_ready', '');
+        _applyStateBadge(status.state || 'idle_ready', '', status.capabilities);
         if (status.status === 'processing' || status.status === 'scouting') {
             state.streaming = true;
             _showStopButton();
@@ -6949,9 +6965,10 @@ const _STATE_LABELS = {
     cancelling: 'cancelling',
     finalizing: 'finalizing',
     awaiting_user: 'awaiting user',
+    awaiting_workers: 'awaiting workers',
 };
 
-function _applyStateBadge(to, reason) {
+function _applyStateBadge(to, reason, capabilities = null) {
     const el = document.getElementById('state-badge');
     if (!el) return;
     el.className = 'state-badge ' + to;
@@ -6959,15 +6976,15 @@ function _applyStateBadge(to, reason) {
     el.title = reason ? `state: ${to} (${reason})` : `state: ${to}`;
     el.setAttribute('aria-label',
         `Session state: ${_STATE_LABELS[to] || to}${reason ? ` (${reason})` : ''}. Open the timeline.`);
-    _updatePauseButton(to);
+    _updatePauseButton(to, capabilities);
 }
 
-function _updatePauseButton(stateStr) {
+function _updatePauseButton(stateStr, capabilities = null) {
     const btn = document.getElementById('pause-btn');
     if (!btn) return;
     const paused = stateStr === 'paused' || stateStr === 'pause_requested';
-    const active = stateStr === 'processing' || stateStr === 'scouting' || stateStr === 'compacting';
-    btn.hidden = !(active || paused);
+    const active = stateStr === 'processing';
+    btn.hidden = capabilities ? !(capabilities.pause || capabilities.resume) : !(active || paused);
     btn._paused = paused;
     clear(btn);
     btn.appendChild(icon(paused ? 'play' : 'pause'));
@@ -6977,7 +6994,7 @@ function _updatePauseButton(stateStr) {
 
 function _renderStateBadge(event) {
     const to = event.to || 'idle_ready';
-    _applyStateBadge(to, event.reason || '');
+    _applyStateBadge(to, event.reason || '', event.capabilities);
 
     if (isTimelineOpen()) {
         appendTimelineRow({

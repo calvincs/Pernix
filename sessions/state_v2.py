@@ -11,16 +11,15 @@ but nothing here writes it — see db/database.py's migration v16 note.
 
 Design summary:
 
-- 10 named states replaced the old 5-state enum + orthogonal boolean flags.
+- 10 named states describe lifecycle; cooperative pause/cancel signals remain.
 - Every transition has an explicit edge in TRANSITIONS with a bounded
   vocabulary of reasons. There is no force-state escape hatch; if you need
   to "force," add the edge and give the reason a name (e.g. cancel-timeout).
-- Every transition is persisted to session_state_log (migration v13) and
-  emits a session.state_changed SSE event. The log is the forensic record;
-  the event is the live signal.
+- Valid transitions atomically persist the snapshot and session_state_log
+  (migration v13), update memory, then emit session.state_changed.
+- Undeclared edges are logged and rejected without changing state.
 - Invariants per state are checked on entry. Violations are logged loudly
-  (log line + 'invariant-violation' log row) but do not abort — the mutator
-  still completes the transition. The point is forensics, not crash-on-bug.
+  but remain diagnostic; graph validation is enforced.
 
 Cross-pollination writes directly to session_messages as a memory write,
 not a prompt, and does not go through transition().
@@ -47,7 +46,7 @@ logger = logging.getLogger("pernix.session.state_v2")
 
 
 class SessionStateV2(str, Enum):
-    """The session state machine. 10 states, no orthogonal flags."""
+    """The ten lifecycle states, with separate cooperative control signals."""
 
     IDLE_READY = "idle_ready"
     SCOUTING = "scouting"
@@ -82,7 +81,7 @@ class TerminationReason(str, Enum):
 # Transition graph
 # ---------------------------------------------------------------------------
 # Map (from_state, reason) → to_state. Exhaustive: any (from, reason) not
-# in this table is rejected (and logged as invariant-violation if forced).
+# in this table is rejected and logged as invariant-violation.
 #
 # Reason vocabulary (also mirrored in migration v13 documentation; keep
 # the two in sync):
@@ -109,6 +108,10 @@ TRANSITIONS: dict[tuple[S, str], S] = {
     (S.PROCESSING, "compact-critical"): S.COMPACTING,
     (S.PROCESSING, "compact-overflow"): S.COMPACTING,
     (S.COMPACTING, "compact-done"): S.PROCESSING,
+    (S.COMPACTING, "compact-done-paused"): S.PAUSE_REQUESTED,
+    (S.PAUSE_REQUESTED, "compact-proactive"): S.COMPACTING,
+    (S.PAUSE_REQUESTED, "compact-critical"): S.COMPACTING,
+    (S.PAUSE_REQUESTED, "compact-overflow"): S.COMPACTING,
     (S.COMPACTING, "compaction-failed"): S.FINALIZING,
     # Agent loop exits + interrupts
     (S.PROCESSING, "ask-user"): S.AWAITING_USER,
@@ -120,6 +123,13 @@ TRANSITIONS: dict[tuple[S, str], S] = {
     (S.PROCESSING, "agent-error"): S.FINALIZING,
     # Pause/resume
     (S.PAUSE_REQUESTED, "pause-observed"): S.PAUSED,
+    (S.PAUSE_REQUESTED, "resume"): S.PROCESSING,
+    (S.PAUSE_REQUESTED, "loop-complete"): S.FINALIZING,
+    (S.PAUSE_REQUESTED, "round-ceiling"): S.FINALIZING,
+    (S.PAUSE_REQUESTED, "stuck-loop"): S.FINALIZING,
+    (S.PAUSE_REQUESTED, "agent-error"): S.FINALIZING,
+    (S.PAUSE_REQUESTED, "ask-user"): S.AWAITING_USER,
+    (S.PAUSE_REQUESTED, "workers-dispatched"): S.AWAITING_WORKERS,
     (S.PAUSE_REQUESTED, "cancel-during-pause"): S.CANCELLING,
     (S.PAUSED, "resume"): S.PROCESSING,
     (S.PAUSED, "cancel-during-pause"): S.CANCELLING,
@@ -127,6 +137,7 @@ TRANSITIONS: dict[tuple[S, str], S] = {
     (S.CANCELLING, "cancel-complete"): S.IDLE_READY,
     (S.CANCELLING, "cancel-timeout"): S.IDLE_READY,
     # Finalizing — either loop back for reflect/eval retry, or terminate the turn
+    (S.FINALIZING, "cancel-requested"): S.CANCELLING,
     (S.FINALIZING, "reflect-retry"): S.SCOUTING,
     (S.FINALIZING, "eval-retry"): S.SCOUTING,
     (S.FINALIZING, "turn-complete"): S.IDLE_READY,
@@ -295,7 +306,7 @@ def transition(
     reason: str,
     *,
     termination_reason: TerminationReason | None = None,
-) -> None:
+) -> bool:
     """Transition `session` to state `to` with `reason`.
 
     Synchronous — no awaits inside. This is a load-bearing choice: asyncio
@@ -313,11 +324,11 @@ def transition(
     sessions — safe because the stuck session's task is not running.
 
     Side effects, in order:
-      1. Validate the edge (log invariant-violation if unknown).
+      1. Validate the edge (log and reject if unknown).
       2. Compute elapsed_ms since previous state entry.
-      3. INSERT session_state_log row (WAL <1ms — see bench_state_transition.py).
-      4. Emit `session.state_changed` SSE event.
-      5. Mutate `session._state_v2` + `session._state_entered_ms` + termination_reason.
+      3. Persist session_state_log and sessions.state_v2 in one transaction.
+      4. Update in-memory state and counters.
+      5. Emit `session.state_changed` SSE with available controls.
     """
     # 1. Edge lookup
     current = _current_state(session)
@@ -326,13 +337,33 @@ def transition(
     edge_ok = expected_to is to
     if not edge_ok:
         logger.warning(
-            "Invariant violation: transition %s --(%s)--> %s is not in graph"
-            " (expected target: %s) — proceeding anyway",
+            "Invariant violation: transition %s --(%s)--> %s is not in graph" " (expected target: %s) — rejected",
             current.value,
             reason,
             to.value,
             expected_to.value if expected_to else "none",
         )
+
+    if not edge_ok:
+        try:
+            db.add_state_log(
+                session.session_id,
+                turn_id=session._turn_id,
+                from_state=current.value,
+                to_state=current.value,
+                reason=f"invariant-violation:{reason}",
+                timestamp_ms=int(time.time() * 1000),
+            )
+        except Exception:
+            logger.exception("Could not record rejected transition")
+        return False
+
+    previous_pause = session.pause_event.is_set()
+    previous_termination = session.termination_reason
+    if to not in {S.PAUSE_REQUESTED, S.PAUSED, S.COMPACTING} and current in {S.PAUSE_REQUESTED, S.PAUSED}:
+        session.pause_event.set()
+    if termination_reason is not None:
+        session.termination_reason = termination_reason.value
 
     # 1a. State-specific invariants
     for msg in _check_invariants(session, to):
@@ -380,11 +411,32 @@ def transition(
             eval_count=int(_turn.eval_count or 0),
             timestamp_ms=int(time.time() * 1000),
             elapsed_ms=elapsed,
+            persist_state=True,
         )
-    except Exception as e:  # state log must never break the mutator
-        logger.error("state_log write failed for %s (%s→%s): %s", session.session_id, current.value, to.value, e)
+    except Exception:
+        session.termination_reason = previous_termination
+        if previous_pause:
+            session.pause_event.set()
+        else:
+            session.pause_event.clear()
+        # No published or in-memory state may get ahead of its durable record.
+        raise
 
-    # 5. SSE event — payload mirrors the log row so reconnecting subscribers
+    # 5. In-memory mutation (only after durable persistence succeeds)
+    session._state_entered_ms = now_ms
+    session._turn_id = turn_id
+    # Trial arms (W6) key off the turn, so the key is stamped exactly where
+    # the turn id is — one string per turn, computed once, read by the two
+    # prompt builders and by the grade that records what they rendered.
+    session.turn_key = f"{session.session_id}:{turn_id}"
+    session._retry_index = retry_index
+    session._compaction_count = compaction_count
+    session._state_v2 = to
+    if termination_reason is not None:
+        session.termination_reason = termination_reason.value
+    session.touch()
+
+    # 6. SSE event — payload mirrors the log row so reconnecting subscribers
     # can reconcile against /state-log deterministically.
     try:
         session.emit_event(
@@ -398,24 +450,13 @@ def transition(
                 "compaction_count": compaction_count,
                 "termination_reason": termination_reason.value if termination_reason else None,
                 "parent_turn_id": parent_turn_id,
+                "capabilities": capabilities(session),
             }
         )
     except Exception as e:
         logger.error("state_changed emit failed for %s: %s", session.session_id, e)
 
-    # 6. In-memory mutation (last — if anything above raised, state is unchanged)
-    session._state_entered_ms = now_ms
-    session._turn_id = turn_id
-    # Trial arms (W6) key off the turn, so the key is stamped exactly where
-    # the turn id is — one string per turn, computed once, read by the two
-    # prompt builders and by the grade that records what they rendered.
-    session.turn_key = f"{session.session_id}:{turn_id}"
-    session._retry_index = retry_index
-    session._compaction_count = compaction_count
-    _set_state(session, to)
-    if termination_reason is not None:
-        session.termination_reason = termination_reason.value
-    session.touch()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -455,3 +496,19 @@ def compat_status(to: S | str) -> str:
         except ValueError:
             return "unknown"
     return COMPAT_STATUS.get(to, "unknown")
+
+
+def capabilities(session: "AgentSession") -> dict[str, bool]:
+    """Control availability shared by API, tools and clients."""
+    current = _current_state(session)
+    live = session.task is not None and not session.task.done()
+    return {
+        "pause": live and current is S.PROCESSING and not session.cancel_requested,
+        "resume": live and current in {S.PAUSE_REQUESTED, S.PAUSED} and not session.cancel_requested,
+        "steer": not session.cancel_requested
+        and (
+            current is S.AWAITING_WORKERS
+            or (live and current in {S.SCOUTING, S.PROCESSING, S.COMPACTING, S.PAUSE_REQUESTED, S.PAUSED})
+        ),
+        "cancel": live or current in {S.AWAITING_USER, S.AWAITING_WORKERS},
+    }

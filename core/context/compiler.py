@@ -1154,6 +1154,8 @@ class ContextPayload:
     # tight to hold it — callers that dispatch with their own max_tokens
     # should clamp to this or the request overflows.
     effective_max_output: int = 0
+    # Pending delivery rows included in this request; never sent to the provider.
+    delivered_message_ids: tuple[int, ...] = ()
 
 
 @dataclass
@@ -1338,15 +1340,19 @@ def compile_context(
     # the agent shouldn't pre-answer them. EXCEPTION: messages tagged with
     # metadata.injected=true are explicitly delivered via /api/chat/inject and
     # MUST be visible to the running turn (that is the whole point of inject).
-    def _is_injected(m: dict) -> bool:
-        meta_raw = m.get("metadata")
-        if not meta_raw:
-            return False
+    def _delivery_meta(m: dict) -> dict:
+        raw = m.get("metadata")
         try:
-            meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
-            return bool(meta.get("injected")) if isinstance(meta, dict) else False
+            meta = json.loads(raw) if isinstance(raw, str) else raw
+            return meta if isinstance(meta, dict) else {}
         except (json.JSONDecodeError, TypeError, ValueError):
-            return False
+            return {}
+
+    def _is_injected(m: dict) -> bool:
+        return bool(_delivery_meta(m).get("injected"))
+
+    def _delivery_pending(m: dict) -> bool:
+        return m.get("role") == "user" and _delivery_meta(m).get("delivery_status") == "pending"
 
     # Stuck/repeat notices are advice about the round that provoked them.
     # Stamped with metadata.ephemeral_turn by the agent loop, they drop out of
@@ -1372,7 +1378,7 @@ def compile_context(
         m
         for m in raw_messages
         if m["role"] not in ("compaction", "scout", "notice", "reflect", "model_divider", "eval")
-        and m["id"] > compacted_up_to
+        and (m["id"] > compacted_up_to or _delivery_pending(m))
         and not (
             turn_user_msg_id is not None and m["role"] == "user" and m["id"] > turn_user_msg_id and not _is_injected(m)
         )
@@ -1532,6 +1538,9 @@ def compile_context(
         # Subscripting made one missing key a hard turn kill, and every
         # `_db_id` reader downstream already tolerates None.
         entry["_db_id"] = msg.get("id")
+        entry["_delivery_pending"] = _delivery_pending(msg)
+        if entry["_delivery_pending"]:
+            entry["_pinned"] = True
         entry["_created_at"] = msg.get("created_at")
         if tool_names:
             entry["_tool_names"] = tool_names
@@ -1578,6 +1587,9 @@ def compile_context(
     needs_compaction = history_tokens > int(history_budget * settings.compaction_threshold)
 
     # --- Strip internal `_`-prefixed fields before returning to the agent ---
+    delivered_message_ids = tuple(
+        m["_db_id"] for m in messages if m.get("_db_id") is not None and m.get("_delivery_pending")
+    )
     messages = _strip_private_fields(messages)
 
     return ContextPayload(
@@ -1596,6 +1608,7 @@ def compile_context(
         ),
         static_prefix_chars=static_prefix_chars,
         effective_max_output=effective_max_output,
+        delivered_message_ids=delivered_message_ids,
     )
 
 

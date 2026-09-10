@@ -18,6 +18,7 @@ The text stays in the transcript.
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -148,7 +149,7 @@ async def test_the_http_cancel_route_retires_the_queued_rows(mgr):
 
     assert db.get_orphaned_user_messages(sid) == []
     running_meta = db.get_message(running_msg_id)["metadata"]
-    assert '"cancelled": true' in running_meta
+    assert json.loads(running_meta)["cancelled"] is True
 
     await _next_prompt_runs_alone(mgr, sid, dispatched)
     hold.set()

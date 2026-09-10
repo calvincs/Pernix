@@ -483,7 +483,9 @@ async def test_chat_accepted(monkeypatch):
 
     # Mock the manager prompt to avoid starting a real agent
     async def mock_prompt(*args, **kwargs):
-        pass
+        from sessions.manager import Admission, TurnExecution
+
+        return Admission("started", sid, TurnExecution(sid))
 
     monkeypatch.setattr(get_manager(), "prompt", mock_prompt)
 
@@ -592,7 +594,9 @@ async def test_questions_answer():
     qid = db.add_question(sid, "Are you ready?")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(f"/api/questions/{qid}/answer", json={"answer": "yes"})
-    assert resp.status_code in (200, 404)  # 404 if question not found after answer
+    # No runner was installed: refusal must preserve the open question.
+    assert resp.status_code == 409
+    assert db.get_questions(sid)[0]["id"] == qid
 
 
 async def test_answer_question_context_field():

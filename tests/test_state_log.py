@@ -149,12 +149,13 @@ def test_cancel_path_records_termination_reason(session):
 def test_invariant_violation_still_writes_row(session):
     # Manually force an illegal edge (IDLE_READY → FINALIZING directly with a
     # reason that isn't in the graph). The mutator should log a warning,
-    # tag the row as invariant-violation, but still commit the transition.
+    # tag the row as invariant-violation, and preserve the current state.
     sv2.transition(session, sv2.SessionStateV2.FINALIZING, "bogus-reason")
     rows = _log_rows(session.session_id)
     assert len(rows) == 1
     assert rows[0]["reason"].startswith("invariant-violation:")
-    assert rows[0]["to_state"] == "finalizing"
+    assert rows[0]["to_state"] == "idle_ready"
+    assert sv2._current_state(session) is sv2.S.IDLE_READY
 
 
 def test_elapsed_ms_increases_monotonically(session):
