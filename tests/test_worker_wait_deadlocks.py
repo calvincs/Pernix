@@ -393,7 +393,8 @@ def test_state_v2_persists_across_restart(mgr, monkeypatch):
     sid = mgr.create_session(title="P")
     parent = mgr.get(sid)
     parent._watched_worker_ids = {"fake-worker-id"}
-    sv2.transition(parent, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    sv2.transition(parent, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(parent, sv2.SessionStateV2.PROCESSING, "scout-done")
     sv2.transition(parent, sv2.SessionStateV2.AWAITING_WORKERS, "workers-dispatched")
 
     # Simulate restart: drop in-memory session, build a fresh manager.
@@ -432,7 +433,8 @@ async def test_reconcile_resumes_parent_when_workers_already_done(mgr, monkeypat
     parent = mgr.get(parent_id)
     parent.worker_ids = [worker_id]
     parent._watched_worker_ids = {worker_id}
-    sv2.transition(parent, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    sv2.transition(parent, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(parent, sv2.SessionStateV2.PROCESSING, "scout-done")
     sv2.transition(parent, sv2.SessionStateV2.AWAITING_WORKERS, "workers-dispatched")
     mgr._persist_watched(parent)
 
@@ -480,7 +482,8 @@ async def test_reconcile_skips_when_workers_still_running(mgr, monkeypatch):
     parent = mgr.get(parent_id)
     parent.worker_ids = [worker_id]
     parent._watched_worker_ids = {worker_id}
-    sv2.transition(parent, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    sv2.transition(parent, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(parent, sv2.SessionStateV2.PROCESSING, "scout-done")
     sv2.transition(parent, sv2.SessionStateV2.AWAITING_WORKERS, "workers-dispatched")
     mgr._persist_watched(parent)
 
@@ -529,7 +532,8 @@ async def test_post_hooks_skip_when_awaiting_workers(mgr, monkeypatch):
     sid = mgr.create_session(title="P")
     parent = mgr.get(sid)
     parent._watched_worker_ids = {"w-1"}
-    sv2.transition(parent, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    sv2.transition(parent, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(parent, sv2.SessionStateV2.PROCESSING, "scout-done")
     sv2.transition(parent, sv2.SessionStateV2.AWAITING_WORKERS, "workers-dispatched")
 
     hooks_called: list[str] = []
@@ -805,7 +809,8 @@ async def test_post_hooks_run_when_finalizing(mgr, monkeypatch):
     sid = mgr.create_session(title="finalizing-session")
     session = mgr.get(sid)
     # Enter FINALIZING via the state machine (requires PROCESSING first).
-    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
     session.termination_reason = "complete"
     sv2.transition(
         session,

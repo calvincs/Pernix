@@ -72,7 +72,12 @@ def test_resume_paused_worker_releases(mgr, loop):
     w = mgr.get(wid)
     w._state_v2 = sv2.SessionStateV2.PAUSED
     w.pause_event.clear()
-    out = _driver(loop, orch.resume_worker, wid)
+
+    async def resume_live():
+        w.task = asyncio.current_task()
+        return orch.resume_worker(wid)
+
+    out = loop.run_until_complete(resume_live())
     assert "resumed" in out
     assert "revived" not in out
     assert w.pause_event.is_set()

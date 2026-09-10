@@ -305,31 +305,23 @@ async def chat(body: dict):
     # Rewrite attachment references: extract PDF text to sidecars, leave
     # image refs as-is for compile-time expansion. No base64 enters the DB.
     stored_message = await _prepare_attachments(message)
-    await manager.prompt(
+    admission = await manager.prompt(
         session_id,
         stored_message,
         system_prompt,
         idempotency_key=idempotency_key,
     )
-    return {"status": "accepted", "session_id": session_id}
+    if admission.rejected:
+        raise HTTPException(409, detail=admission.reason)
+    return {"status": "accepted", "admission": admission.outcome, "session_id": session_id}
 
 
 @router.post("/api/chat/inject")
 async def inject(body: dict):
-    """Inject a message into a running session's context.
+    """Steer a live turn with durable delivery, or admit a follow-up turn.
 
-    Unlike /api/chat which queues for a new turn, this writes the message
-    directly to the DB. The agent sees it at the next tool round via
-    compile_context(), which reads fresh from the DB each round.
-
-    Inject-only ("context drop") semantics only work while the agent loop
-    has more compile_context() calls ahead — i.e. PROCESSING /
-    AWAITING_WORKERS / COMPACTING. In any other state (FINALIZING,
-    IDLE_READY, AWAITING_USER, paused, cancelling) no further round will
-    run and get_orphaned_user_messages skips injected rows by design, so
-    the message would be permanently stranded. Fall through to
-    manager.prompt() in those cases so the message lands as a queued or
-    new turn instead.
+    The manager owns state routing and recovers corrections that arrive
+    after the running turn's last context compilation.
     """
     session_id = body.get("session_id")
     message = body.get("message", "")
@@ -352,51 +344,10 @@ async def inject(body: dict):
         raise HTTPException(400, detail=ro_reason)
 
     manager = get_manager()
-    session = manager.get(session_id)
-
-    from sessions import state_v2 as sv2
-
-    LIVE_LOOP_STATES = {
-        sv2.SessionStateV2.PROCESSING,
-        sv2.SessionStateV2.AWAITING_WORKERS,
-        sv2.SessionStateV2.COMPACTING,
-    }
-    current = sv2._current_state(session) if session is not None else None
-    if current not in LIVE_LOOP_STATES:
-        await manager.prompt(session_id, message)
-        return {"status": "queued", "session_id": session_id}
-
-    # Tag with metadata.injected so compile_context's turn-scoping filter
-    # doesn't drop this row. The filter (in core/context/compiler.py) hides
-    # user messages with id > turn_user_msg_id to prevent turn N from
-    # pre-answering queued messages bound for turn N+1 — but injected
-    # messages are explicitly meant to land in the CURRENT turn's view.
-    #
-    # Also stamp the active turn's root user-message id: the compiler's
-    # logical-turn sort groups every assistant/tool row under that root, so
-    # an unstamped injected row (keyed by its own, higher id) sorts after
-    # every reply of the turn — permanently the "newest unanswered" user
-    # message, which the model re-acknowledges on every round (session
-    # b23ffafde5ba re-acked the same 5 corrections 10 rounds in a row).
-    # With the stamp it sorts chronologically inside the turn instead.
-    import json as _json
-
-    meta: dict = {"injected": True}
-    turn_root = getattr(session, "current_turn_user_msg_id", None) if session else None
-    if turn_root is not None:
-        meta["parent_user_msg_id"] = turn_root
-
-    db.add_message(
-        session_id,
-        "user",
-        message,
-        metadata=_json.dumps(meta),
-    )
-
-    if session:
-        session.emit_event({"type": "message.injected", "content": message[:100]})
-
-    return {"status": "injected", "session_id": session_id}
+    result = await manager.steer(session_id, message)
+    if result["status"] == "rejected":
+        raise HTTPException(409, detail=result["reason"])
+    return result
 
 
 @router.post("/api/retry/{session_id}")

@@ -1396,17 +1396,22 @@ def message_worker(worker_id: str, message: str, _context: dict | None = None) -
         asyncio.run_coroutine_threadsafe(manager.prompt(worker_id, message), loop)
         return f"Message sent to worker {worker_id[:8]} (will start new turn)"
 
-    # Mid-turn inject: write a user row that the compiler will pick up on
-    # the next tool round. No state transition — this is not a new turn.
-    db.add_message(worker_id, "user", message)
-    worker.emit_event(
-        {
-            "type": "message.injected",
-            "source": "message_worker",
-            "preview": message[:120],
-        }
-    )
-    return f"Injected message into worker {worker_id[:8]} " f"(state={current.value}; visible next tool round)"
+    ctx = _context or {}
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    loop = ctx.get("_loop") or current_loop
+    if loop is None:
+        return "Error: No event loop"
+    delivery = manager.steer(worker_id, message, origin="worker")
+    if current_loop is loop:
+        manager._spawn_detached(delivery, "worker-steering")
+        return f"Message submitted to worker {worker_id[:8]}"
+    result = asyncio.run_coroutine_threadsafe(delivery, loop).result(timeout=10)
+    if result["status"] == "rejected":
+        return f"Refused: {result['reason']}"
+    return f"Message {result['status']} into worker {worker_id[:8]}"
 
 
 def cancel_worker(worker_id: str, _context: dict | None = None) -> str:
@@ -1448,59 +1453,19 @@ def pause_worker(worker_id: str, _context: dict | None = None) -> str:
     before blocking on `await session.pause_event.wait()`. Pause does not
     interrupt a tool already in flight.
     """
-    from db import models as _m
-    from sessions import state_v2 as sv2
+    from core.events import call_on_loop
     from sessions.manager import get_manager
 
-    session = get_manager().get(worker_id)
-    if not session:
-        return f"Worker {worker_id} not found"
-
-    # State read + pause_event.clear + transition run as one loop callable —
-    # this tool executes on a worker thread, and transition() is loop-affine.
-    def _pause_on_loop() -> str:
-        current = sv2._current_state(session)
-        if current is not sv2.SessionStateV2.PROCESSING:
-            return f"Worker {worker_id[:8]} is in state {current.value}; " f"pause only applies to PROCESSING workers"
-        session.pause_event.clear()
-        try:
-            sv2.transition(session, sv2.SessionStateV2.PAUSE_REQUESTED, "pause-requested")
-        except Exception as e:
-            logger.error("pause-requested transition failed for %s: %s", worker_id, e)
-        return f"Worker {worker_id[:8]} will pause at next checkpoint"
-
-    from core.events import call_on_loop
-
-    return call_on_loop(_pause_on_loop, loop=(_context or {}).get("_loop"))
+    result = call_on_loop(get_manager().control_session, worker_id, "pause", loop=(_context or {}).get("_loop"))
+    return result["detail"]
 
 
 def _resume_paused(session, worker_id: str, _context: dict | None = None) -> str:
-    """Release a paused (or pause-requested) session — the original resume.
-
-    Sets the pause_event. If the worker has already reached PAUSED, it will
-    transition back to PROCESSING at its own pace (via the agent loop's
-    resume branch). If still in PAUSE_REQUESTED (pause never observed),
-    transition back directly here.
-    """
-    from sessions import state_v2 as sv2
-
-    # Loop-marshaled for the same reason as pause_worker: transition() is
-    # loop-affine, and setting pause_event must not interleave with the
-    # agent loop's own PAUSE_REQUESTED→PAUSED observation.
-    def _resume_on_loop() -> str:
-        session.pause_event.set()
-        current = sv2._current_state(session)
-        if current is sv2.SessionStateV2.PAUSE_REQUESTED:
-            try:
-                sv2.transition(session, sv2.SessionStateV2.PROCESSING, "resume")
-            except Exception as e:
-                logger.error("resume (from pause-requested) failed for %s: %s", worker_id, e)
-        # If current == PAUSED, the agent loop will transition on its own.
-        return f"Worker {worker_id[:8]} resumed"
-
     from core.events import call_on_loop
+    from sessions.manager import get_manager
 
-    return call_on_loop(_resume_on_loop, loop=(_context or {}).get("_loop"))
+    result = call_on_loop(get_manager().control_session, worker_id, "resume", loop=(_context or {}).get("_loop"))
+    return result["detail"]
 
 
 def resume_worker(

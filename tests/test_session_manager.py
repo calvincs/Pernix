@@ -990,7 +990,8 @@ def test_finalizing_reaper_respects_background_refs():
     session = mgr.get(sid)
 
     # Drive into FINALIZING via the state machine.
-    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
     session.termination_reason = "complete"
     sv2.transition(
         session,
@@ -1024,7 +1025,8 @@ def test_finalizing_reaper_fires_when_no_background_refs():
     sid = mgr.create_session(title="Truly Stuck FINALIZING")
     session = mgr.get(sid)
 
-    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
     session.termination_reason = "complete"
     sv2.transition(
         session,

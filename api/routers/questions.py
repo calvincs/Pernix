@@ -31,23 +31,6 @@ async def answer_question(question_id: str, body: dict):
     answer = body.get("answer", "")
     session_id = question["session_id"]
 
-    # Mark answered first (atomic guard) — if another request already handled
-    # it, stop. Rows are KEPT as an audit trail (ARC-3 sweep: the table was
-    # always empty because answers deleted the row, so every ask_user
-    # exchange survived only inside message text); prune_old_questions ages
-    # them out after its retention window.
-    from datetime import datetime, timezone
-
-    from db.database import connect_sessions
-
-    with connect_sessions() as conn:
-        cur = conn.execute(
-            "UPDATE questions SET answer = ?, answered_at = ? WHERE id = ? AND answered_at IS NULL",
-            (answer, datetime.now(timezone.utc).isoformat(), question_id),
-        )
-        if cur.rowcount == 0:
-            raise HTTPException(409, detail="Question already handled")
-
     # Format as a user message
     context_field = question.get("context", "")
     formatted = (
@@ -64,7 +47,14 @@ async def answer_question(question_id: str, body: dict):
     from sessions.manager import get_manager
 
     manager = get_manager()
-    await manager.prompt(session_id, formatted)
+    try:
+        admission = await manager.prompt(
+            session_id, formatted, origin="answer", question_id=question_id, question_answer=answer
+        )
+    except ValueError as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+    if admission.rejected:
+        raise HTTPException(409, detail=admission.reason)
 
     # Notify all connected clients so other tabs can close the modal and update the chat
     manager.emit(
@@ -86,43 +76,33 @@ async def dismiss_question(question_id: str):
     questions = db.get_questions()
     question = next((q for q in questions if q["id"] == question_id), None)
 
-    # Atomic delete — safe against concurrent dismiss/answer
-    from db.database import connect_sessions
-
-    with connect_sessions() as conn:
-        cur = conn.execute("DELETE FROM questions WHERE id = ?", (question_id,))
-        already_handled = cur.rowcount == 0
-
-    if not question or already_handled:
+    if not question:
         return {"status": "dismissed"}
-
     from sessions import state_v2 as sv2
     from sessions.manager import get_manager
 
     manager = get_manager()
-    session_id = question["session_id"]
+    session = manager.get_or_create(question["session_id"])
+    if sv2._current_state(session) is sv2.S.AWAITING_USER:
+        formatted = "[User dismissed your question without answering]\n" + f"Q: {question['question']}"
+        try:
+            admission = await manager.prompt(
+                session.session_id,
+                formatted,
+                origin="dismissal",
+                question_id=question_id,
+                question_answer="[dismissed]",
+            )
+        except ValueError as exc:
+            raise HTTPException(409, detail=str(exc)) from exc
+        if admission.rejected:
+            raise HTTPException(409, detail=admission.reason)
+    else:
+        from db.database import connect_sessions
 
-    # Notify clients first so the modal closes and the bubble is marked
-    # dismissed before the agent's follow-up turn arrives.
-    manager.emit(session_id, {"type": "dialog.dismissed", "question_id": question_id})
-
-    # Deliver a dismissal message to the agent so it can continue the
-    # workflow rather than staying silently blocked.
-    session_obj = manager.get(session_id)
-    if session_obj is not None:
-        current = sv2._current_state(session_obj)
-        if current == sv2.SessionStateV2.AWAITING_USER:
-            formatted = "[User dismissed your question without answering]\n" f"Q: {question['question']}"
-            try:
-                await manager.prompt(session_id, formatted)
-            except Exception:
-                # Fallback: transition to idle so the session isn't stuck
-                # with no question row in AWAITING_USER.
-                try:
-                    sv2.transition(session_obj, sv2.SessionStateV2.IDLE_READY, "question-dismissed")
-                except Exception:
-                    pass
-
+        with connect_sessions() as conn:
+            conn.execute("DELETE FROM questions WHERE id = ? AND answered_at IS NULL", (question_id,))
+    manager.emit(session.session_id, {"type": "dialog.dismissed", "question_id": question_id})
     return {"status": "dismissed"}
 
 

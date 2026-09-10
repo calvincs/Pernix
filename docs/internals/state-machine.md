@@ -2,7 +2,7 @@
 
 Complete walkthrough of how requests flow through the harness: session lifecycle, the agent turn loop, sub-agent workers, and the loop inside workers. File:line citations reference the repo at the time of writing.
 
-> **True state machine (v2)** — amended 2026-04-20, legacy layer deleted 2026-08-07
+> **True state machine (v2)** — amended 2026-04-20, legacy layer deleted 2026-08-07; delivery/settlement audit 2026-09-10
 >
 > The "five states + orthogonal flags" model this document originally described is **gone from the code**, not merely superseded. The only state machine is `sessions.state_v2`: a ten-state enum, one mutator (`transition()`), one persisted column (`sessions.state_v2`, migration v16), one log table (`session_state_log`, migration v13), and one `session.state_changed` SSE event per transition. The old 5-value enum, the `session.state` mirror field it lived in, and the bridge tables that translated between them were deleted along with the redundant per-transition write to the legacy `sessions.state` column (which still exists in the schema — see the note in `db/database.py` — but is no longer maintained).
 >
@@ -24,7 +24,7 @@ Complete walkthrough of how requests flow through the harness: session lifecycle
 | `PAUSED` | Session parked at `await session.pause_event.wait()` | Queued |
 | `CANCELLING` | `cancel_requested` observed; post-hooks skipped, transient | **Rejected** |
 | `FINALIZING` | Post-hooks running (title, distill, reflect, eval, worker finalize) | Queued |
-| `AWAITING_USER` | `ask_user` posted a question; turn terminated cleanly | Rejected (answer via `/api/questions/{id}/answer`) |
+| `AWAITING_USER` | `ask_user` posted a question; turn terminated cleanly | Yes (a reply resumes the turn; question answers use the answer endpoint) |
 | `AWAITING_WORKERS` | Parent session parked while watched workers run; auto-resumes when they settle | Queued |
 
 Deleted from the legacy enum: `ERROR` (folded into `FINALIZING` with `termination_reason="error"`), `DELETED` (was never set).
@@ -44,6 +44,13 @@ PROCESSING       → AWAITING_USER     reason=ask-user
 PROCESSING       → PAUSE_REQUESTED   reason=pause-requested   (workers and main sessions)
 PROCESSING       → CANCELLING        reason=cancel-requested
 PROCESSING       → FINALIZING        reason=loop-complete|round-ceiling|agent-error
+PAUSE_REQUESTED  → PROCESSING        reason=resume
+PAUSE_REQUESTED  → FINALIZING        reason=loop-complete|round-ceiling|stuck-loop|agent-error
+PAUSE_REQUESTED  → AWAITING_USER     reason=ask-user
+PAUSE_REQUESTED  → AWAITING_WORKERS  reason=workers-dispatched
+PAUSE_REQUESTED  → COMPACTING        reason=compact-{proactive|critical|overflow}
+COMPACTING       → PAUSE_REQUESTED   reason=compact-done-paused
+FINALIZING       → CANCELLING        reason=cancel-requested
 PAUSE_REQUESTED  → PAUSED            reason=pause-observed
 PAUSE_REQUESTED  → CANCELLING        reason=cancel-during-pause
 PAUSED           → PROCESSING        reason=resume
@@ -58,15 +65,17 @@ PROCESSING       → AWAITING_WORKERS  reason=workers-dispatched
 AWAITING_WORKERS → SCOUTING          reason=workers-complete
 AWAITING_WORKERS → IDLE_READY        reason=worker-timeout
 AWAITING_WORKERS → CANCELLING        reason=cancel-requested
-(6 states)       → IDLE_READY        reason=reaper-unstick     (SCOUTING, PROCESSING, PAUSE_REQUESTED, PAUSED, AWAITING_USER, AWAITING_WORKERS — no such edge from COMPACTING, CANCELLING, FINALIZING or IDLE_READY)
+(8 states)       → IDLE_READY        reason=reaper-unstick     (all except CANCELLING and IDLE_READY)
 (any active)     → IDLE_READY        reason=cancel-timeout     (cancel raced the turn's own exit)
 ```
 
-The escape-hatch rows are shorthand: `TRANSITIONS` in `sessions/state_v2.py` spells out one edge per source state rather than a wildcard, so an unexpected `(from, reason)` pair is still detected and logged as an invariant violation.
+The escape-hatch rows are shorthand: `TRANSITIONS` in `sessions/state_v2.py` spells out one edge per source state rather than a wildcard, so an unexpected `(from, reason)` pair is logged as an invariant violation and rejected without advancing state.
 
 No more `force_state()`. If a situation needs to "force," the edge is in the graph with an explicit reason (e.g. `reaper-unstick`, `cancel-timeout`, `finalize-error`).
 
 ### 0.3 State log (migration v13)
+
+Accepted transitions update `sessions.state_v2` and append the log in the same transaction. Memory and SSE advance only after commit; a persistence failure leaves the prior state intact.
 
 Table: `session_state_log` (append-only). Columns: `session_id, turn_id, parent_turn_id, retry_index, compaction_count, from_state, to_state, reason, termination_reason, reflect_count, eval_count, timestamp_ms, elapsed_ms`.
 
@@ -77,8 +86,8 @@ Table: `session_state_log` (append-only). Columns: `session_id, turn_id, parent_
 
 ### 0.4 SSE events
 
-- `session.state_changed {from, to, reason, turn_id, retry_index, compaction_count, termination_reason, parent_turn_id}` — emitted for every transition. Canonical lifecycle signal.
-- `session.prompt_rejected {reason: "awaiting_user" | "cancelling" | "queue_full"}` — emitted when a prompt is refused.
+- `session.state_changed {from, to, reason, turn_id, retry_index, compaction_count, termination_reason, parent_turn_id, capabilities}` — emitted for every transition. Canonical lifecycle signal.
+- `session.prompt_rejected {reason: "cancelling" | "queue_full" | "shutting_down" | "no_agent_runner"}` — emitted when a prompt is refused.
 - `worker.done {worker_id, termination_reason, error}` — emitted on parent session when a worker's full turn settles.
 
 Existing payload-detail events (`scout.start`, `stream.token`, `tool.call.*`, `context.compacting`, `reflect.*`, `turn.complete`, `worker.started`) remain and continue to fire. Later additions on the same stream:
@@ -99,7 +108,7 @@ Every one of these must also appear in `EVENT_TYPES` in `static/js/sse.js`: `Eve
 | `post_hooks_complete` | Derived read-only property: `True` iff `state == IDLE_READY` |
 | `waiting_for_input` | Derived read-only property: `True` iff `state == AWAITING_USER` |
 | `cancel_requested` | Kept as cooperative bool signal (HTTP cancel endpoint sets it outside the lock) |
-| `pause_event` | Kept as asyncio primitive (mirrors `state ∈ {PAUSE_REQUESTED, PAUSED}`) |
+| `pause_event` | Kept as asyncio primitive (also preserves a pending pause through COMPACTING) |
 | `reflect_retry_requested` / `eval_retry_requested` | Kept as internal post-hooks gates |
 | `has_background_tasks` | Kept (orthogonal — snooze/distill, not turn state) |
 | `termination_reason` | Kept, typed as `TerminationReason` enum, copied into state_log |
@@ -110,6 +119,16 @@ Enforced in `Manager.prompt()` (`sessions/manager.py`):
 - **IDLE_READY** / **AWAITING_USER** → run now. AWAITING_USER routes via `answer-received` automatically because `_run_agent_safe` detects the starting state.
 - **SCOUTING** / **PROCESSING** / **COMPACTING** / **PAUSE_REQUESTED** / **PAUSED** / **FINALIZING** → queue on `pending_messages`.
 - **CANCELLING** → reject with `session.prompt_rejected{reason:"cancelling"}`.
+
+The task remains the admission owner through finalization. `_run_agent_safe` restores model overrides and records the execution's outcome **after** verification retries and **before** dispatching the next queued run. A failed retry or cancellation during verification therefore cannot report the first attempt's success.
+
+#### Steering and control contract
+
+`Manager.steer()` is shared by browser corrections and worker steering. A live scouting/processing/compacting/paused turn receives a persisted injected row; finalizing or idle work follows normal admission. Corrections carry `delivery_status=pending` and increment the running turn's input version, so a correction arriving after compilation gets another pass. The compiler pins pending rows and retains them across compaction, while excluding prompts queued for later turns. A successful provider response marks only the pending rows actually included in that request `consumed` and emits `message.consumed`. Unread rows are recovered as queued work if the turn ends first. Cancellation retires unread rows; settled or consumed rows are not replayed. This is at-least-once delivery: a process failure before acknowledgement can replay input.
+
+Question answers and dismissals close the question and persist the accepted input in one transaction. Rejected admission returns HTTP 409 and leaves the question open. Chat and steering endpoints also report admission refusal instead of claiming success.
+
+`Manager.control_session()` owns pause/resume validation for browser and worker controls. Status and state-change events expose `capabilities`; the browser uses them to enable controls. Pause applies only to a live processing task and takes effect at the next checkpoint. Resume can withdraw an unobserved pause. If the last response finishes first, the turn settles and clears the pause signal rather than leaving a dead task paused.
 
 ### 0.7 Reaper rules (10-state)
 
@@ -130,11 +149,11 @@ Sessions/manager.py `reap_idle_sessions()`:
 
 ### 0.8 API / observability
 
-- `GET /api/sessions/{id}/status` — now includes `state` (new 10-value enum, defined in `sessions/state_v2.py:SessionStateV2`), `compat_status` (legacy 3-value for CLI compat), `turn_id`, `retry_index`, `termination_reason`.
+- `GET /api/sessions/{id}/status` — now includes `state` (new 10-value enum, defined in `sessions/state_v2.py:SessionStateV2`), `compat_status` (legacy 3-value for CLI compat), `turn_id`, `retry_index`, `termination_reason`, and `capabilities`.
 - `GET /api/sessions/{id}/state-log?since_id=<id>&limit=<n>` (or `tail=true&limit=<n>` for the newest window, paged backward with `before_id`) — raw replay of the transition log, one row per `state_v2.transition()` call.
 - `GET /api/sessions/{id}/turns?before_turn=<id>&limit=<n>` (default `limit=20`, clamped 1–100, newest turn first, `has_more` on the response) — one assembled record per turn instead of raw log rows: phases with wall-clock durations, tool calls (name, argument digest, latency, the *executor's* error flag rather than a `"traceback"` string match), the scout report, the reflect retry chain, eval gate attempts, compaction summaries, notices, and token totals. It joins the same `session_state_log` / `messages` / `token_usage` rows `/state-log` exposes raw — added so the client doesn't have to download and join the whole transcript itself to render a turn header. `db.get_turns()` (`db/models.py`) does the assembly.
 - `POST /api/sessions/{id}/workers/{wid}/pause` / `/resume` — HTTP wrappers over the state-machine-aware `pause_worker` / `resume_worker` tools.
-- The frontend **State timeline** modal (`openTimeline()` in `static/js/components/modals/timeline.js`, opened from the status bar's state badge) has three tabs — **Lane** (default; one row per turn, built from `/turns`, with a **Story** detail panel under the selected row, not a fourth tab), **Map** (the state machine itself: all ten states and all 31 distinct edges of `TRANSITIONS`, hand-laid as one SVG — replacing the Mermaid diagram removed in v3.1), and **Timeline** (the raw transition/tool-call feed, still `/state-log`-driven). Full UI mechanics: [web-client.md § The State timeline](web-client.md#the-state-timeline).
+- The frontend **State timeline** modal (`openTimeline()` in `static/js/components/modals/timeline.js`, opened from the status bar's state badge) has three tabs — **Lane** (default; one row per turn, built from `/turns`, with a **Story** detail panel under the selected row, not a fourth tab), **Map** (the state machine itself: all ten states and all distinct edges of `TRANSITIONS`, hand-laid as one SVG — replacing the Mermaid diagram removed in v3.1), and **Timeline** (the raw transition/tool-call feed, still `/state-log`-driven). Full UI mechanics: [web-client.md § The State timeline](web-client.md#the-state-timeline).
 
 ---
 

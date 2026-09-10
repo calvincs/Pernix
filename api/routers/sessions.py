@@ -393,11 +393,8 @@ async def cancel_session(session_id: str):
                     "cancel-requested",
                     termination_reason=sv2.TerminationReason.CANCELLED,
                 )
-                sv2.transition(
-                    session,
-                    sv2.SessionStateV2.IDLE_READY,
-                    "cancel-complete",
-                )
+                session.cancel_requested = False
+                sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "cancel-complete")
             except Exception:
                 pass
 
@@ -757,10 +754,10 @@ async def http_pause_session(session_id: str):
     manager = get_manager()
     if not manager.get(session_id):
         raise HTTPException(404, detail=f"Session {session_id} not found in memory")
-    from core.extensions.orchestration import pause_worker as _pause
-
-    msg = _pause(session_id)
-    return {"status": "pause_requested", "session_id": session_id, "detail": msg}
+    result = manager.control_session(session_id, "pause")
+    if result["status"] == "rejected":
+        raise HTTPException(409, detail=result["detail"])
+    return {**result, "session_id": session_id}
 
 
 @router.post("/api/sessions/{session_id}/resume")
@@ -769,10 +766,10 @@ async def http_resume_session(session_id: str):
     manager = get_manager()
     if not manager.get(session_id):
         raise HTTPException(404, detail=f"Session {session_id} not found in memory")
-    from core.extensions.orchestration import resume_worker as _resume
-
-    msg = _resume(session_id)
-    return {"status": "resumed", "session_id": session_id, "detail": msg}
+    result = manager.control_session(session_id, "resume")
+    if result["status"] == "rejected":
+        raise HTTPException(409, detail=result["detail"])
+    return {**result, "session_id": session_id}
 
 
 @router.post("/api/sessions/{session_id}/workers/{worker_id}/pause")
@@ -787,10 +784,10 @@ async def http_pause_worker(session_id: str, worker_id: str):
         raise HTTPException(404, detail=f"Worker {worker_id} not a child of {session_id}")
     if not manager.get(worker_id):
         raise HTTPException(404, detail=f"Worker {worker_id} not in memory")
-    from core.extensions.orchestration import pause_worker as _pw
-
-    msg = _pw(worker_id)
-    return {"status": "pause_requested", "worker_id": worker_id, "detail": msg}
+    result = manager.control_session(worker_id, "pause")
+    if result["status"] == "rejected":
+        raise HTTPException(409, detail=result["detail"])
+    return {**result, "worker_id": worker_id}
 
 
 @router.post("/api/sessions/{session_id}/workers/{worker_id}/resume")

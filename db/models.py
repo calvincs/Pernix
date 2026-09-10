@@ -1039,6 +1039,7 @@ def add_state_log(
     reflect_count: int = 0,
     eval_count: int = 0,
     elapsed_ms: int | None = None,
+    persist_state: bool = False,
 ) -> int:
     with connect_sessions() as conn:
         cur = conn.execute(
@@ -1063,6 +1064,10 @@ def add_state_log(
                 elapsed_ms,
             ),
         )
+        if persist_state:
+            conn.execute(
+                "UPDATE sessions SET state_v2 = ?, updated_at = ? WHERE id = ?", (to_state, _now(), session_id)
+            )
         return int(cur.lastrowid or 0)
 
 
@@ -1741,9 +1746,19 @@ def add_message(
     idempotency_key: str | None = None,
     latency_ms: int | None = None,
     metadata: str | None = None,
+    question_id: str | None = None,
+    question_answer: str | None = None,
 ) -> int:
     """Insert a message. Returns message ID."""
     with connect_sessions() as conn:
+        if question_id is not None:
+            answered = conn.execute(
+                "UPDATE questions SET answer = ?, answered_at = ? "
+                "WHERE id = ? AND session_id = ? AND answered_at IS NULL",
+                (question_answer, _now(), question_id, session_id),
+            )
+            if answered.rowcount != 1:
+                raise ValueError("Question already handled")
         cur = conn.execute(
             """INSERT INTO messages (session_id, role, content, tool_call_id,
                tool_calls, char_count, token_count, partial, idempotency_key,
@@ -1948,6 +1963,32 @@ def turn_has_assistant_row(session_id: str, user_msg_id: int) -> bool:
         return row is not None
 
 
+def set_message_delivery(session_id: str, message_ids: list[int], status: str) -> None:
+    """Persist delivery independently of transcript adjacency. Only managed rows change."""
+    if not message_ids:
+        return
+    with connect_sessions() as conn:
+        conn.executemany(
+            "UPDATE messages SET metadata = json_set(metadata, '$.delivery_status', ?) "
+            "WHERE session_id = ? AND id = ? AND json_valid(metadata) "
+            "AND json_extract(metadata, '$.delivery_status') IS NOT NULL "
+            "AND (? != 'consumed' OR json_extract(metadata, '$.delivery_status') = 'pending')",
+            [(status, session_id, mid, status) for mid in message_ids],
+        )
+
+
+def requeue_message_delivery(session_id: str, message_id: int) -> None:
+    """An unread correction becomes its own queued request, with a new turn root."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE messages SET metadata = json_set(json_remove(metadata, '$.parent_user_msg_id'), "
+            "'$.injected', json('false'), '$.delivery_status', 'pending') "
+            "WHERE session_id = ? AND id = ? AND json_valid(metadata) "
+            "AND json_extract(metadata, '$.delivery_status') = 'pending'",
+            (session_id, message_id),
+        )
+
+
 def get_orphaned_user_messages(session_id: str) -> list[dict]:
     """Return user messages that have no subsequent assistant response.
 
@@ -1979,7 +2020,14 @@ def get_orphaned_user_messages(session_id: str) -> list[dict]:
         if role == "user":
             try:
                 meta = _json.loads(m.get("metadata") or "{}")
-                if meta.get("injected") or meta.get("cancelled"):
+                if meta.get("cancelled") or meta.get("delivery_status") in {"consumed", "settled", "cancelled"}:
+                    continue
+                if meta.get("delivery_status") == "pending":
+                    # Explicit delivery survives even when an unrelated answer
+                    # was appended later. Legacy rows retain adjacency recovery.
+                    orphans.append(m)
+                    continue
+                if meta.get("injected"):
                     continue
             except Exception:
                 pass

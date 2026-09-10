@@ -66,7 +66,7 @@ const EVENT_TYPES = [
     // Goals (budget checkpoints + auto-continuation)
     'goal.budget_exceeded', 'goal.continuation',
     // Injected mid-turn messages
-    'message.injected',
+    'message.injected', 'message.consumed',
     // Workers
     'worker.started', 'worker.done', 'worker.failed', 'worker.resumed',
     // Auto-resume declined because the parent already collected the results.
