@@ -315,29 +315,59 @@ def _broadcast_session_timeout_notification(session) -> None:
         )
 
 
+# The states whose exit routes through _map_termination_to_v2_reason: the
+# loop-complete finally in _run_agent_safe and the reflect-retry finally both
+# use this tuple. It is a module constant so the regression test can multiply
+# it by the mapping below and assert every resulting (state, reason) pair is
+# declared in sv2.TRANSITIONS — an undeclared pair is rejected silently and
+# strands the turn until the reaper.
+TERMINATION_ROUTED_STATES: tuple[sv2.SessionStateV2, ...] = (
+    sv2.SessionStateV2.PROCESSING,
+    sv2.SessionStateV2.PAUSE_REQUESTED,
+)
+
+# agent.py's termination_reason string → the v2 (reason, TerminationReason)
+# pair the FINALIZING edge carries. Module-level for the same reason as
+# TERMINATION_ROUTED_STATES: the test enumerates it.
+TERMINATION_TO_V2: dict[str, tuple[str, sv2.TerminationReason]] = {
+    "complete": ("loop-complete", sv2.TerminationReason.COMPLETE),
+    "round_ceiling": ("round-ceiling", sv2.TerminationReason.ROUND_CEILING),
+    # The stuck detector force-breaking a repetition loop is its own wall:
+    # it fires at any round number, so it must not be logged as the round
+    # budget running out.
+    "stuck_loop": ("stuck-loop", sv2.TerminationReason.STUCK_LOOP),
+    "compaction_failed": ("compaction-failed", sv2.TerminationReason.COMPACTION_FAILED),
+    # agent.py uses `return` (not `raise`) for stream/failover errors, so no
+    # exception propagates to _run_agent_safe's except block. The finally's
+    # PROCESSING branch uses this mapping — without "error" here it would
+    # fall through to the default and log the turn as "loop-complete/complete".
+    "error": ("agent-error", sv2.TerminationReason.ERROR),
+    # Soft-land for LLM session-time budget exhaustion. Treat as a clean
+    # transition (loop-complete) so the turn ends in IDLE_READY rather
+    # than going through the error path, but record BUDGET_EXHAUSTED in
+    # the state log so post-mortem queries can distinguish "agent ran
+    # out of LLM time mid-turn" from a genuine "complete" outcome.
+    "budget_exhausted": ("loop-complete", sv2.TerminationReason.BUDGET_EXHAUSTED),
+}
+
+
+def finalize_failure_reason(current: sv2.SessionStateV2) -> str:
+    """The reason _run_agent_safe uses when turn finalization itself raised.
+
+    Whatever state finalization died in has to reach IDLE_READY or the
+    session is stranded with no post hooks and a hidden cancel control.
+    FINALIZING has its own named reason; every other state borrows the
+    reaper's. A function rather than an inline conditional so the regression
+    test can run every state through it and check the edge is declared —
+    CANCELLING was not, and a cancel that raced the finally stalled there.
+    """
+    return "finalize-error" if current is sv2.SessionStateV2.FINALIZING else "reaper-unstick"
+
+
 def _map_termination_to_v2_reason(tr: str | None) -> tuple[str, sv2.TerminationReason]:
     """Translate agent.py's legacy termination_reason string into a v2
     (reason, TerminationReason) pair for the PROCESSING → FINALIZING edge."""
-    mapping = {
-        "complete": ("loop-complete", sv2.TerminationReason.COMPLETE),
-        "round_ceiling": ("round-ceiling", sv2.TerminationReason.ROUND_CEILING),
-        # The stuck detector force-breaking a repetition loop is its own wall:
-        # it fires at any round number, so it must not be logged as the round
-        # budget running out.
-        "stuck_loop": ("stuck-loop", sv2.TerminationReason.STUCK_LOOP),
-        "compaction_failed": ("compaction-failed", sv2.TerminationReason.COMPACTION_FAILED),
-        # agent.py uses `return` (not `raise`) for stream/failover errors, so no
-        # exception propagates to _run_agent_safe's except block. The finally's
-        # PROCESSING branch uses this mapping — without "error" here it would
-        # fall through to the default and log the turn as "loop-complete/complete".
-        "error": ("agent-error", sv2.TerminationReason.ERROR),
-        # Soft-land for LLM session-time budget exhaustion. Treat as a clean
-        # transition (loop-complete) so the turn ends in IDLE_READY rather
-        # than going through the error path, but record BUDGET_EXHAUSTED in
-        # the state log so post-mortem queries can distinguish "agent ran
-        # out of LLM time mid-turn" from a genuine "complete" outcome.
-        "budget_exhausted": ("loop-complete", sv2.TerminationReason.BUDGET_EXHAUSTED),
-    }
+    mapping = TERMINATION_TO_V2
     key = tr or "complete"
     if key not in mapping:
         # A termination reason added in agent.py but not mapped here would
@@ -1547,7 +1577,7 @@ class SessionManager:
             "capabilities": sv2.capabilities(session),
         }
 
-    def cancel_session(self, session: AgentSession, *, cascade: bool = True) -> bool:
+    def cancel_session(self, session: AgentSession, *, cascade: bool = True, for_delete: bool = False) -> bool:
         """Stop a session's turn now: cooperative flag, queued prompts, child
         processes, and the asyncio task. Loop-affine (Task.cancel).
 
@@ -1556,9 +1586,13 @@ class SessionManager:
         worker's executor swallowed the CancelledError, the bash child ran
         on, and the loop's cancel_requested checkpoints never fired.
         Returns True when a running task was cancelled.
+
+        for_delete skips the pending-row scan: the delete path is about to
+        drop every one of those rows, so reading them to stamp a disposition
+        nobody will ever read is pure cost on the loop.
         """
         session.cancel_requested = True
-        self.drop_pending_for_cancel(session)
+        self.drop_pending_for_cancel(session, scan_pending=not for_delete)
         kill_session_processes(session)
         if cascade:
             for wid in list(getattr(session, "worker_ids", []) or []):
@@ -1580,7 +1614,7 @@ class SessionManager:
             )
         return False
 
-    def drop_pending_for_cancel(self, session: AgentSession) -> int:
+    def drop_pending_for_cancel(self, session: AgentSession, *, scan_pending: bool = True) -> int:
         """Empty the queue and record, in the DB, that a cancel dropped it.
 
         Returns the number of queued messages dropped, for the caller's notice.
@@ -1601,38 +1635,94 @@ class SessionManager:
         started, the sequence no longer reads as orphaned, and we leave it be.
 
         Both cancel paths (this manager's cancel_session and the /cancel route)
-        call this, so neither can drift from the other again.
+        call this, so neither can drift from the other again. The route uses
+        drop_pending_for_cancel_async, which is the same work with the DB half
+        on a thread; this synchronous form exists for the loop-affine callers
+        (cancel_session, and the delete path, which passes scan_pending=False).
         """
+        dropped, queued_ids, running = self._drain_pending_for_cancel(session)
+        self._stamp_cancel_disposition(session.session_id, queued_ids, running, scan_pending=scan_pending)
+        return dropped
+
+    async def drop_pending_for_cancel_async(self, session: AgentSession) -> int:
+        """drop_pending_for_cancel with the DB half off the event loop.
+
+        The queue drain mutates loop-affine state and stays here; the stamp is
+        SQLite writes and a query, which the /cancel route has no reason to
+        hold the loop for.
+        """
+        dropped, queued_ids, running = self._drain_pending_for_cancel(session)
+        await asyncio.to_thread(
+            self._stamp_cancel_disposition,
+            session.session_id,
+            queued_ids,
+            running,
+            scan_pending=True,
+        )
+        return dropped
+
+    def _drain_pending_for_cancel(self, session: AgentSession) -> tuple[int, list[int], int | None]:
+        """Loop-affine half: empty the queue, settle the executions it owed,
+        and report (count dropped, the row ids behind them, the running turn's
+        row id). The running id is read here rather than in the blocking half
+        so nothing off the loop reads session state the loop is still
+        mutating."""
         # Synthetic entries (worker resume, worker timeout) carry no row, and
         # neither does anything in the deque that isn't a PendingMessage at
         # all; one odd entry must not cost the caller its cancel.
-        dropped_ids: list[int] = []
+        queued_ids: list[int] = []
         for raw in session.pending_messages:
             try:
                 entry = PendingMessage.coerce(raw)
             except Exception:
                 continue
             if entry.msg_id is not None:
-                dropped_ids.append(entry.msg_id)
+                queued_ids.append(entry.msg_id)
         dropped = len(session.pending_messages)
         session.pending_messages.clear()
         # Whoever admitted that queued work is owed the outcome, not silence.
         self._reap_pending_execs(session, result=EXEC_CANCELLED, error="queued work cancelled")
-        running = session.current_turn_user_msg_id
+        return dropped, queued_ids, session.current_turn_user_msg_id
+
+    def _stamp_cancel_disposition(
+        self,
+        session_id: str,
+        queued_ids: list[int],
+        running: int | None,
+        *,
+        scan_pending: bool,
+    ) -> None:
+        """Blocking half: mark the dropped rows cancelled.
+
+        Reads ids, never rows. get_orphaned_user_messages materialises every
+        message in the session, content and all, and JSON-parses each one —
+        on the event loop, once per session, so a bulk purge of N sessions
+        paid for N full transcripts. get_pending_user_message_ids asks SQLite
+        the one question this path has.
+        """
+        dropped_ids = list(queued_ids)
         try:
-            if running is not None and not db.turn_has_assistant_row(session.session_id, running):
-                dropped_ids.append(running)
-            dropped_ids.extend(
-                row["id"]
-                for row in db.get_orphaned_user_messages(session.session_id)
-                if json.loads(row.get("metadata") or "{}").get("delivery_status") == "pending"
-            )
+            if scan_pending:
+                for mid in db.get_pending_user_message_ids(session_id):
+                    if mid != running and mid not in dropped_ids:
+                        dropped_ids.append(mid)
+            if running is not None:
+                # The running turn's row stays 'pending' until the delivery
+                # acknowledge lands, which is *after* the assistant row is
+                # saved — so a cancel arriving in that window found it in the
+                # scan and stamped an answered message as cancelled, guard and
+                # all. The guard decides this row, and the scan does not get a
+                # second vote. Queued rows are deliberately not guarded: the
+                # running turn's assistant rows sit after them by id, so the
+                # same question would answer "answered" for work that never
+                # ran.
+                if not db.turn_has_assistant_row(session_id, running):
+                    dropped_ids.append(running)
             if dropped_ids:
                 db.mark_messages_cancelled(dropped_ids)
-                db.set_message_delivery(session.session_id, dropped_ids, "cancelled")
+                db.set_message_delivery(session_id, dropped_ids, "cancelled")
         except Exception as e:
-            logger.warning("Cancel stamp failed for %s: %s", session.session_id[:12], e)
-        return dropped
+            logger.warning("Cancel stamp failed for %s: %s", session_id[:12], e)
 
     def delete_session(self, session_id: str) -> None:
         """Delete session from both memory and DB (cascades workers).
@@ -1659,7 +1749,7 @@ class SessionManager:
         ids: list[str] = []
         session = self._sessions.get(session_id)
         if session:
-            self.cancel_session(session, cascade=False)
+            self.cancel_session(session, cascade=False, for_delete=True)
             for wid in list(session.worker_ids):
                 ids.extend(self._delete_session_phase1(wid))
         self._sessions.pop(session_id, None)
@@ -2408,7 +2498,7 @@ class SessionManager:
                 session.termination_reason = "error"
                 current = sv2._current_state(session)
                 if current is not sv2.SessionStateV2.IDLE_READY:
-                    reason = "finalize-error" if current is sv2.SessionStateV2.FINALIZING else "reaper-unstick"
+                    reason = finalize_failure_reason(current)
                     sv2.transition(session, sv2.SessionStateV2.IDLE_READY, reason)
             finally:
                 if run_message_id is not None:
@@ -2530,7 +2620,7 @@ class SessionManager:
             # A final response has no next round at which to park. Finishing
             # wins over a pause that has not been observed.
             session.pause_event.set()
-        if current in (sv2.SessionStateV2.PROCESSING, sv2.SessionStateV2.PAUSE_REQUESTED):
+        if current in TERMINATION_ROUTED_STATES:
             v2_reason, v2_term = _map_termination_to_v2_reason(session.termination_reason)
             try:
                 sv2.transition(
@@ -3107,7 +3197,7 @@ class SessionManager:
             current = sv2._current_state(session)
             if current == sv2.SessionStateV2.PAUSE_REQUESTED:
                 session.pause_event.set()
-            if current in (sv2.SessionStateV2.PROCESSING, sv2.SessionStateV2.PAUSE_REQUESTED):
+            if current in TERMINATION_ROUTED_STATES:
                 v2_reason, v2_term = _map_termination_to_v2_reason(session.termination_reason)
                 try:
                     sv2.transition(

@@ -3218,11 +3218,35 @@ async def _continue_after_length_truncation(
 
 
 async def _acknowledge_delivery(session: AgentSession, payload) -> None:
-    """Acknowledge only managed rows present in a successful LLM request."""
+    """Acknowledge only managed rows present in a successful LLM request.
+
+    Best-effort, like every other side-channel write in this region. The model
+    has already answered by the time this runs; a transient sqlite error here
+    used to propagate to _run_agent_safe, which classified the whole turn
+    agent-error and discarded the round's tool calls — a bookkeeping write
+    failing a good round. The rows stay 'pending' instead, which is the truth
+    and which orphan recovery already knows how to read, so the event is not
+    emitted either: telling the client 'consumed' when the row still says
+    'pending' would be the one outcome worse than the stale queued chip.
+    """
     delivered_ids = list(getattr(payload, "delivered_message_ids", ()))
-    if delivered_ids:
+    if not delivered_ids:
+        return
+    try:
         await asyncio.to_thread(db.set_message_delivery, session.session_id, delivered_ids, "consumed")
-        session.emit_event({"type": "message.consumed", "message_ids": delivered_ids})
+    except asyncio.CancelledError:
+        raise  # a cancelled turn is not a failed write
+    except Exception as e:
+        logger.warning(
+            "Delivery acknowledge failed for %s message(s) %s in session %s: %s — "
+            "rows stay pending and recovery will see them",
+            len(delivered_ids),
+            delivered_ids,
+            session.session_id[:12],
+            e,
+        )
+        return
+    session.emit_event({"type": "message.consumed", "message_ids": delivered_ids})
 
 
 async def _stream_final_answer(

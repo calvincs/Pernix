@@ -68,6 +68,7 @@ async def health_detailed(request: Request):
         provider_health["has_error"] = True
 
     from core.snooze import get_snooze
+    from sessions import state_v2 as sv2
 
     snooze = get_snooze()
 
@@ -78,6 +79,10 @@ async def health_detailed(request: Request):
         "providers": provider_health,
         "sessions": {
             "active": manager.active_count(),
+            # Undeclared (state, reason) pairs the state machine refused. Any
+            # non-zero count is a code defect that stalls a turn until the
+            # reaper — see sessions/state_v2.transition().
+            "rejected_transitions": sv2.rejected_transition_stats(),
         },
         "database": db_stats,
         "tools": {
