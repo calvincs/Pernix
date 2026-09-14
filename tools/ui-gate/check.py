@@ -2305,6 +2305,72 @@ def message_feedback_touch(browser):
     ctx.close()
 
 
+HOVER_ROW_JS = r"""(sel) => {
+  const it = document.querySelector(sel); if(!it) return null;
+  const r = it.getBoundingClientRect();
+  const cx = Math.round(r.left + r.width/2), cy = Math.round(r.top + r.height/2);
+  const hit = document.elementFromPoint(cx, cy);
+  const a = it.querySelector('.session-actions');
+  const cs = a ? getComputedStyle(a) : null;
+  const t = it.querySelector('.session-title');
+  const box = b => { const q=b.getBoundingClientRect(); return Math.round(q.width)+'x'+Math.round(q.height); };
+  return {
+    hit: hit ? (hit.tagName.toLowerCase() + (hit.className && typeof hit.className==='string' ? '.'+hit.className.trim().split(/\s+/)[0] : '')) : null,
+    hitInTitle: !!(hit && hit.closest && hit.closest('.session-title')),
+    hitIsControl: !!(hit && hit.closest && hit.closest('.session-actions, button')),
+    stripW: a ? Math.round(a.getBoundingClientRect().width) : -1,
+    stripOpacity: cs ? cs.opacity : null,
+    controls: a ? [...a.children].map(b => b.className.split(/\s+/)[0] + ' ' + box(b)) : null,
+    rowW: Math.round(r.width),
+    titleW: t ? Math.round(t.getBoundingClientRect().width) : -1,
+  }; }"""
+
+
+def hover_row_actions(browser):
+    """m2 (mouse): what a click at the centre of a hovered session row hits.
+
+    The overlay grew to seven 24px buttons — 184px of a 253px row, starting at
+    x=57 — so the title collapsed to about four characters on hover and
+    `elementFromPoint` at the row's centre was `button.session-pin`. Pointing
+    at a row to click it pinned it, and Delete sat under the cursor at the top
+    right. Two controls now, and the numbers that made it wrong are the ones
+    pinned here. (L02)
+    """
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
+    pg = ctx.new_page()
+    pg.on("console", console_sink("hover-row"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    sel = ".session-item:not(.worker)"
+    pg.hover(sel)
+    time.sleep(0.5)
+    m = _settle(lambda: (lambda r: r if r and r["stripOpacity"] == "1" else None)(pg.evaluate(HOVER_ROW_JS, sel)))
+    m = m or pg.evaluate(HOVER_ROW_JS, sel)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-row-hover.png")
+    check(
+        "hover-row",
+        "m2: a hovered row's strip is pin plus overflow, 24px each, <=64px wide",
+        bool(m) and m["controls"] == ["session-pin 24x24", "session-more 24x24"] and 0 < m["stripW"] <= 64,
+        m,
+        "m2",
+    )
+    check(
+        "hover-row",
+        "m2: the element at a hovered row's centre is the title, not a control",
+        bool(m) and m["hitInTitle"] and not m["hitIsControl"],
+        m,
+        "m2",
+    )
+    check(
+        "hover-row",
+        "m2: the title keeps >=60% of the row while it is hovered",
+        bool(m) and m["rowW"] > 0 and m["titleW"] >= 0.6 * m["rowW"],
+        m,
+        "m2",
+    )
+    ctx.close()
+
+
 def trust_tab(browser):
     """m2: the Trust tab is counts, with a real empty state for the trials."""
     state = {"payload": json.loads(json.dumps(TRUST_PAYLOAD))}
@@ -2560,6 +2626,7 @@ with sync_playwright() as p:
         except Exception as e:
             check("suggestions", "m2: suggestion pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
         for fn, vp in (
+            (hover_row_actions, "hover-row"),
             (message_feedback, "feedback"),
             (message_feedback_touch, "feedback-touch"),
             (trust_tab, "trust"),
