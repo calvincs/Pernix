@@ -458,6 +458,14 @@ class Settings:
     # that the two-proportion test cannot separate drift from noise, which
     # is exactly what the old 20-turn ratio kept doing.
     adaptive_tripwire_window_turns: int = 100
+    # Active tripwire: how long a batch may wait for a canary verdict. Past
+    # this many hours from the APPLY with no task able to testify, the batch
+    # is settled as unjudged instead of being re-derived (and re-warned
+    # about) on every maintenance tick forever — two candor batches applied
+    # 2026-08-13 logged the same WARNING 164 times in three days, and their
+    # canary suite had been retired in the meantime, so no run could ever
+    # have judged them. Rollback stays available to a human.
+    adaptive_tripwire_window_hours: int = 72
     adaptive_max_pending_proposals: int = 200  # review queue cap (0 = unbounded)
     adaptive_max_pending_per_producer: int = 60  # one producer's share of it (0 = unbounded)
     adaptive_proposal_ttl_days: int = 30  # pending proposals lapse after this (0 = never)

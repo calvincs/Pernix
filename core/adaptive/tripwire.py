@@ -79,6 +79,36 @@ def _applied_at(batch: dict) -> str:
     return batch.get("created_at") or ""
 
 
+# The settled state of a batch nothing could judge. Machine-readable prefix
+# plus the sentence the Adaptive panel shows, because the panel renders
+# flagged_reason verbatim.
+NO_SIGNAL_REASON = "no-signal: unjudged (no canary could testify)"
+
+
+def _warn_once(batch_id: str, message: str, *args) -> None:
+    """WARNING the first time this batch has nothing to judge it, DEBUG after.
+
+    The sweep runs on every maintenance tick and re-derives the same verdict
+    from the same rows, so an unconditional WARNING is a per-tick metronome:
+    164 identical lines between 09-10 and 09-12 on the live box, all of them
+    about two batches from 2026-08-13 whose canary suite had been retired.
+    The marker lives in snooze_state, so a restart does not re-open the tap.
+    """
+    key = f"adaptive_nosignal_warned:{batch_id}"
+    try:
+        seen = bool(db.get_snooze_state(key))
+    except Exception:
+        seen = False
+    if seen:
+        logger.debug(message, *args)
+        return
+    logger.warning(message, *args)
+    try:
+        db.set_snooze_state(key, _now_iso())
+    except Exception as e:
+        logger.debug("Tripwire warn-once marker failed for %s: %s", batch_id, e)
+
+
 def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool, bool, str] | None:
     """(regressed, confirmed, detail) — per-task verdicts from the post-batch
     sweep — or None when no usable sweep data exists yet (batch stays as-is;
@@ -139,7 +169,8 @@ def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool,
         # no green history. That is a statement about the suite, not the
         # batch — report "no usable signal" instead of a false all-clear;
         # core/canary/maintain.py raises suite outages separately.
-        logger.warning(
+        _warn_once(
+            str(batch.get("batch_id") or ""),
             "Tripwire: no canary task could testify for batch %s (%d post-batch rows) — "
             "treating the canary signal as unavailable.",
             batch.get("batch_id"),
@@ -299,6 +330,57 @@ def _expire_stale_suspect(batch: dict, actions: list[dict]) -> bool:
     return True
 
 
+def _settle_unjudged(batch: dict, applied_at: str, actions: list[dict]) -> bool:
+    """Close a batch no canary verdict is ever going to arrive for.
+
+    The active signal is per-task canary testimony, and a task may only
+    testify when its trailing runs before the apply were green. Retire the
+    suite behind a batch — as 08-27 did — and that condition can never be
+    met again: `_canary_signal` returns None forever, the batch is never
+    cleared, and every tick re-reads the same rows to reach the same
+    non-answer. Two batches applied 2026-08-13 were still in that loop a
+    month later.
+
+    So the wait is bounded. Past `adaptive_tripwire_window_hours` from the
+    APPLY the batch is settled `cleared_at` with NO_SIGNAL_REASON, which is
+    an honest verdict (nothing measured it), not an all-clear: status stays
+    `applied`, so a human can still roll it back from the Adaptive panel.
+    Returns True when the batch was settled.
+
+    Deliberate trade-off: this also closes a batch whose PASSIVE window has
+    not yet reached 30 organic turns. Three days after an apply, a box that
+    thin is comparing two different eras rather than one change, and the
+    passive channel has never rolled anything back — a batch left open
+    forever for a comparison that may never come is the worse failure.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    hours = int(settings.adaptive_tripwire_window_hours or 0)
+    if hours <= 0 or not applied_at:
+        return False
+    try:
+        applied = datetime.fromisoformat(str(applied_at))
+    except ValueError:
+        return False
+    if applied.tzinfo is None:
+        applied = applied.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - applied < timedelta(hours=hours):
+        return False  # the post-batch sweep may still be queued
+
+    bid = batch["batch_id"]
+    from db.models import _now as _now_fn
+
+    db.adaptive_update_batch(bid, status="applied", cleared_at=_now_fn(), flagged_reason=NO_SIGNAL_REASON)
+    actions.append({"batch_id": bid, "action": "unjudged", "detail": NO_SIGNAL_REASON})
+    logger.info(
+        "Tripwire: batch %s settled as unjudged — no canary could testify within %dh of the apply (%s)",
+        bid,
+        hours,
+        applied_at,
+    )
+    return True
+
+
 def evaluate_tripwire() -> list[dict]:
     """Sweep applied + suspect batches. Returns actions taken. Never raises."""
     actions: list[dict] = []
@@ -382,6 +464,9 @@ def evaluate_tripwire() -> list[dict]:
 
                 db.adaptive_update_batch(bid, status="applied", cleared_at=_now_fn())
                 actions.append({"batch_id": bid, "action": "cleared", "detail": details})
+            elif canary is None and batch["status"] == "applied":
+                # Nothing testified, and past the window nothing ever will.
+                _settle_unjudged(batch, applied_at, actions)
         except Exception as e:
             logger.warning("Tripwire evaluation failed for batch %s: %s", bid, e)
     return actions
