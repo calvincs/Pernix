@@ -113,6 +113,13 @@ TRANSITIONS: dict[tuple[S, str], S] = {
     (S.PAUSE_REQUESTED, "compact-critical"): S.COMPACTING,
     (S.PAUSE_REQUESTED, "compact-overflow"): S.COMPACTING,
     (S.COMPACTING, "compaction-failed"): S.FINALIZING,
+    # A turn can also die on compaction without being *in* COMPACTING: when
+    # the compactor is exhausted or provably stalled the critical branch in
+    # agent.py never calls run(), so the break happens from whichever state
+    # the loop was in. The closure test over TERMINATION_TO_V2 ×
+    # TERMINATION_ROUTED_STATES found this pair the same day as the
+    # PAUSE_REQUESTED one; both are the same defect.
+    (S.PROCESSING, "compaction-failed"): S.FINALIZING,
     # Agent loop exits + interrupts
     (S.PROCESSING, "ask-user"): S.AWAITING_USER,
     (S.PROCESSING, "pause-requested"): S.PAUSE_REQUESTED,
@@ -131,6 +138,13 @@ TRANSITIONS: dict[tuple[S, str], S] = {
     (S.PAUSE_REQUESTED, "ask-user"): S.AWAITING_USER,
     (S.PAUSE_REQUESTED, "workers-dispatched"): S.AWAITING_WORKERS,
     (S.PAUSE_REQUESTED, "cancel-during-pause"): S.CANCELLING,
+    # A pause that has not been observed yet loses to the turn ending, and a
+    # turn can end on a failed compaction: manager.py routes PAUSE_REQUESTED
+    # through the same _map_termination_to_v2_reason branch as PROCESSING,
+    # which maps compaction_failed to this reason. Without the edge the
+    # transition was rejected and the turn sat in PAUSE_REQUESTED — no post
+    # hooks, queued prompts stalled, pause/cancel hidden — until the reaper.
+    (S.PAUSE_REQUESTED, "compaction-failed"): S.FINALIZING,
     (S.PAUSED, "resume"): S.PROCESSING,
     (S.PAUSED, "cancel-during-pause"): S.CANCELLING,
     # Cancellation terminal
@@ -166,6 +180,11 @@ TRANSITIONS: dict[tuple[S, str], S] = {
     # used to reach.
     (S.FINALIZING, "reaper-unstick"): S.IDLE_READY,
     (S.COMPACTING, "reaper-unstick"): S.IDLE_READY,
+    # _run_agent_safe's finalization-failure handler picks "reaper-unstick"
+    # for whatever state finalization died in, and CANCELLING is one of them
+    # (a cancel that raced the finally). Same target the other unstick edges
+    # use, so the turn lands IDLE_READY instead of being rejected.
+    (S.CANCELLING, "reaper-unstick"): S.IDLE_READY,
     # cancel-timeout: emergency exit when cancel was requested but the session
     # never reached CANCELLING (race between the cancel request and the agent
     # returning normally, or a failed transition to CANCELLING). One edge per
@@ -180,6 +199,36 @@ TRANSITIONS: dict[tuple[S, str], S] = {
     (S.AWAITING_WORKERS, "cancel-timeout"): S.IDLE_READY,
     (S.FINALIZING, "cancel-timeout"): S.IDLE_READY,
 }
+
+# ---------------------------------------------------------------------------
+# Rejected-transition counter
+# ---------------------------------------------------------------------------
+# An undeclared edge is a code defect, not a runtime condition: some producer
+# emits a (state, reason) pair the graph never declared, transition() returns
+# False, and the turn then sits in its old state — no post hooks, queued
+# prompts stalled — until the reaper unsticks it a minute later. That used to
+# be visible only as one WARNING among thousands. Count it here and publish
+# the counter from /api/health/detailed so the class is observable.
+
+_REJECTED_EDGES: dict[str, int] = {}
+
+
+def record_rejected_transition(from_state: S, reason: str, to: S) -> None:
+    """Count one rejected edge. Separate from transition() so tests and the
+    health endpoint share one definition of the key."""
+    key = f"{from_state.value}--({reason})-->{to.value}"
+    _REJECTED_EDGES[key] = _REJECTED_EDGES.get(key, 0) + 1
+
+
+def rejected_transition_stats() -> dict:
+    """{"total": n, "edges": {"<from>--(<reason>)--><to>": n}} for health."""
+    return {"total": sum(_REJECTED_EDGES.values()), "edges": dict(_REJECTED_EDGES)}
+
+
+def reset_rejected_transitions() -> None:
+    """Test hook — the counter is process-global by design."""
+    _REJECTED_EDGES.clear()
+
 
 # Reasons that trigger a new turn_id (vs. reusing the current one).
 _NEW_TURN_REASONS: frozenset[str] = frozenset(
@@ -336,13 +385,20 @@ def transition(
     expected_to = TRANSITIONS.get(key)
     edge_ok = expected_to is to
     if not edge_ok:
-        logger.warning(
-            "Invariant violation: transition %s --(%s)--> %s is not in graph" " (expected target: %s) — rejected",
+        # ERROR, not WARNING: the turn does not crash, but it also does not
+        # advance — it stays in `current` until the reaper. Nothing recovers
+        # this on its own, so it needs the level an operator actually reads.
+        logger.error(
+            "Rejected transition %s --(%s)--> %s: the pair is not in TRANSITIONS "
+            "(declared target for this pair: %s). The turn stays in %s until the "
+            "reaper unsticks it — declare the edge instead of forcing it.",
             current.value,
             reason,
             to.value,
             expected_to.value if expected_to else "none",
+            current.value,
         )
+        record_rejected_transition(current, reason, to)
 
     if not edge_ok:
         try:

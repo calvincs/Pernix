@@ -315,29 +315,59 @@ def _broadcast_session_timeout_notification(session) -> None:
         )
 
 
+# The states whose exit routes through _map_termination_to_v2_reason: the
+# loop-complete finally in _run_agent_safe and the reflect-retry finally both
+# use this tuple. It is a module constant so the regression test can multiply
+# it by the mapping below and assert every resulting (state, reason) pair is
+# declared in sv2.TRANSITIONS — an undeclared pair is rejected silently and
+# strands the turn until the reaper.
+TERMINATION_ROUTED_STATES: tuple[sv2.SessionStateV2, ...] = (
+    sv2.SessionStateV2.PROCESSING,
+    sv2.SessionStateV2.PAUSE_REQUESTED,
+)
+
+# agent.py's termination_reason string → the v2 (reason, TerminationReason)
+# pair the FINALIZING edge carries. Module-level for the same reason as
+# TERMINATION_ROUTED_STATES: the test enumerates it.
+TERMINATION_TO_V2: dict[str, tuple[str, sv2.TerminationReason]] = {
+    "complete": ("loop-complete", sv2.TerminationReason.COMPLETE),
+    "round_ceiling": ("round-ceiling", sv2.TerminationReason.ROUND_CEILING),
+    # The stuck detector force-breaking a repetition loop is its own wall:
+    # it fires at any round number, so it must not be logged as the round
+    # budget running out.
+    "stuck_loop": ("stuck-loop", sv2.TerminationReason.STUCK_LOOP),
+    "compaction_failed": ("compaction-failed", sv2.TerminationReason.COMPACTION_FAILED),
+    # agent.py uses `return` (not `raise`) for stream/failover errors, so no
+    # exception propagates to _run_agent_safe's except block. The finally's
+    # PROCESSING branch uses this mapping — without "error" here it would
+    # fall through to the default and log the turn as "loop-complete/complete".
+    "error": ("agent-error", sv2.TerminationReason.ERROR),
+    # Soft-land for LLM session-time budget exhaustion. Treat as a clean
+    # transition (loop-complete) so the turn ends in IDLE_READY rather
+    # than going through the error path, but record BUDGET_EXHAUSTED in
+    # the state log so post-mortem queries can distinguish "agent ran
+    # out of LLM time mid-turn" from a genuine "complete" outcome.
+    "budget_exhausted": ("loop-complete", sv2.TerminationReason.BUDGET_EXHAUSTED),
+}
+
+
+def finalize_failure_reason(current: sv2.SessionStateV2) -> str:
+    """The reason _run_agent_safe uses when turn finalization itself raised.
+
+    Whatever state finalization died in has to reach IDLE_READY or the
+    session is stranded with no post hooks and a hidden cancel control.
+    FINALIZING has its own named reason; every other state borrows the
+    reaper's. A function rather than an inline conditional so the regression
+    test can run every state through it and check the edge is declared —
+    CANCELLING was not, and a cancel that raced the finally stalled there.
+    """
+    return "finalize-error" if current is sv2.SessionStateV2.FINALIZING else "reaper-unstick"
+
+
 def _map_termination_to_v2_reason(tr: str | None) -> tuple[str, sv2.TerminationReason]:
     """Translate agent.py's legacy termination_reason string into a v2
     (reason, TerminationReason) pair for the PROCESSING → FINALIZING edge."""
-    mapping = {
-        "complete": ("loop-complete", sv2.TerminationReason.COMPLETE),
-        "round_ceiling": ("round-ceiling", sv2.TerminationReason.ROUND_CEILING),
-        # The stuck detector force-breaking a repetition loop is its own wall:
-        # it fires at any round number, so it must not be logged as the round
-        # budget running out.
-        "stuck_loop": ("stuck-loop", sv2.TerminationReason.STUCK_LOOP),
-        "compaction_failed": ("compaction-failed", sv2.TerminationReason.COMPACTION_FAILED),
-        # agent.py uses `return` (not `raise`) for stream/failover errors, so no
-        # exception propagates to _run_agent_safe's except block. The finally's
-        # PROCESSING branch uses this mapping — without "error" here it would
-        # fall through to the default and log the turn as "loop-complete/complete".
-        "error": ("agent-error", sv2.TerminationReason.ERROR),
-        # Soft-land for LLM session-time budget exhaustion. Treat as a clean
-        # transition (loop-complete) so the turn ends in IDLE_READY rather
-        # than going through the error path, but record BUDGET_EXHAUSTED in
-        # the state log so post-mortem queries can distinguish "agent ran
-        # out of LLM time mid-turn" from a genuine "complete" outcome.
-        "budget_exhausted": ("loop-complete", sv2.TerminationReason.BUDGET_EXHAUSTED),
-    }
+    mapping = TERMINATION_TO_V2
     key = tr or "complete"
     if key not in mapping:
         # A termination reason added in agent.py but not mapped here would
@@ -2408,7 +2438,7 @@ class SessionManager:
                 session.termination_reason = "error"
                 current = sv2._current_state(session)
                 if current is not sv2.SessionStateV2.IDLE_READY:
-                    reason = "finalize-error" if current is sv2.SessionStateV2.FINALIZING else "reaper-unstick"
+                    reason = finalize_failure_reason(current)
                     sv2.transition(session, sv2.SessionStateV2.IDLE_READY, reason)
             finally:
                 if run_message_id is not None:
@@ -2530,7 +2560,7 @@ class SessionManager:
             # A final response has no next round at which to park. Finishing
             # wins over a pause that has not been observed.
             session.pause_event.set()
-        if current in (sv2.SessionStateV2.PROCESSING, sv2.SessionStateV2.PAUSE_REQUESTED):
+        if current in TERMINATION_ROUTED_STATES:
             v2_reason, v2_term = _map_termination_to_v2_reason(session.termination_reason)
             try:
                 sv2.transition(
@@ -3107,7 +3137,7 @@ class SessionManager:
             current = sv2._current_state(session)
             if current == sv2.SessionStateV2.PAUSE_REQUESTED:
                 session.pause_event.set()
-            if current in (sv2.SessionStateV2.PROCESSING, sv2.SessionStateV2.PAUSE_REQUESTED):
+            if current in TERMINATION_ROUTED_STATES:
                 v2_reason, v2_term = _map_termination_to_v2_reason(session.termination_reason)
                 try:
                     sv2.transition(

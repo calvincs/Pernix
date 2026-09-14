@@ -43,9 +43,9 @@ COMPACTING       → CANCELLING        reason=cancel-requested
 PROCESSING       → AWAITING_USER     reason=ask-user
 PROCESSING       → PAUSE_REQUESTED   reason=pause-requested   (workers and main sessions)
 PROCESSING       → CANCELLING        reason=cancel-requested
-PROCESSING       → FINALIZING        reason=loop-complete|round-ceiling|agent-error
+PROCESSING       → FINALIZING        reason=loop-complete|round-ceiling|stuck-loop|agent-error|compaction-failed
 PAUSE_REQUESTED  → PROCESSING        reason=resume
-PAUSE_REQUESTED  → FINALIZING        reason=loop-complete|round-ceiling|stuck-loop|agent-error
+PAUSE_REQUESTED  → FINALIZING        reason=loop-complete|round-ceiling|stuck-loop|agent-error|compaction-failed
 PAUSE_REQUESTED  → AWAITING_USER     reason=ask-user
 PAUSE_REQUESTED  → AWAITING_WORKERS  reason=workers-dispatched
 PAUSE_REQUESTED  → COMPACTING        reason=compact-{proactive|critical|overflow}
@@ -65,13 +65,34 @@ PROCESSING       → AWAITING_WORKERS  reason=workers-dispatched
 AWAITING_WORKERS → SCOUTING          reason=workers-complete
 AWAITING_WORKERS → IDLE_READY        reason=worker-timeout
 AWAITING_WORKERS → CANCELLING        reason=cancel-requested
-(8 states)       → IDLE_READY        reason=reaper-unstick     (all except CANCELLING and IDLE_READY)
+(9 states)       → IDLE_READY        reason=reaper-unstick     (every state except IDLE_READY)
 (any active)     → IDLE_READY        reason=cancel-timeout     (cancel raced the turn's own exit)
 ```
 
 The escape-hatch rows are shorthand: `TRANSITIONS` in `sessions/state_v2.py` spells out one edge per source state rather than a wildcard, so an unexpected `(from, reason)` pair is logged as an invariant violation and rejected without advancing state.
 
 No more `force_state()`. If a situation needs to "force," the edge is in the graph with an explicit reason (e.g. `reaper-unstick`, `cancel-timeout`, `finalize-error`).
+
+**A rejected edge is a code defect, and it is loud.** `transition()` returns
+`False` rather than forcing, so the turn does not crash — but it also does not
+advance: it sits in its old state with no post hooks, queued prompts stalled
+and the pause/cancel controls hidden, until the reaper unsticks it up to a
+minute later. Rejections are therefore logged at ERROR with the pair, and
+counted per edge in `sessions.state_v2.rejected_transition_stats()`, which
+`/api/health/detailed` publishes as `sessions.rejected_transitions`. A
+non-zero count there means some producer emits a pair the graph never
+declared — declare the edge.
+
+The producers that compose a reason at runtime are enumerable, so the edges
+they can emit are checked by test rather than discovered in production:
+
+- `sessions.manager.TERMINATION_TO_V2` × `TERMINATION_ROUTED_STATES`
+  (`PROCESSING` and `PAUSE_REQUESTED` both exit through the same mapping —
+  that is how a paused turn ending on `compaction_failed` reached an edge
+  only `COMPACTING` had).
+- `sessions.manager.finalize_failure_reason()` × every state finalization can
+  die in, which is every state but `IDLE_READY` — that is where the missing
+  `(CANCELLING, reaper-unstick)` edge came from.
 
 ### 0.3 State log (migration v13)
 
