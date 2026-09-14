@@ -328,7 +328,7 @@ async def cancel_session(session_id: str):
         worker = manager.get(wid)
         if worker:
             worker.cancel_requested = True
-            manager.drop_pending_for_cancel(worker)
+            await manager.drop_pending_for_cancel_async(worker)
             if worker.task and not worker.task.done():
                 worker.task.cancel()
 
@@ -338,7 +338,7 @@ async def cancel_session(session_id: str):
     # Record the dropped count as a transcript-visible notice so readers can
     # tell the queue was abandoned (not silently lost). The "notice" role is
     # filtered from LLM context by core/context/compiler.py.
-    dropped = manager.drop_pending_for_cancel(session)
+    dropped = await manager.drop_pending_for_cancel_async(session)
     if dropped > 0:
         try:
             db.add_message(

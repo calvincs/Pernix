@@ -1989,6 +1989,32 @@ def requeue_message_delivery(session_id: str, message_id: int) -> None:
         )
 
 
+def get_pending_user_message_ids(session_id: str) -> list[int]:
+    """Ids of this session's user rows whose delivery is still pending.
+
+    The narrow half of get_orphaned_user_messages, for the cancel path, which
+    only ever wanted ids. The wide call materialised every row of the session
+    — content included — and JSON-parsed each one in Python, on the event
+    loop; a bulk purge of N sessions did N full transcript loads there.
+
+    `id, metadata` is all this reads, and the metadata never leaves SQLite:
+    the same two predicates the Python filter applied (delivery pending, not
+    already stamped cancelled) are expressed as json_extract tests, so a row
+    whose metadata is unparseable is skipped instead of raising out of a
+    generator and costing the whole stamp.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT id FROM messages
+               WHERE session_id = ? AND role = 'user' AND json_valid(metadata)
+                 AND json_extract(metadata, '$.delivery_status') = 'pending'
+                 AND COALESCE(json_extract(metadata, '$.cancelled'), 0) = 0
+               ORDER BY id""",
+            (session_id,),
+        ).fetchall()
+    return [int(r["id"]) for r in rows]
+
+
 def get_orphaned_user_messages(session_id: str) -> list[dict]:
     """Return user messages that have no subsequent assistant response.
 
