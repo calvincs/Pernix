@@ -852,6 +852,13 @@ async function selectSession(sid) {
     _expandedKeys = new Set();     // open tool rows are remembered per session
     _recentlyFinished.delete(sid);  // visiting clears the "done" attention tick
     _restoreDraft();
+    // The "sent to the running turn" chip belongs to the session it was
+    // raised for. It used to survive the switch, so a correction injected in
+    // A left B claiming a queued message of its own. Take it down, drop any
+    // bubble that a transcript re-render has since detached, and put back
+    // whatever the session being opened still has pending — _markPendingQueued
+    // will confirm it against the server's queue once the transcript lands.
+    _restoreQueuedChip(sid);
     // An attachment list with a submission already in flight belongs to that
     // submission, not to the composer. Detach it on the way out so this
     // session starts empty and the in-flight send's clean-up can never delete
@@ -2442,24 +2449,37 @@ async function send() {
 }
 
 async function _injectMessage(message) {
-    if (!state.sid) return;
+    // The destination is captured, like send()'s: everything below this line
+    // is on the far side of an await, and the reader can change session in it.
+    const destSid = state.sid;
+    if (!destSid) return;
     const msgEl = appendMessage('user', message);
     msgEl.classList.add('queued');
-    _injectedMessages.push(msgEl);
+    // What the chip says if this session is left and come back to.
+    msgEl.dataset.queuedPreview = message;
+    _injectedFor(destSid, { create: true }).push(msgEl);
     try {
-        const result = await post('/api/chat/inject', { session_id: state.sid, message });
+        const result = await post('/api/chat/inject', { session_id: destSid, message });
         if (result.message_id != null) msgEl.dataset.messageId = String(result.message_id);
         _clearConsumedInjections();
         // Two cues for one act: the chip above the composer for whoever is
         // looking at it, and one polite announcement for whoever is not.
-        if (_injectedMessages.includes(msgEl)) _setQueuedChip(message);
+        if (state.sid === destSid && _injectedFor(destSid).includes(msgEl)) _setQueuedChip(message);
         announce(result.status === 'injected' ? 'Sent to the running turn' : 'Follow-up accepted');
     } catch (e) {
-        const idx = _injectedMessages.indexOf(msgEl);
-        if (idx !== -1) _injectedMessages.splice(idx, 1);
+        const list = _injectedFor(destSid);
+        const idx = list.indexOf(msgEl);
+        if (idx !== -1) list.splice(idx, 1);
         msgEl.classList.remove('queued');
-        _setQueuedChip(null);
-        appendMessage('system', `Inject failed: ${e.message}`);
+        if (state.sid === destSid) {
+            _restoreQueuedChip(destSid);
+            appendMessage('system', `Inject failed: ${e.message}`);
+        } else {
+            // The reader has moved on. A failure line dropped into whatever
+            // transcript is on screen would belong to the wrong session, so
+            // it goes out of band — the rule send() already follows.
+            notify('error', `Could not queue your message — ${e.message}`);
+        }
     }
 }
 
@@ -3951,17 +3971,65 @@ function _clearToolStatus() {
     const statusEl = document.getElementById('tool-status');
     if (statusEl) statusEl.classList.remove('active');
 }
-let _injectedMessages = [];  // queued message DOM elements awaiting agent pickup
+// Queued message bubbles awaiting agent pickup, keyed by the session they
+// were injected into.
+//
+// This was one flat array for the whole app, and turn.complete stopped
+// emptying it (deliberately — an unread correction can continue as queued
+// work after the turn it was aimed at). Only session.cancelled cleared it and
+// selectSession never did, so a correction injected in A followed by a switch
+// to B before A's message.consumed arrived left a DETACHED element in the
+// array forever: B showed a "queued" chip for a message that was not B's and
+// nothing could clear it, because the event that would have — A's
+// message.consumed — arrives on a stream B is not listening to. A token, a
+// cancel or a reload was the only way out.
+//
+// Two rules now. The bookkeeping is per session, so the chip a session shows
+// is built from that session's own entries; and an element that is no longer
+// in the document is dropped on sight, because nothing can ever clear it.
+const _injectedBySession = new Map();   // sid -> element[]
 const _consumedInjectionIds = new Set();
 
+/** One session's queued bubbles, pruned of anything detached. */
+function _injectedFor(sid, { create = false } = {}) {
+    if (!sid) return [];
+    let list = _injectedBySession.get(sid);
+    if (!list) {
+        if (!create) return [];
+        list = [];
+        _injectedBySession.set(sid, list);
+    }
+    // isConnected, not a parent walk: a transcript re-render (a switch away
+    // and back, a soft reload, "load earlier") replaces the whole list.
+    const live = list.filter(el => el.isConnected !== false);
+    if (live.length !== list.length) list.splice(0, list.length, ...live);
+    if (!list.length && !create) _injectedBySession.delete(sid);
+    return list;
+}
+
+/** The chip one session should be showing, from its own pending bubbles. */
+function _restoreQueuedChip(sid) {
+    const pending = _injectedFor(sid);
+    const last = pending[pending.length - 1];
+    _setQueuedChip(last ? (last.dataset.queuedPreview || 'your message') : null);
+}
+
 function _clearConsumedInjections() {
-    _injectedMessages = _injectedMessages.filter(el => {
-        if (!_consumedInjectionIds.has(el.dataset.messageId)) return true;
-        el.classList.remove('queued');
-        el.querySelector('.queued-remove')?.remove();
-        return false;
-    });
-    if (!_injectedMessages.length) _setQueuedChip(null);
+    // Every session's, not just the visible one: a consumed id is a fact
+    // about a message, and the entry it clears may belong to a session the
+    // reader has already left.
+    for (const [sid, list] of _injectedBySession) {
+        const kept = list.filter(el => {
+            if (el.isConnected === false) return false;
+            if (!_consumedInjectionIds.has(el.dataset.messageId)) return true;
+            el.classList.remove('queued');
+            el.querySelector('.queued-remove')?.remove();
+            return false;
+        });
+        if (kept.length) _injectedBySession.set(sid, kept);
+        else _injectedBySession.delete(sid);
+    }
+    if (!_injectedFor(state.sid).length) _setQueuedChip(null);
 }
 const _questionBubbles = new Map();  // question_id → DOM element for live Q&A bubbles
 
@@ -4270,7 +4338,7 @@ function handleEvent(event) {
         // Tag the optimistic bubble with its persisted id so it can be removed
         // from the queue before pickup.
         if (event.message_id != null) {
-            const bubble = [..._injectedMessages].reverse().find(b => !b.dataset.messageId);
+            const bubble = [..._injectedFor(state.sid)].reverse().find(b => !b.dataset.messageId);
             if (bubble) _addQueueRemoveButton(bubble, event.message_id);
         }
     }
@@ -4278,9 +4346,11 @@ function handleEvent(event) {
     else if (type === 'session.queue_removed') {
         const bubble = _messagesInner()?.querySelector(`.message[data-message-id="${event.message_id}"]`);
         if (bubble) {
-            const idx = _injectedMessages.indexOf(bubble);
-            if (idx !== -1) _injectedMessages.splice(idx, 1);
+            const list = _injectedFor(state.sid);
+            const idx = list.indexOf(bubble);
+            if (idx !== -1) list.splice(idx, 1);
             bubble.remove();
+            if (!list.length) _setQueuedChip(null);
         }
     }
 
@@ -4783,11 +4853,11 @@ function handleEvent(event) {
     }
 
     else if (type === 'session.cancelled') {
-        for (const el of _injectedMessages) {
+        for (const el of _injectedFor(state.sid)) {
             el.classList.remove('queued');
             el.querySelector('.queued-remove')?.remove();
         }
-        _injectedMessages = [];
+        _injectedBySession.delete(state.sid);
         _setQueuedChip(null);
         _finalizeStreamingBubble();
         _dropEmptyStreamingBubble();
