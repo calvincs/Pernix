@@ -70,6 +70,20 @@ async def answer_question(question_id: str, body: dict):
     return {"status": "answered", "session_id": session_id}
 
 
+def _drop_question_row(question_id: str) -> None:
+    """Close an open question with no answer behind it.
+
+    Dismiss is the user saying "never mind". It has no failure the user can
+    act on, so every path through the endpoint ends with the row gone — the
+    alternative is a question nobody will ever answer sitting in the tray and
+    a session parked in AWAITING_USER behind it.
+    """
+    from db.database import connect_sessions
+
+    with connect_sessions() as conn:
+        conn.execute("DELETE FROM questions WHERE id = ? AND answered_at IS NULL", (question_id,))
+
+
 @router.post("/api/questions/{question_id}/dismiss")
 async def dismiss_question(question_id: str):
     # Look up question before deleting so we have the text for the agent message.
@@ -82,26 +96,49 @@ async def dismiss_question(question_id: str):
     from sessions.manager import get_manager
 
     manager = get_manager()
-    session = manager.get_or_create(question["session_id"])
-    if sv2._current_state(session) is sv2.S.AWAITING_USER:
-        formatted = "[User dismissed your question without answering]\n" + f"Q: {question['question']}"
-        try:
-            admission = await manager.prompt(
-                session.session_id,
-                formatted,
-                origin="dismissal",
-                question_id=question_id,
-                question_answer="[dismissed]",
-            )
-        except ValueError as exc:
-            raise HTTPException(409, detail=str(exc)) from exc
-        if admission.rejected:
-            raise HTTPException(409, detail=admission.reason)
-    else:
-        from db.database import connect_sessions
+    try:
+        session = manager.get_or_create(question["session_id"])
+    except ValueError:
+        # The session row is gone (deleted while the question was open). The
+        # old code returned dismissed here; get_or_create's ValueError turned
+        # that into an unhandled 500 over a row we can simply drop.
+        _drop_question_row(question_id)
+        return {"status": "dismissed"}
 
-        with connect_sessions() as conn:
-            conn.execute("DELETE FROM questions WHERE id = ? AND answered_at IS NULL", (question_id,))
+    if sv2._current_state(session) is not sv2.S.AWAITING_USER:
+        _drop_question_row(question_id)
+        manager.emit(session.session_id, {"type": "dialog.dismissed", "question_id": question_id})
+        return {"status": "dismissed"}
+
+    formatted = "[User dismissed your question without answering]\n" + f"Q: {question['question']}"
+    refusal: str | None = None
+    try:
+        admission = await manager.prompt(
+            session.session_id,
+            formatted,
+            origin="dismissal",
+            question_id=question_id,
+            question_answer="[dismissed]",
+        )
+    except ValueError as exc:
+        refusal = str(exc)
+    else:
+        if admission.rejected:
+            refusal = admission.reason
+
+    if refusal is not None:
+        # queue_full / shutting_down / cancelling: the notice could not be
+        # delivered, but the dismissal still happened. Returning 409 left the
+        # question row open AND the session in AWAITING_USER, which nothing
+        # else clears — the reaper only unsticks a session whose question row
+        # is already gone. Drop the row, take the declared fallback edge, and
+        # report the refusal as information rather than as a failure.
+        _drop_question_row(question_id)
+        if sv2._current_state(session) is sv2.S.AWAITING_USER:
+            sv2.transition(session, sv2.S.IDLE_READY, "question-dismissed")
+        manager.emit(session.session_id, {"type": "dialog.dismissed", "question_id": question_id})
+        return {"status": "dismissed", "notice_delivered": False, "detail": refusal}
+
     manager.emit(session.session_id, {"type": "dialog.dismissed", "question_id": question_id})
     return {"status": "dismissed"}
 
