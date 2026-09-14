@@ -502,6 +502,31 @@ places that state this preference cannot drift apart.
 
 ---
 
+## Three streams per tab, and the six-connection budget
+
+Every open tab holds **three** `EventSource` connections: the session stream
+(`sse.js`), `/api/notifications/events` (`notifications.js`) and
+`/api/jobs/events` (`components/jobs-indicator.js`). Uvicorn speaks HTTP/1.1
+only, and Chrome allows six connections per host on HTTP/1.1 — so two windows
+(a second tab, or the installed app alongside a tab) spend the whole budget on
+streams, and every further `fetch` queues in the browser indefinitely: it
+never reaches uvicorn, so it appears in no access log and shows as "pending"
+in devtools. A dismiss, or a send, simply hangs.
+
+So a hidden tab gives two of its three back. `document.hidden` starts a 5 s
+grace (`STREAM_HIDDEN_GRACE_MS`, exported from `notifications.js` and imported
+by the jobs indicator, so there is one number); if the tab is still hidden
+when it expires, the notifications and jobs streams close. On return they
+reopen and catch up — the jobs indicator re-`GET`s `/api/jobs/status`, and
+`notifications.js` fires `pernix:bell-update`, which is this app's existing
+"refetch `/api/notifications` now" signal. A hide and show inside the grace
+closes nothing, so alt-tabbing costs nothing.
+
+The session stream is deliberately exempt: it is what lets a background tab
+show a finished turn.
+
+---
+
 ## Gotchas
 
 - **Deploy skew.** `static/sw.js` precaches the stylesheets and modules by
