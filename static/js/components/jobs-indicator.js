@@ -3,12 +3,14 @@
 import { el, text } from '../render.js';
 import { icon } from '../icons.js';
 import { get, isOnline } from '../api.js';
+import { STREAM_HIDDEN_GRACE_MS } from '../notifications.js';
 
 let _el = null;
 let _iconEl = null;
 let _countEl = null;
 let _pollInterval = null;
 let _eventSource = null;
+let _hiddenTimer = null;
 let _openPanel = null;  // callback to open jobs panel
 
 let _status = { running_jobs: 0, scheduled_count: 0, snooze: { running: false } };
@@ -56,6 +58,30 @@ export function initJobsIndicator(container, { onOpenPanel }) {
         _refresh();
         if (!_eventSource) _connectSSE();
     });
+    document.addEventListener('visibilitychange', _onVisibilityChange);
+}
+
+// The third of this tab's three EventSources, and the second one a hidden tab
+// gives back — see STREAM_HIDDEN_GRACE_MS in notifications.js for the
+// six-connection budget this is about. What a background tab loses is a live
+// count; the catch-up GET on return restores it, and the 10s poll would have
+// anyway.
+function _onVisibilityChange() {
+    if (document.visibilityState === 'hidden') {
+        if (_hiddenTimer || !_eventSource) return;
+        _hiddenTimer = setTimeout(() => {
+            _hiddenTimer = null;
+            if (document.visibilityState !== 'hidden') return;
+            if (_eventSource) { _eventSource.close(); _eventSource = null; }
+        }, STREAM_HIDDEN_GRACE_MS);
+        return;
+    }
+    if (_hiddenTimer) { clearTimeout(_hiddenTimer); _hiddenTimer = null; }
+    // _eventSource still set means the grace never fired: nothing was missed
+    // and there is nothing to catch up on.
+    if (!_el || _eventSource || !isOnline()) return;
+    _refresh();                          // catch up: GET /api/jobs/status
+    _connectSSE();
 }
 
 async function _refresh() {
@@ -173,6 +199,8 @@ function _handleEvent(type, data) {
 }
 
 export function destroyJobsIndicator() {
+    document.removeEventListener('visibilitychange', _onVisibilityChange);
+    if (_hiddenTimer) { clearTimeout(_hiddenTimer); _hiddenTimer = null; }
     if (_pollInterval) clearInterval(_pollInterval);
     if (_eventSource) _eventSource.close();
     if (_el && _el.parentNode) _el.parentNode.removeChild(_el);
