@@ -1035,9 +1035,10 @@ def state_map_colours(browser):
             problems.append(f"states drawn {drawn}")
         if m["svgs"] != 1:
             problems.append(f"{m['svgs']} svgs in the map container")
-        # The 31 edges of TRANSITIONS, of which the seeded arc took seven.
-        if len(m["edges"]) != 31:
-            problems.append(f"{len(m['edges'])} edges drawn, the table has 31")
+        # The 38 distinct (from, to) pairs of TRANSITIONS (2dee81b + the 09-14
+        # edges), of which the seeded arc took seven.
+        if len(m["edges"]) != 38:
+            problems.append(f"{len(m['edges'])} edges drawn, the table has 38")
         used = {k for k, v in m["edges"].items() if v["used"]}
         if used != set(MAP_USED_EDGES):
             problems.append(f"used edges {sorted(used)}")
