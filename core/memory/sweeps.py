@@ -15,11 +15,12 @@ Returns are stat deltas the caller folds into its own counters.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Callable
 
@@ -224,6 +225,52 @@ def _pairwise_dedup(entries: list, is_cancelled: Callable[[], bool]) -> set[int]
 # Activity 3b: cross-file consolidation
 # ---------------------------------------------------------------------------
 
+# A cluster the provider refused for length is quarantined this long. The
+# prompt budget should make that unreachable; the marker is the backstop for
+# the case it does not (a provider whose real window is below what the
+# registry reports), because without it ONE bad cluster blocks every
+# consolidation forever — the sweep always picks clusters[0].
+CONSOLIDATION_SKIP_DAYS = 7
+# Clusters tried in one cycle. Still one MERGE per cycle; this only lets the
+# sweep step past a cluster the provider just refused instead of ending the
+# cycle having done nothing.
+_MAX_CLUSTER_ATTEMPTS = 3
+
+
+def _cluster_key(cluster: list[str]) -> str:
+    """Stable short key for a cluster, order-independent."""
+    return hashlib.sha1("|".join(sorted(cluster)).encode("utf-8")).hexdigest()[:12]
+
+
+def _consolidation_skipped(db, cluster: list[str]) -> bool:
+    """True while this cluster's skip marker is live. Expired markers lapse
+    on their own — snooze_state has no TTL, so the value IS the expiry."""
+    raw = db.get_snooze_state(f"consolidation_skip:{_cluster_key(cluster)}")
+    if not raw:
+        return False
+    try:
+        expires = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) < expires
+
+
+def _drop_skipped(db, clusters: list[list[str]]) -> list[list[str]]:
+    return [c for c in clusters if not _consolidation_skipped(db, c)]
+
+
+def _mark_consolidation_skip(db, cluster: list[str]) -> None:
+    expiry = datetime.now(timezone.utc) + timedelta(days=CONSOLIDATION_SKIP_DAYS)
+    db.set_snooze_state(f"consolidation_skip:{_cluster_key(cluster)}", expiry.isoformat())
+
+
+def _is_context_overflow(err: Exception) -> bool:
+    """A provider refusal that names the context length (vLLM/OpenAI 400)."""
+    msg = str(err).lower()
+    return "context length" in msg or "maximum context" in msg or "context_length_exceeded" in msg
+
 
 async def consolidate_files(
     store,
@@ -239,10 +286,11 @@ async def consolidate_files(
     Returns (used_llm, files_consolidated).
     """
     from core.memory.consolidate import (
-        build_llm_merge_prompt,
+        build_budgeted_merge_prompt,
         build_signatures,
         execute_merge,
         find_clusters,
+        largest_overlap_pair,
         parse_llm_merge_response,
         plan_trivial_merge,
         prioritize_clusters,
@@ -282,50 +330,83 @@ async def consolidate_files(
         return False, 0
 
     clusters = prioritize_clusters(clusters, sig_map)
+    clusters = await asyncio.to_thread(_drop_skipped, db, clusters)
+    if not clusters:
+        db.set_snooze_state("last_consolidation_scan", datetime.now(timezone.utc).isoformat())
+        return False, 0
 
     if is_cancelled():
         return False, 0
 
-    # Phase 2: Process ONE cluster per cycle
-    cluster = clusters[0]
-    logger.info("Snooze: consolidating cluster %s (%d files)", cluster, len(cluster))
-
     used_llm = False
     consolidated = 0
 
-    # Try trivial merge first (no LLM). Also CPU-heavy when a cluster has many
-    # entries — same offload reasoning as Phase 1.
-    decision = await asyncio.to_thread(plan_trivial_merge, cluster, store)
+    # Phase 2: ONE merge per cycle, from the first cluster that can produce
+    # one. A cluster the provider refuses for length is marked and the next
+    # one is tried, so a cluster that cannot be described inside the window
+    # no longer costs every later cluster its turn.
+    for cluster in clusters[:_MAX_CLUSTER_ATTEMPTS]:
+        if is_cancelled():
+            return used_llm, consolidated
+        logger.info("Snooze: consolidating cluster %s (%d files)", cluster, len(cluster))
 
-    if decision is None and not did_llm_already and llm_ready():
-        # Need LLM for ambiguous merge
-        prompt = build_llm_merge_prompt(cluster, store)
-        try:
-            from core.llm.client import get_llm_client
+        # Try trivial merge first (no LLM). Also CPU-heavy when a cluster has
+        # many entries — same offload reasoning as Phase 1.
+        decision = await asyncio.to_thread(plan_trivial_merge, cluster, store)
 
-            client = get_llm_client()
-            response = await client.chat(
-                messages=[
-                    {"role": "system", "content": "You are a memory consolidation agent."},
-                    {"role": "user", "content": prompt},
-                ],
-                model=settings.background_model or settings.llm_model,
-                max_tokens=2000,
+        if decision is None and not did_llm_already and llm_ready():
+            # Need LLM for ambiguous merge. The prompt is budgeted to the
+            # model's real window; when even the floor does not fit, merge
+            # the cluster's largest-overlap PAIR instead — a partial merge
+            # is progress and the cluster shrinks for the next cycle.
+            prompt, fits = await asyncio.to_thread(build_budgeted_merge_prompt, cluster, store)
+            if not fits and len(cluster) > 2:
+                pair = await asyncio.to_thread(largest_overlap_pair, cluster, sig_map)
+                logger.info(
+                    "Snooze: cluster %s exceeds the merge prompt budget at the floor — "
+                    "consolidating its largest-overlap pair %s this cycle",
+                    cluster,
+                    pair,
+                )
+                cluster = pair
+                prompt, fits = await asyncio.to_thread(build_budgeted_merge_prompt, cluster, store)
+            try:
+                from core.llm.client import get_llm_client
+
+                client = get_llm_client()
+                response = await client.chat(
+                    messages=[
+                        {"role": "system", "content": "You are a memory consolidation agent."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    model=settings.background_model or settings.llm_model,
+                    max_tokens=2000,
+                )
+                decision = parse_llm_merge_response(response.content.strip(), cluster)
+                used_llm = True
+            except Exception as e:
+                if _is_context_overflow(e):
+                    await asyncio.to_thread(_mark_consolidation_skip, db, cluster)
+                    logger.warning(
+                        "Snooze: provider refused the merge prompt for cluster %s on context length (%s) — "
+                        "skipping it for %d days and moving to the next cluster",
+                        cluster,
+                        e,
+                        CONSOLIDATION_SKIP_DAYS,
+                    )
+                    continue
+                logger.warning("Snooze: consolidation LLM call failed: %s", e)
+
+        if decision:
+            await asyncio.to_thread(execute_merge, store, decision)
+            consolidated = len(decision.source_files)
+            logger.info(
+                "Snooze: consolidated %d files into %s (%s)",
+                consolidated,
+                decision.target_file,
+                decision.strategy,
             )
-            decision = parse_llm_merge_response(response.content.strip(), cluster)
-            used_llm = True
-        except Exception as e:
-            logger.warning("Snooze: consolidation LLM call failed: %s", e)
-
-    if decision:
-        await asyncio.to_thread(execute_merge, store, decision)
-        consolidated = len(decision.source_files)
-        logger.info(
-            "Snooze: consolidated %d files into %s (%s)",
-            consolidated,
-            decision.target_file,
-            decision.strategy,
-        )
+        break
 
     db.set_snooze_state("last_consolidation_scan", datetime.now(timezone.utc).isoformat())
     return used_llm, consolidated
