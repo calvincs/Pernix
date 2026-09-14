@@ -56,11 +56,33 @@ export function setSanitizedSvg(host, svgMarkup) {
 // Markdown rendering (uses marked.js if available, plain text fallback)
 let _marked = null;
 
+// GFM strikethrough accepts a SINGLE tilde. So "the ~256-byte vocabulary (vs
+// ~100K tokens) is **the point**" renders everything between the two tildes
+// struck through and the bold after it as raw asterisks. Approximate numbers
+// are a normal way for a model to write — 182 of the 4 121 assistant messages
+// in the month to 09-14 contain a lone tilde — and not one of them meant
+// strikethrough, while ~~this~~ is rare and unambiguous. Double only.
+//
+// Requiring a non-space, non-tilde character on the inside of each fence is
+// GFM's own rule, kept so `~~ x ~~` stays literal.
+const DOUBLE_TILDE_DEL = /^~~(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))~~(?=[^~]|$)/;
+
 export function initMarked() {
-    if (typeof marked !== 'undefined') {
-        _marked = marked;
-        _marked.setOptions({ breaks: true, gfm: true });
-    }
+    if (typeof marked === 'undefined') return;
+    _marked = marked;
+    _marked.setOptions({ breaks: true, gfm: true });
+    // Returning undefined rather than false is load-bearing: marked's use()
+    // wraps a tokenizer override so that a `false` return falls back to the
+    // ORIGINAL tokenizer — which is the one-tilde rule being replaced.
+    _marked.use({
+        tokenizer: {
+            del(src) {
+                const m = DOUBLE_TILDE_DEL.exec(src);
+                if (!m) return undefined;
+                return { type: 'del', raw: m[0], text: m[1], tokens: this.lexer.inlineTokens(m[1]) };
+            },
+        },
+    });
 }
 
 // The single markdown chokepoint for the whole app. Everything that renders

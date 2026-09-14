@@ -4,6 +4,24 @@ import { api, isOnline } from './api.js';
 
 let _globalSource = null;
 let _wantsGlobalConnection = false;
+let _hiddenTimer = null;
+
+// Why a hidden tab gives its shared streams back.
+//
+// Uvicorn speaks HTTP/1.1 only and Chrome allows six connections per host on
+// HTTP/1.1. Every Pernix tab opens THREE EventSources — the session stream
+// (sse.js), this one, and /api/jobs/events — so two windows (a second tab, or
+// the installed app plus a tab) spend the entire budget on streams and every
+// further fetch waits in the browser forever: the POST never reaches uvicorn,
+// nothing appears in its access log, and devtools shows it "pending". That is
+// what made Dismiss hang. A hidden tab holding one connection instead of
+// three leaves room for both windows and their requests.
+//
+// The grace is what keeps a tab switch and back free — closing on the first
+// `hidden` would tear both streams down for an alt-tab. The SESSION stream is
+// deliberately not in this scheme: it is what lets a background tab show a
+// finished turn.
+export const STREAM_HIDDEN_GRACE_MS = 5000;
 
 window.addEventListener('pernix:offline', () => {
     if (_globalSource) { _globalSource.close(); _globalSource = null; }
@@ -11,15 +29,38 @@ window.addEventListener('pernix:offline', () => {
 window.addEventListener('pernix:online', () => {
     if (_wantsGlobalConnection && !_globalSource) connectGlobalNotifications();
 });
+
 // The global stream's server heartbeats are SSE comments — invisible to JS —
 // so unlike sse.js there is no event-time signal to detect a half-dead
 // connection after mobile sleep. Reconnecting on visibility return is the
 // reliable fix: cheap, and EventSource teardown/re-setup is idempotent.
-document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && _wantsGlobalConnection) {
-        connectGlobalNotifications();
+function _onVisibilityChange() {
+    if (document.visibilityState === 'hidden') {
+        if (!_wantsGlobalConnection || _hiddenTimer) return;
+        _hiddenTimer = setTimeout(() => {
+            _hiddenTimer = null;
+            // Re-read rather than trust the timer: a hide/show inside the
+            // grace must cost nothing.
+            if (document.visibilityState !== 'hidden') return;
+            if (_globalSource) { _globalSource.close(); _globalSource = null; }
+        }, STREAM_HIDDEN_GRACE_MS);
+        return;
     }
-});
+    if (_hiddenTimer) { clearTimeout(_hiddenTimer); _hiddenTimer = null; }
+    if (!_wantsGlobalConnection) return;
+    // Only if the grace actually fired. This used to reconnect on every
+    // return, which is what a sleeping phone needs — and it still gets it,
+    // because anything longer than the grace closed the stream and lands
+    // here with nothing to keep. What it no longer does is tear down a
+    // healthy connection for an alt-tab.
+    if (_globalSource) return;
+    connectGlobalNotifications();
+    // Catch up on anything that arrived while the stream was closed.
+    // `pernix:bell-update` is this app's existing "refetch /api/notifications
+    // now" signal — the bell answers it with the GET.
+    window.dispatchEvent(new CustomEvent('pernix:bell-update'));
+}
+document.addEventListener('visibilitychange', _onVisibilityChange);
 
 export function getPermission() {
     if (!('Notification' in window)) return 'unsupported';
@@ -170,6 +211,7 @@ export function connectGlobalNotifications() {
 
 export function disconnectGlobalNotifications() {
     _wantsGlobalConnection = false;
+    if (_hiddenTimer) { clearTimeout(_hiddenTimer); _hiddenTimer = null; }
     if (_globalSource) {
         _globalSource.close();
         _globalSource = null;

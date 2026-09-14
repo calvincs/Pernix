@@ -1365,21 +1365,27 @@ body.fp-resizing #main { pointer-events: none; }
    this vocabulary rather than defining their own.
 --------------------------------------------------------------------------- */
 #fp-adaptive, #fp-canary, #fp-telos, #fp-trust { overflow-y: auto; padding: 10px 14px; }
-.adaptive-head { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
 /* Six controls in a 360px column had nowhere to go: flex shrank every button
-   until its label was unreadable, and on a phone the last one ran off the
-   edge. Let the row wrap instead, and stop the shrink that made the crushing
-   possible — a control that will not fit beside the previous one goes on the
-   next line at its own size. Width and pointer both, because the Explorer is
-   360px wide on a tablet too. (E2) */
-body[data-compact] .adaptive-head,
-body[data-touch] .adaptive-head {
+   until its label was unreadable, and the last one ran off the edge. Let the
+   row wrap instead, and stop the shrink that made the crushing possible — a
+   control that will not fit beside the previous one goes on the next line at
+   its own size.
+
+   This was gated on body[data-compact] and body[data-touch] because the panel
+   is 360px on a phone and a tablet. But the DOCKED Explorer is the same 360px
+   on a plain desktop browser, where neither attribute is set, so the
+   Self-checks head overlapped its own buttons there — the one tier the rule
+   was never applied to. It is unconditional now; the Learning, Goals and
+   Trust heads share the class and get it too. (E2, L04) */
+.adaptive-head {
+    display: flex;
     flex-wrap: wrap;
+    gap: 8px;
     row-gap: var(--sp-2);
     align-items: center;
+    margin-bottom: 10px;
 }
-body[data-compact] .adaptive-head > *,
-body[data-touch] .adaptive-head > * {
+.adaptive-head > * {
     flex: 0 0 auto;
     max-width: 100%;
 }

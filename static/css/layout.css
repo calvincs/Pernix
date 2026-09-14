@@ -226,10 +226,14 @@ body.sidebar-resizing {
 }
 
 /* The row's actions, over the title's tail rather than beside it.
-   Absolutely positioned against .session-item, so five 24px targets cost the
-   title nothing until a pointer or the keyboard asks for them. The gradient
-   is the seam: the overlay fades in from transparent over its first 20px so
-   it reads as sitting ON the title rather than butting into it. */
+   Absolutely positioned against .session-item, so its 24px targets cost the
+   title nothing until a pointer or the keyboard asks for them.
+
+   Out of flow is not the same as out of the way: at seven buttons the strip
+   was 184px of a 253px row and the row's centre — where a click to OPEN a
+   session lands — was inside button.session-pin. Two controls, 52px, is the
+   contract now, and tools/ui-gate/check.py holds it at <=64px with the title
+   still the element at the row centre. (L02) */
 .session-actions {
     position: absolute;
     top: var(--sp-2);
@@ -238,15 +242,28 @@ body.sidebar-resizing {
     display: inline-flex;
     align-items: center;
     gap: var(--sp-1);
-    padding-left: 20px;
     opacity: 0;
     transition: opacity var(--transition);
-    background: linear-gradient(to right, transparent, var(--row-veil) 20px);
+    background: var(--row-veil);
     /* The strip is a backdrop, not a target: the fade and the gaps between
        the icons pass their clicks down to the row, so a near miss opens the
        session instead of doing nothing. Only the buttons take a click, and
        only once they are visible — an invisible control that is still
        clickable is the bug the touch tier was built to fix. */
+    pointer-events: none;
+}
+/* The seam: the strip fades in from transparent over the 20px to its left so
+   it reads as sitting ON the title rather than butting into it. A pseudo
+   element rather than padding, because padding would put those 20px inside
+   the strip's own box and the width contract above is measured on it. */
+.session-actions::before {
+    content: '';
+    position: absolute;
+    right: 100%;
+    top: 0;
+    bottom: 0;
+    width: 20px;
+    background: linear-gradient(to right, transparent, var(--row-veil));
     pointer-events: none;
 }
 .session-actions > * {
@@ -4234,7 +4251,10 @@ mark.ts-mark.current {
     background: color-mix(in srgb, var(--success) 15%, transparent);
     border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
 }
-/* Sidebar pin + rename buttons — hover-revealed like the delete button */
+/* Sidebar pin + overflow buttons — hover-revealed, inside .session-actions.
+   .session-rename is kept here for the inline rename editor's own affordance;
+   the row's rename lives in the overflow menu. */
+.session-more,
 .session-pin,
 .session-rename {
     background: none;
@@ -4252,12 +4272,16 @@ mark.ts-mark.current {
     opacity: 0;
     transition: var(--transition);
 }
+.session-item:hover .session-more,
 .session-item:hover .session-pin,
 .session-item:hover .session-rename,
+.session-item:focus-within .session-more,
 .session-item:focus-within .session-pin,
 .session-item:focus-within .session-rename,
+.session-more:focus-visible,
 .session-pin:focus-visible,
 .session-rename:focus-visible { opacity: 1; }
+.session-more:hover,
 .session-pin:hover,
 .session-rename:hover { color: var(--text-bright); }
 .session-pin.pinned { opacity: 1; color: var(--accent); }
