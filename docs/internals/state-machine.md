@@ -43,9 +43,9 @@ COMPACTING       → CANCELLING        reason=cancel-requested
 PROCESSING       → AWAITING_USER     reason=ask-user
 PROCESSING       → PAUSE_REQUESTED   reason=pause-requested   (workers and main sessions)
 PROCESSING       → CANCELLING        reason=cancel-requested
-PROCESSING       → FINALIZING        reason=loop-complete|round-ceiling|agent-error
+PROCESSING       → FINALIZING        reason=loop-complete|round-ceiling|stuck-loop|agent-error|compaction-failed
 PAUSE_REQUESTED  → PROCESSING        reason=resume
-PAUSE_REQUESTED  → FINALIZING        reason=loop-complete|round-ceiling|stuck-loop|agent-error
+PAUSE_REQUESTED  → FINALIZING        reason=loop-complete|round-ceiling|stuck-loop|agent-error|compaction-failed
 PAUSE_REQUESTED  → AWAITING_USER     reason=ask-user
 PAUSE_REQUESTED  → AWAITING_WORKERS  reason=workers-dispatched
 PAUSE_REQUESTED  → COMPACTING        reason=compact-{proactive|critical|overflow}
@@ -65,13 +65,34 @@ PROCESSING       → AWAITING_WORKERS  reason=workers-dispatched
 AWAITING_WORKERS → SCOUTING          reason=workers-complete
 AWAITING_WORKERS → IDLE_READY        reason=worker-timeout
 AWAITING_WORKERS → CANCELLING        reason=cancel-requested
-(8 states)       → IDLE_READY        reason=reaper-unstick     (all except CANCELLING and IDLE_READY)
+(9 states)       → IDLE_READY        reason=reaper-unstick     (every state except IDLE_READY)
 (any active)     → IDLE_READY        reason=cancel-timeout     (cancel raced the turn's own exit)
 ```
 
 The escape-hatch rows are shorthand: `TRANSITIONS` in `sessions/state_v2.py` spells out one edge per source state rather than a wildcard, so an unexpected `(from, reason)` pair is logged as an invariant violation and rejected without advancing state.
 
 No more `force_state()`. If a situation needs to "force," the edge is in the graph with an explicit reason (e.g. `reaper-unstick`, `cancel-timeout`, `finalize-error`).
+
+**A rejected edge is a code defect, and it is loud.** `transition()` returns
+`False` rather than forcing, so the turn does not crash — but it also does not
+advance: it sits in its old state with no post hooks, queued prompts stalled
+and the pause/cancel controls hidden, until the reaper unsticks it up to a
+minute later. Rejections are therefore logged at ERROR with the pair, and
+counted per edge in `sessions.state_v2.rejected_transition_stats()`, which
+`/api/health/detailed` publishes as `sessions.rejected_transitions`. A
+non-zero count there means some producer emits a pair the graph never
+declared — declare the edge.
+
+The producers that compose a reason at runtime are enumerable, so the edges
+they can emit are checked by test rather than discovered in production:
+
+- `sessions.manager.TERMINATION_TO_V2` × `TERMINATION_ROUTED_STATES`
+  (`PROCESSING` and `PAUSE_REQUESTED` both exit through the same mapping —
+  that is how a paused turn ending on `compaction_failed` reached an edge
+  only `COMPACTING` had).
+- `sessions.manager.finalize_failure_reason()` × every state finalization can
+  die in, which is every state but `IDLE_READY` — that is where the missing
+  `(CANCELLING, reaper-unstick)` edge came from.
 
 ### 0.3 State log (migration v13)
 
@@ -126,7 +147,11 @@ The task remains the admission owner through finalization. `_run_agent_safe` res
 
 `Manager.steer()` is shared by browser corrections and worker steering. A live scouting/processing/compacting/paused turn receives a persisted injected row; finalizing or idle work follows normal admission. Corrections carry `delivery_status=pending` and increment the running turn's input version, so a correction arriving after compilation gets another pass. The compiler pins pending rows and retains them across compaction, while excluding prompts queued for later turns. A successful provider response marks only the pending rows actually included in that request `consumed` and emits `message.consumed`. Unread rows are recovered as queued work if the turn ends first. Cancellation retires unread rows; settled or consumed rows are not replayed. This is at-least-once delivery: a process failure before acknowledgement can replay input.
 
-Question answers and dismissals close the question and persist the accepted input in one transaction. Rejected admission returns HTTP 409 and leaves the question open. Chat and steering endpoints also report admission refusal instead of claiming success.
+Question answers and dismissals close the question and persist the accepted input in one transaction. For an **answer**, rejected admission returns HTTP 409 and leaves the question open — the user's answer is real input and re-submitting it is a sensible thing to ask of them.
+
+A **dismissal** is not. It is the user saying "never mind", so it has no failure they can act on, and refusing it leaves the question row open *and* the session in `AWAITING_USER` — which nothing else clears, because the reaper only unsticks an `AWAITING_USER` session whose question row is already gone. Every path through `/dismiss` therefore ends with the row deleted: a missing session row returns `dismissed`, and a refused notice (`queue_full`, `shutting_down`, `cancelling`) deletes the row, takes the declared `question-dismissed → IDLE_READY` edge, and returns `{"status": "dismissed", "notice_delivered": false, "detail": "<reason>"}` — information, not an error. The only thing lost is the agent's transcript notice that the question went unanswered.
+
+Chat and steering endpoints also report admission refusal instead of claiming success.
 
 `Manager.control_session()` owns pause/resume validation for browser and worker controls. Status and state-change events expose `capabilities`; the browser uses them to enable controls. Pause applies only to a live processing task and takes effect at the next checkpoint. Resume can withdraw an unobserved pause. If the last response finishes first, the turn settles and clears the pause signal rather than leaving a dead task paused.
 
@@ -531,7 +556,7 @@ All orchestration tools are registered with `denied_session_types={"worker"}` (`
 | `await_workers` | `:711` | Block up to 30 min (hardcoded `max_wait=1800`, `:879`). Polls every 3 s via `asyncio.run_coroutine_threadsafe(asyncio.sleep(3), loop)` — never blocks the event loop. Snapshots `worker_ids` per iteration to avoid a `RuntimeError` if the loop appends while iterating. Returns early if any worker is stalled past `stale_threshold` (default 120 s, `:712`). |
 | `get_worker_result` | `:502` | Final summary with quality-gate header (see §1.5). Lookup order: the run record's report path (`sessions.worker_run`, migration v37) → discovery of `.worker_<id>_summary.md` under the worker's space home and the shared workspace → the shared `summary.md`, but only when `report.legacy_claim` ties it to this worker, and then labelled → last assistant message. Max 3000 chars read; a clipped preview names the artifact's absolute path so `file_read` gets the rest. The header is built by `worker_trust` from records only — how the turn ended, the grade recorded ABOVE this run's message boundary, and whether the artifact still matches the bytes that grade read; an older run's verdict is reported as history, never applied. A file is returned unwrapped only when the run record says this harness stamped those exact bytes (`report.is_our_stamp`) — a `#` heading in the body proves nothing, since a worker can type one. `research`/`explore`-kind workers also get a deterministic `# KIND GATE` warning line when the summary names zero sources / zero file citations. |
 | `get_worker_transcript` | `:640` | Message stream, one id-addressed line per message: `[#<msg id> role] content`, budgeted to `max_chars` (default 30k). `select='tail'` reads from the END (where a worker's deliverable is), `after_id`/`before_id` page, `message_id` returns one row unclipped — which is what a `[... clipped ...]` pointer names. Role-aware formatting for `assistant:tool_calls` (name **and** arguments), `tool`, `reflect` (parses verdict), `scout` (parses approach), `system`, `user`. |
-| `message_worker` | `:1045` | Fire-and-forget follow-up message into a running worker — internally just `manager.prompt(worker_id, message)` so the worker either picks it up on its current turn (queued) or starts a new turn. Safety: `caution`. |
+| `message_worker` | `:1045` | Follow-up message into a worker. An idle-like worker goes through `manager.prompt()` and starts a new turn; a mid-turn worker goes through `manager.steer()` and gets an injected row. Steering is where "fire-and-forget" stops being free: on the loop the tool cannot await its own steer (the worker's session lock), so it detaches the coroutine and returns **"NOT yet delivered"** — the detached task then emits `worker.steered` / `worker.steer_rejected` on the caller's stream and writes a one-line `system` note into the caller's transcript, which is what the agent itself sees next round. Off the loop it waits `STEER_DELIVERY_TIMEOUT` (10 s) and, on timeout, **cancels the future before returning**, so the abandoned delivery cannot land after the agent has been told it did not; a retry is then safe. Safety: `caution`. |
 | `cancel_worker` | `:1097` | Calls `session.task.cancel()` which raises `CancelledError` in the worker's `_run_agent_safe`. Worker's post-hooks are **skipped entirely** (`_finalize_turn`'s cancelled branch, `manager.py:1456-1528`) — no reflect, no auto-stamp, `termination_reason="cancelled"`. Safety: `caution`. |
 | `pause_worker` | `:1118` | Calls `session.pause_event.clear()`. Agent loop awaits the event at its pre-round gate (`_pre_round_gate`, `agent.py:1834`), so the worker pauses **at the next tool-round boundary**, not mid-tool. |
 | `resume_worker` | `:1182` | One tool, three cases — "bring the worker back to life": PAUSED/PAUSE_REQUESTED → release the pause (original behavior); a mid-turn state → no-op, reports the live state; a terminal state (cancelled, errored, round-capped, reaped from memory, or lost to a server restart) → **revive**: rehydrate the session from the DB (history, the persisted kind allowlist and pinned model from migration v31's columns), fall back to the default model with a visible note if the pinned one no longer resolves, open the next run in `sessions.worker_run` — which retires (versions, never deletes) the previous run's report so an old `# CANCELLED` header can't shadow the new result — re-attach to the parent, and start a continuation turn carrying an optional `note`. `auto_resume_parent=True` mirrors `spawn_worker`'s watch-set registration. Emits `worker.resumed`. `POST /api/sessions/{id}/workers/{wid}/resume` (optional `{"note"}` body) drives this over HTTP and checks parentage against the DB row. Non-worker sessions only ever get the pause-release path. |

@@ -1348,6 +1348,12 @@ def await_workers(
     return f"Timeout after {max_wait}s.\n" + check_workers(_context=_context)
 
 
+# How long the off-loop caller waits for a steer before giving up on it. A
+# module constant so the regression test can shorten it; the value is the
+# same 10s the tool has always used, comfortably inside its 15s tool timeout.
+STEER_DELIVERY_TIMEOUT = 10
+
+
 def message_worker(worker_id: str, message: str, _context: dict | None = None) -> str:
     """Send a fire-and-forget message to a worker.
 
@@ -1406,12 +1412,88 @@ def message_worker(worker_id: str, message: str, _context: dict | None = None) -
         return "Error: No event loop"
     delivery = manager.steer(worker_id, message, origin="worker")
     if current_loop is loop:
-        manager._spawn_detached(delivery, "worker-steering")
-        return f"Message submitted to worker {worker_id[:8]}"
-    result = asyncio.run_coroutine_threadsafe(delivery, loop).result(timeout=10)
+        # The caller is already on the loop, so awaiting the steer here would
+        # deadlock against the worker's session lock. The coroutine is
+        # detached instead — which means this return value cannot honestly
+        # claim delivery. It used to say "Message submitted", so a rejection
+        # (worker cancelling, shutdown draining) was invisible to the agent.
+        manager._spawn_detached(
+            _report_steer_outcome(manager, ctx.get("session_id", ""), worker_id, message, delivery),
+            "worker-steering",
+        )
+        return (
+            f"Queued for worker {worker_id[:8]} — NOT yet delivered. Delivery is confirmed by a "
+            "`worker.steered` event on this session (a `worker.steer_rejected` event carries the "
+            "reason if it fails); either way a one-line note lands in your context next round. "
+            "Do not re-send on the strength of this reply."
+        )
+    future = asyncio.run_coroutine_threadsafe(delivery, loop)
+    try:
+        result = future.result(timeout=STEER_DELIVERY_TIMEOUT)
+    except TimeoutError:
+        # Without the cancel the coroutine kept running on the loop and could
+        # still deliver, while the tool raised into the agent — which then
+        # retried and duplicated the message. Cancel first, then say plainly
+        # that nothing was delivered, so a retry is the safe move.
+        future.cancel()
+        logger.warning(
+            "message_worker: steer to %s timed out after %ss; cancelled",
+            worker_id[:8],
+            STEER_DELIVERY_TIMEOUT,
+        )
+        return (
+            f"Error: message to worker {worker_id[:8]} was NOT delivered — the delivery timed out "
+            f"after {STEER_DELIVERY_TIMEOUT}s and has been cancelled. Retrying is safe."
+        )
     if result["status"] == "rejected":
         return f"Refused: {result['reason']}"
     return f"Message {result['status']} into worker {worker_id[:8]}"
+
+
+async def _report_steer_outcome(manager, parent_id: str, worker_id: str, message: str, delivery) -> None:
+    """Await a detached steer and tell the calling session what happened.
+
+    Two channels, because they answer to different readers: an event for the
+    UI and anything watching the stream, and one `system` row in the parent's
+    transcript, which is what the agent itself actually sees on its next
+    compile_context. A tool that cannot wait for its own result has to put the
+    result somewhere the caller will find it.
+    """
+    from db import models as _db
+
+    try:
+        result = await delivery
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("Detached worker steer to %s failed: %s", worker_id[:8], e)
+        result = {"status": "rejected", "reason": f"{type(e).__name__}: {e}"}
+
+    rejected = result.get("status") == "rejected"
+    event: dict = {
+        "type": "worker.steer_rejected" if rejected else "worker.steered",
+        "worker_id": worker_id,
+        "status": result.get("status"),
+        "preview": message[:120],
+    }
+    if rejected:
+        event["reason"] = result.get("reason")
+    else:
+        event["message_id"] = result.get("message_id")
+    if not parent_id:
+        return
+    manager.emit(parent_id, event)
+    if rejected:
+        note = (
+            f"[Worker steer NOT delivered] Your message to worker {worker_id[:8]} was refused: "
+            f"{result.get('reason')}. It is safe to send it again."
+        )
+    else:
+        note = f"[Worker steer delivered] Your message to worker {worker_id[:8]} was {result.get('status')}."
+    try:
+        await asyncio.to_thread(_db.add_message, parent_id, "system", note)
+    except Exception as e:
+        logger.warning("Could not record worker-steer note for %s: %s", parent_id[:12], e)
 
 
 def cancel_worker(worker_id: str, _context: dict | None = None) -> str:
