@@ -196,7 +196,7 @@ def _notify_unsafe_once(skill_name: str, digest: str, problem: str) -> None:
 
 def _sync_verify_canary(skill_name: str, md: Path, digest: str, canaries_base: Path, stats: dict) -> None:
     from core.canary.parser import load_canary
-    from core.canary.propose import is_gate_command_safe, write_canary_md
+    from core.canary.propose import is_gate_command_safe, isolation_violation, write_canary_md
 
     v, err = _parse_verify_block(md)
     cname = verify_canary_name(skill_name)
@@ -221,6 +221,16 @@ def _sync_verify_canary(skill_name: str, md: Path, digest: str, canaries_base: P
     if unsafe:
         stats["verify_unsafe"].append(skill_name)
         _notify_unsafe_once(skill_name, digest, "; ".join(unsafe))
+        return
+
+    # Same admission bar as a proposed canary: a task written outside the
+    # sandbox fails the runtime contamination scan on every single run, so
+    # materialising it only buys a nightly alert about a test that never
+    # measured anything.
+    escape = isolation_violation({"name": cname, "prompt": v.get("prompt"), "files": v.get("files")})
+    if escape:
+        stats["verify_unsafe"].append(skill_name)
+        _notify_unsafe_once(skill_name, digest, f"breaks canary isolation: {escape}")
         return
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

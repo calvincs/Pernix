@@ -386,22 +386,161 @@ Output format:
 /no_think"""
 
 
-def build_llm_merge_prompt(cluster: list[str], store) -> str:
-    """Build LLM prompt for ambiguous merge decisions."""
+# Output tokens the merge call asks for (sweeps passes the same number as
+# max_tokens); the prompt budget has to leave room for them.
+LLM_MERGE_MAX_TOKENS = 2000
+# Preview ladder. The prompt used to splice 1024 chars of EVERY entry of
+# EVERY file in the cluster with no total cap: the two largest clusters on
+# the live box produced ~195K-token prompts against a 196 608-token window,
+# so vLLM 400'd the same two clusters every cycle and neither ever merged.
+_PREVIEW_STEPS = (1024, 512, 256)
+# Floor for the drop pass: every file in the cluster keeps at least this many
+# of its newest entries, so a merge decision still sees each file it is about
+# to rewrite rather than silently consolidating a cluster it never read.
+_MIN_ENTRIES_PER_FILE = 3
+# Absurd-budget guard: a misconfigured tiny context must not produce a
+# zero-length prompt, it should fall through to the pair fallback instead.
+_MIN_PROMPT_TOKENS = 1000
+
+
+def merge_model() -> str:
+    """The model the consolidation call actually runs on (see sweeps)."""
+    return settings.background_model or settings.llm_model
+
+
+def merge_prompt_token_budget(model: str = "") -> int:
+    """Tokens the merge prompt may occupy on `model`.
+
+    window (registry-derived, already 10% under the real one) minus the
+    output reservation. core/llm/budget.derive_model_budget is the single
+    source of truth for "how much context does this model really have";
+    settings.context_budget stands in for the window when the registry does
+    not know the model (context_auto off, or a name it has never seen), with
+    the same 10% margin applied by hand — the estimate below is ±15% on the
+    char heuristic, and the margin is what absorbs it.
+    """
+    from core.llm.budget import derive_model_budget
+
+    window = derive_model_budget(model or merge_model())
+    if not window:
+        window = int(settings.context_budget * 0.9)
+    return max(_MIN_PROMPT_TOKENS, int(window) - LLM_MERGE_MAX_TOKENS)
+
+
+def _estimate_tokens(text: str) -> int:
+    """The codebase's own estimate (tiktoken when present, chars otherwise)."""
+    try:
+        from core.context.tokens import get_estimator
+
+        return get_estimator().count(text)
+    except Exception:
+        return len(text) // 4
+
+
+def _entry_part(idx: int, name: str, entry, preview_chars: int) -> str:
+    return f'{idx}. "{name}" (epoch={entry.epoch})\n' f"   Content: {entry.content[:preview_chars]}"
+
+
+def build_budgeted_merge_prompt(
+    cluster: list[str],
+    store,
+    budget_tokens: int | None = None,
+) -> tuple[str, bool]:
+    """(prompt, fits) — the merge prompt, shrunk to fit `budget_tokens`.
+
+    Shrinking happens in the order that costs the least information:
+
+      1. every entry of every file at 1024-char previews (the old, uncapped
+         behaviour) — used whenever it fits;
+      2. the same entries at 512 then 256 chars, evenly across the cluster,
+         so no file is favoured;
+      3. at the 256-char floor, drop the OLDEST entries first, always from
+         whichever file still has the most, keeping at least
+         _MIN_ENTRIES_PER_FILE newest per file — every file in the cluster
+         stays represented.
+
+    `fits` is False when even step 3's floor is over budget. The caller's
+    answer to that is a smaller cluster (sweeps consolidates the
+    largest-overlap PAIR instead), not a prompt it knows will be rejected.
+    """
     from core.memory.format import parse_entries_from_markdown
 
-    parts = []
+    if budget_tokens is None:
+        budget_tokens = merge_prompt_token_budget()
+
+    # {file: [entries oldest-first]}, in cluster order.
+    per_file: dict[str, list] = {}
+    numbering: dict[str, int] = {}
     for idx, name in enumerate(cluster, 1):
         md = store.read_file(name)
         if not md:
             continue
-        entries = parse_entries_from_markdown(name, md)
-        for entry in entries:
-            content_preview = entry.content[:1024]
-            parts.append(f'{idx}. "{name}" (epoch={entry.epoch})\n' f"   Content: {content_preview}")
+        entries = sorted(parse_entries_from_markdown(name, md), key=lambda e: e.epoch)
+        if not entries:
+            continue
+        per_file[name] = entries
+        numbering[name] = idx
 
-    file_entries = "\n".join(parts)
-    return _LLM_MERGE_PROMPT.format(file_entries=file_entries)
+    def render(parts_by_file: dict[str, list[tuple[str, int]]]) -> str:
+        parts = [p for name in parts_by_file for p, _ in parts_by_file[name]]
+        return _LLM_MERGE_PROMPT.format(file_entries="\n".join(parts))
+
+    if not per_file:
+        return _LLM_MERGE_PROMPT.format(file_entries=""), True
+
+    # The template itself is part of the budget.
+    room = budget_tokens - _estimate_tokens(_LLM_MERGE_PROMPT.format(file_entries=""))
+
+    parts_by_file: dict[str, list[tuple[str, int]]] = {}
+    for preview in _PREVIEW_STEPS:
+        parts_by_file = {
+            name: [
+                (part, _estimate_tokens(part))
+                for part in (_entry_part(numbering[name], name, e, preview) for e in entries)
+            ]
+            for name, entries in per_file.items()
+        }
+        total = sum(cost for parts in parts_by_file.values() for _, cost in parts)
+        if total <= room:
+            return render(parts_by_file), True
+
+    # Floor reached and still over: drop oldest entries, biggest file first.
+    while total > room:
+        biggest = max(
+            (n for n, parts in parts_by_file.items() if len(parts) > _MIN_ENTRIES_PER_FILE),
+            key=lambda n: len(parts_by_file[n]),
+            default=None,
+        )
+        if biggest is None:
+            break
+        total -= parts_by_file[biggest].pop(0)[1]
+
+    return render(parts_by_file), total <= room
+
+
+def build_llm_merge_prompt(cluster: list[str], store, budget_tokens: int | None = None) -> str:
+    """Build LLM prompt for ambiguous merge decisions, budgeted to the model."""
+    return build_budgeted_merge_prompt(cluster, store, budget_tokens)[0]
+
+
+def largest_overlap_pair(cluster: list[str], sig_map: dict[str, FileSignature]) -> list[str]:
+    """The two files in `cluster` that overlap most, by the clustering score.
+
+    The partial-merge fallback for a cluster too large to describe inside the
+    context window: merging its most-overlapping pair is real progress (the
+    cluster shrinks by one file and the next cycle re-scores it), where
+    re-sending the whole cluster is a 400 every cycle forever.
+    """
+    best: list[str] = []
+    best_score = -1.0
+    for i, a in enumerate(cluster):
+        for b in cluster[i + 1 :]:
+            if a not in sig_map or b not in sig_map:
+                continue
+            score = score_pair(sig_map[a], sig_map[b])
+            if score > best_score:
+                best_score, best = score, [a, b]
+    return best or cluster[:2]
 
 
 def parse_llm_merge_response(

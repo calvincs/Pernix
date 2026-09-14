@@ -227,6 +227,9 @@ _SETTING_BOUNDS = {
     "adaptive_max_auto_applies_per_day": (0, 50),
     "adaptive_edit_cooldown_hours": (0, 720),
     "adaptive_tripwire_window_turns": (5, 200),
+    # 1h..30d. 0 is not offered: it would mean "never settle an unjudged
+    # batch", which is the bug this window exists to close.
+    "adaptive_tripwire_window_hours": (1, 720),
     "adaptive_usage_retire_days": (0, 365),
     "adaptive_prompt_note_ttl_days": (0, 365),
     "adaptive_suspect_ttl_days": (0, 90),
