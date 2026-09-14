@@ -63,7 +63,7 @@ const CODE = [
          '_reloadOwner', '_reloadBuffer', '_joinedMidTurn', '_reconcileTimer',
          '_paintTimer', '_paintDirty', '_paintOwner', 'PAINT_INTERVAL_MS',
          '_sessionModelOverride', '_histIdx', '_expandedKeys', '_lastStreamModel',
-         '_activityTimer', '_injectedMessages', '_DRAFT_PREFIX']),
+         '_activityTimer', '_injectedBySession', '_DRAFT_PREFIX']),
   fns(['_viewOwner', '_ownsView', '_advanceFenceScan', '_resetOpenFence', '_renderOpenFence',
        '_renderStreamIncremental', '_schedulePaint', '_paintTick', '_paintStreamNow',
        '_cancelStreamPaint', '_finalizeStreamingBubble', '_dropEmptyStreamingBubble',
