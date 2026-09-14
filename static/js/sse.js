@@ -69,6 +69,8 @@ const EVENT_TYPES = [
     'message.injected', 'message.consumed',
     // Workers
     'worker.started', 'worker.done', 'worker.failed', 'worker.resumed',
+    // Steering delivery, confirmed or refused by the worker after the tool returned.
+    'worker.steered', 'worker.steer_rejected',
     // Auto-resume declined because the parent already collected the results.
     // No UI of its own — registered so the event does not stall seq tracking.
     'workers.resume_skipped',

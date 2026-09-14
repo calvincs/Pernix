@@ -1470,16 +1470,19 @@ async def _report_steer_outcome(manager, parent_id: str, worker_id: str, message
         result = {"status": "rejected", "reason": f"{type(e).__name__}: {e}"}
 
     rejected = result.get("status") == "rejected"
-    event: dict = {
-        "type": "worker.steer_rejected" if rejected else "worker.steered",
-        "worker_id": worker_id,
-        "status": result.get("status"),
-        "preview": message[:120],
-    }
+    # Two literal event names, one per branch, so tests/test_sse_event_sync.py
+    # can see both from the source without evaluating the condition.
     if rejected:
-        event["reason"] = result.get("reason")
+        event: dict = {"type": "worker.steer_rejected", "reason": result.get("reason")}
     else:
-        event["message_id"] = result.get("message_id")
+        event = {"type": "worker.steered", "message_id": result.get("message_id")}
+    event.update(
+        {
+            "worker_id": worker_id,
+            "status": result.get("status"),
+            "preview": message[:120],
+        }
+    )
     if not parent_id:
         return
     manager.emit(parent_id, event)
