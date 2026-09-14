@@ -15,6 +15,11 @@ One idle-time sweep over the suite, all mechanical (no LLM):
             per-task tripwire's green precondition is built on exactly this
             history, so deleting a stable canary would disarm the only
             signal allowed to auto-rollback.
+  park    — a canary contaminated on _CONTAMINATION_WINDOW consecutive runs
+            is parked too, with one notification naming the contamination
+            reason: its runs measure something other than the pipeline, so
+            it can only produce nightly alarms about a test that reports
+            nothing. Rewrite the task workspace-relative and unpark it.
   purge   — retired canaries older than canary_purge_after_days are deleted
             for good. The `.retired/` quarantine is fed by the DELETE API
             and by probe retirement; this pass drains it.
@@ -57,6 +62,10 @@ _RUN_SCAN_LIMIT = 200
 # nightly sweeps with no pass between them is not noise.
 _HEALTH_WINDOW = 3
 _HEALTH_STATE_KEY = "canary_health_alert"
+# Consecutive contaminated runs that park a task. Contamination means the run
+# measured something other than the pipeline; three in a row is not bad luck,
+# it is a task that cannot be run inside the sandbox at all.
+_CONTAMINATION_WINDOW = 3
 
 
 def retired_dir(base: Path | None = None) -> Path:
@@ -225,6 +234,66 @@ def _retire_exhausted_probes(suite: list[CanaryDef], base: Path, stats: dict) ->
                 pass
 
 
+def _contaminated_streak(runs: list[dict]) -> int:
+    """How many of the newest runs in a row were disqualified as contaminated."""
+    streak = 0
+    for r in runs:
+        if r.get("outcome") != "contaminated":
+            break
+        streak += 1
+    return streak
+
+
+def _contamination_reason(run: dict) -> str:
+    """Why the scan disqualified this run, from the gate row it appended."""
+    try:
+        for row in json.loads(run.get("gate_results_json") or "[]"):
+            if isinstance(row, dict) and row.get("kind") == "contamination":
+                findings = row.get("findings") or []
+                return "; ".join(str(f) for f in findings) or str(row.get("output_tail") or "")
+    except (TypeError, ValueError):
+        pass
+    return ""
+
+
+def _park_contaminated(c: CanaryDef, runs: list[dict], stats: dict) -> None:
+    """Park a task whose last _CONTAMINATION_WINDOW runs were all contaminated.
+
+    Not a Goodhart violation, and the reason matters: the lock exists so a
+    suite manager can never silence a canary that is FAILING. A contaminated
+    run is not a failure, it is a disqualification — the tripwire already
+    drops these rows from both testimony and baselines, so the task is
+    contributing nothing to measure with. What it does contribute is a
+    nightly high-urgency alert (and, on the live box, a reflect escalation
+    from the run itself): `workspace-organizer-evidence-gate` was
+    contaminated 3 runs out of 3 by design, because its task was written
+    against ./data/workspace, and alerted every night at 03:05 UTC.
+
+    Parking keeps it in the suite, visible in the Canary tab and one click
+    from being unparked once the task is rewritten.
+    """
+    reason = _contamination_reason(runs[0])
+    if not _rewrite_frontmatter(c.path, {"parked": True}):
+        return
+    stats["parked_contaminated"].append({"name": c.name, "detail": reason or "isolation broken"})
+    try:
+        db.add_notification(
+            title=f"Canary parked — contaminated on {_CONTAMINATION_WINDOW} runs in a row: {c.name}",
+            body=(
+                f"Every one of the last {_CONTAMINATION_WINDOW} runs broke canary isolation, so none of "
+                f"them measured the pipeline. Findings: {reason or 'see the run rows'}. The task itself "
+                "is almost certainly written against something outside its temp workspace; rewrite it "
+                "workspace-relative and unpark it from the Canary tab. Parked means off the nightly "
+                "heartbeat, still in the suite — and no more nightly alerts about a task that cannot "
+                "report anything."
+            ),
+            urgency="normal",
+            dedup_key=f"canary_contaminated_park:{c.name}",
+        )
+    except Exception as e:
+        logger.warning("Contamination park notification failed for '%s': %s", c.name, e)
+
+
 def _maintain_one(c: CanaryDef, base: Path, stats: dict) -> None:
     """Apply at most one mutation to one canary. The I-fail lock is the
     first check: nothing below it can ever touch a failing canary."""
@@ -233,6 +302,16 @@ def _maintain_one(c: CanaryDef, base: Path, stats: dict) -> None:
         return  # freshly admitted, vetting run still queued — nothing to say
 
     md = c.path
+
+    # Contamination is settled before the Goodhart lock, and it never
+    # unparks: a contaminated run says nothing about whether green is still
+    # green, so treating it as "the canary went red" would unpark the task
+    # every night and re-park it the next sweep.
+    if runs[0].get("outcome") == "contaminated":
+        if md is not None and not c.parked and _contaminated_streak(runs) >= _CONTAMINATION_WINDOW:
+            _park_contaminated(c, runs, stats)
+        return
+
     if not runs[0].get("passed"):
         # GOODHART LOCK: latest run failed → untouchable. One exception that
         # AMPLIFIES the alarm instead of silencing it: a parked canary that
@@ -340,7 +419,11 @@ def check_suite_health(canaries: list[CanaryDef]) -> dict:
     chronic: list[str] = []
     noop: list[str] = []
     judged = 0
-    for c in (c for c in canaries if not c.flaky):
+    # Parked tasks are out of the nightly rotation by definition — a parked
+    # long-green one has nothing to add, and a parked contaminated one is
+    # parked precisely because its runs measure nothing. Either way its old
+    # rows must not keep raising an alert about a task nobody is running.
+    for c in (c for c in canaries if not c.flaky and not c.parked):
         runs = _scheduled_runs(c.name, _HEALTH_WINDOW)
         if len(runs) < _HEALTH_WINDOW:
             continue  # not enough scheduled history to judge
@@ -409,6 +492,7 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
         "settled_flaky": [],
         "flaky_tagged": [],
         "parked": [],
+        "parked_contaminated": [],
         "unparked": [],
         "probes_retired": [],
         "skills_changed": [],
@@ -466,7 +550,11 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
     # fails everything produces an entirely empty maintenance report.
     if not is_cancelled():
         try:
-            health = check_suite_health(suite)
+            # Re-scan: the sweep above just rewrote frontmatter (parked,
+            # flaky, promoted), and health must judge the suite as it now
+            # stands — a task parked for contamination two lines ago must
+            # not raise tonight's alert from the pre-sweep snapshot.
+            health = check_suite_health(list(scan_canaries(base)))
             stats["unhealthy"] = health["chronic"]
             _report_suite_health(health)
         except Exception as e:
@@ -480,7 +568,11 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
     # its own dedupe, each retired probe already got its own summary
     # notification, and unsafe verify blocks notify once per content hash;
     # folding any of them in here would double-notify.
-    mutations = {k: v for k, v in changed.items() if k not in ("unhealthy", "probes_retired", "verify_unsafe")}
+    mutations = {
+        k: v
+        for k, v in changed.items()
+        if k not in ("unhealthy", "probes_retired", "verify_unsafe", "parked_contaminated")
+    }
     if mutations:
         import hashlib
 
