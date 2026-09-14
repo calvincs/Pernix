@@ -2371,6 +2371,71 @@ def hover_row_actions(browser):
     ctx.close()
 
 
+ADAPTIVE_HEAD_JS = r"""() => {
+  const heads = [...document.querySelectorAll('#file-panel .adaptive-head')];
+  const out = [];
+  for (const h of heads) {
+    const hr = h.getBoundingClientRect();
+    const kids = [...h.children].map(c => { const r = c.getBoundingClientRect();
+      return { t: (c.textContent || '').trim().slice(0, 16) || c.className,
+               l: Math.round(r.left), r: Math.round(r.right),
+               tp: Math.round(r.top), b: Math.round(r.bottom), w: Math.round(r.width) }; });
+    const overlaps = [];
+    for (let i = 0; i < kids.length; i++) for (let j = i + 1; j < kids.length; j++) {
+      const a = kids[i], b = kids[j];
+      if (a.l < b.r - 1 && b.l < a.r - 1 && a.tp < b.b - 1 && b.tp < a.b - 1) overlaps.push(a.t + ' / ' + b.t);
+    }
+    out.push({
+      kids: kids.length,
+      overlaps,
+      overflow: kids.filter(k => k.r > Math.round(hr.right) + 1).map(k => k.t),
+      lines: [...new Set(kids.map(k => k.tp))].length,
+      headW: Math.round(hr.width),
+      wrap: getComputedStyle(h).flexWrap,
+    });
+  }
+  return { heads: heads.length, out }; }"""
+
+
+def adaptive_head_wrap(browser):
+    """m2 (mouse): the Self-checks toolbar does not overlap its own buttons.
+
+    `.adaptive-head` wrapped only under body[data-compact] and
+    body[data-touch]. The DOCKED desktop Explorer is the same 360px as the
+    tablet one and sets neither attribute, so on a plain desktop browser the
+    heartbeat chip and four buttons were squeezed into one unwrappable line
+    and overlapped. The Learning, Goals and Trust heads use the same class,
+    so this measures every head the panel has. (L04)
+    """
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+    pg = ctx.new_page()
+    pg.on("console", console_sink("adaptive-head"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    pg.click("#files-btn")
+    time.sleep(0.9)
+    pg.evaluate("() => document.getElementById('fp-group-tuning')?.click()")
+    time.sleep(0.6)
+    for tab in ("canary", "adaptive", "telos"):
+        pg.evaluate(f"() => document.getElementById('fp-tab-{tab}')?.click()")
+        time.sleep(1.0)
+        m = _settle(lambda: (lambda r: r if r and r["heads"] else None)(pg.evaluate(ADAPTIVE_HEAD_JS)))
+        m = m or pg.evaluate(ADAPTIVE_HEAD_JS)
+        pg.screenshot(path=f"{shots}/{tag}-desktop-head-{tab}.png")
+        heads = (m or {}).get("out") or []
+        check(
+            "adaptive-head",
+            f"m2: the {tab} head wraps on a docked desktop Explorer and overlaps nothing",
+            bool(heads)
+            and all(h["wrap"] == "wrap" for h in heads)
+            and all(not h["overlaps"] for h in heads)
+            and all(not h["overflow"] for h in heads),
+            m,
+            "m2",
+        )
+    ctx.close()
+
+
 def trust_tab(browser):
     """m2: the Trust tab is counts, with a real empty state for the trials."""
     state = {"payload": json.loads(json.dumps(TRUST_PAYLOAD))}
@@ -2627,6 +2692,7 @@ with sync_playwright() as p:
             check("suggestions", "m2: suggestion pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
         for fn, vp in (
             (hover_row_actions, "hover-row"),
+            (adaptive_head_wrap, "adaptive-head"),
             (message_feedback, "feedback"),
             (message_feedback_touch, "feedback-touch"),
             (trust_tab, "trust"),
