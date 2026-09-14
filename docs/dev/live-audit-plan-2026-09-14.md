@@ -315,3 +315,68 @@ their own tests plus the directly related files, not the whole suite.
    and no new high-urgency alert (L07); `TRANSITIONS` contains the two new
    edges in the container (L09); a cancel on a long session issues the narrow
    query (L10, log line); a smoke turn completes end to end.
+
+## Outcome — 2026-09-14
+
+All thirteen findings fixed, merged, gated, deployed and verified live the
+same day. Fifteen commits `5288c1b..34fddad` on `next-3.2-testing`; box
+rebuilt at `34fddad` (build `b420d71fa714`), `--dangerous` preserved.
+
+### Gates
+
+- `./check.sh`: 4471 passed, black/ruff/flake8 clean.
+- `tools/ui-gate/run.sh`: 368/368, zero console errors, desktop baseline
+  unchanged (two new passes: `hover_row_actions`, `adaptive_head_wrap`).
+- The merge was clean (W3 → W2 → W1). One file shared between W3 and W2
+  (`api/routers/health.py`), different functions, auto-merged.
+
+### The merge found two things the streams could not
+
+- `tests/test_sse_event_sync.py` failed after W2: `worker.steer_rejected`
+  had no client listener, and once registered `worker.steered` was
+  invisible to the scanner because both names sat in one conditional
+  expression. Fixed in `13f74b3`.
+- The ui-gate's state-map pass hard-coded 31 edges; `2dee81b` had already
+  moved the table to 35 and this batch to 38. Fixed in `34fddad`.
+
+### Live verification on the box
+
+| Finding | Assertion | Result |
+| --- | --- | --- |
+| L01 | hidden headless tab: 3 streams → 1 after the 5 s grace; visible → 3 again | PASS |
+| L02 | `elementFromPoint` at a hovered row's centre is `.session-title-text`; strip 52 px | PASS |
+| L03 | the arXiv session (`~256-byte … ~100K … **~1/5**`) renders zero `<del>` | PASS |
+| L04 | Self-checks head: `flex-wrap: wrap`, 6 children, no intersections, no overflow | PASS |
+| L05 | `build_llm_merge_prompt` budgeted in the container; next real cycle is the proof | deployed |
+| L06 | after one forced snooze cycle both Aug 13 batches carry `no-signal: unjudged…`; 26 other long-unjudged batches settled the same way, one INFO line each | PASS |
+| L07 | `workspace-organizer-evidence-gate` parked via `PATCH /api/canary/{name}` | PASS |
+| L09 | both new edges present in the deployed `state_v2.py`; `/api/health/detailed` → `sessions.rejected_transitions = {total: 0}` | PASS |
+| L10 | `get_pending_user_message_ids` deployed; `drop_pending_for_cancel` no longer reads the transcript | PASS |
+| L11, L13 | guarded acknowledge and `ValueError` handling present in the container | PASS |
+| smoke | new session, one prompt, `DEPLOY-OK` reply in 15 s, arc `idle_ready → scouting → processing → finalizing → idle_ready` | PASS |
+
+### Corrections the implementers made to this plan
+
+- L03: the plan's example line does not by itself trigger marked's
+  single-tilde rule (a space precedes its second tilde); the live
+  strikethrough came from the later `**~1/5**`. The fix (require `~~`)
+  covers both; the test pins shapes that do reproduce.
+- L06: the knob is `adaptive_tripwire_window_hours` (subsystem-prefixed
+  like its neighbours), API-only for now — a Settings row is a small
+  follow-up. `flagged_reason` carries the full sentence so the Adaptive
+  panel shows it with no JS change.
+- L07c: the park route is `PATCH /api/canary/{name}` with
+  `{"parked": true}`, not a `/park` POST.
+- L09: `MAP_EDGES` needed no change (all three new edges reuse drawn
+  pairs); the closure test found a third missing edge —
+  `(PROCESSING, "compaction-failed")` — and it was added.
+- L14: the confirmation lands as a `system` transcript row, not a ledger
+  note (the ledger is a per-turn snapshot and would show it one turn late).
+
+### Follow-ups
+
+- Settings row for `adaptive_tripwire_window_hours` (W1-class, tiny).
+- Watch the next real consolidation cycle for the two big clusters: expect
+  no 400 and either a budgeted merge or the pair fallback.
+- Six sessions pinned by the audit's click test (before L02 shipped) are
+  still pinned; the audit's unpin call was blocked by policy.
