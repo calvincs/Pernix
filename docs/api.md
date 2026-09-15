@@ -1107,9 +1107,16 @@ GET  /api/adaptive/proposals?status=pending&limit=100      Proposals by status: 
                                                            never a silent []. ?id=N fetches one row whatever
                                                            its status. Every row carries `summary` (producer,
                                                            what it is, target), `auto_approve_exempt`
-                                                           (canary proposals wait for a human) and
+                                                           (canary proposals wait for a human),
                                                            `auto_approve_after` (when the veto window closes)
+                                                           and `explanation` {what, why, fate, fate_kind:
+                                                           auto|needs_you|held, producer_label} — plain
+                                                           language, template-built, null if unbuildable
 GET  /api/adaptive/proposals/{id}                          One proposal, any status; 404 if unknown
+POST /api/adaptive/proposals/{id}/discuss                  Mint a normal chat session titled after the
+                                                           proposal; returns {session_id, opener, title} —
+                                                           the Learning tab's "Chat about this" sends the
+                                                           opener there. 404 if unknown
 POST /api/adaptive/proposals/{id}/approve                  Apply-on-approve: executes the batch through the
                                                            same apply engine as auto-applies and enqueues a
                                                            batch-tagged canary sweep

@@ -277,7 +277,9 @@ From there the suite grows the way a regression-test suite does — from real
 failures: while `canary_enabled` is on, the refine pass may **propose** a new
 canary distilled from a genuinely failed turn (name, prompt, gates,
 fixtures, rationale). Proposals wait in the Learning (Adaptive) tab for a
-human. Approving materializes the `CANARY.md` (validated by a parse round-trip)
+human — the card says so in words ("Waits for you. New self-tests never
+apply on their own") and names the allowlist rule that kept it off the auto
+path. Approving materializes the `CANARY.md` (validated by a parse round-trip)
 and
 queues a manual vetting run so you see it pass before it counts.
 
@@ -469,7 +471,10 @@ tab's *New entry* form — immediately active, journaled, unlinted), and
 **the agent** authors through the `adaptive_note` tool
 (`adaptive_agent_notes_enabled`): prompt_note/routing_hint only, the lint
 applies, 2 mints/day, normal batch pipeline + tripwire — an agent never
-writes `policy` about itself.
+writes `policy` about itself. Since 2026-09-15 the agent can also *read* the
+pending queue (`adaptive_proposals`) and, on an explicit instruction from the
+user in that conversation, approve or reject one (`adaptive_proposal_decide`,
+same engine as the Learning tab's button, rollbackable).
 
 Risk is computed at apply time, and two escalations gate otherwise-low-risk
 edits: any **delete** of another producer's entry, and any **global-scope**
@@ -662,7 +667,27 @@ human click just converts validated lessons into TTL lapses. Reject inside
 the window to veto; roll back the batch afterward to overrule. Canary-suite
 proposals are the exception and never auto-approve: materializing a canary
 keeps its human invariant (I6), and graduated autonomy for canaries lives in
-`canary_auto_admit` instead.
+`canary_auto_admit` instead. The clock also refuses a proposal whose
+evidence resolves to nothing recorded (`core/adaptive/receipts.py`) — it is
+**held** for a human, notified once — with one carve-out: a proposal that
+only *removes* entries (dream's retirement sweep, whose evidence is a
+`retired: …` note) is never held, since removing a rule cannot turn prose
+into policy. Before that carve-out a retirement sat pending for days on the
+reference box, logged as held every twenty minutes.
+
+**Every card explains itself (2026-09-15).** `annotate_proposal` attaches an
+`explanation` — `what` (who proposed it and the concrete change, in words),
+`why` (the evidence in words: what was seen, in which session, how many
+graded turns or facts back it), `fate` (what happens if nobody touches it,
+and when) and `fate_kind` (`auto` / `needs_you` / `held`) — built by
+`core/adaptive/explain.py` from templates, never an LLM call, so the same
+row always reads the same. The Learning tab renders those three lines and
+folds the raw rationale, edits and evidence under *Details*. **Chat about
+this** (`POST /api/adaptive/proposals/{id}/discuss`) mints a normal session
+titled after the proposal and sends an opener asking the agent to explain
+it; in that session the agent reads the row through `adaptive_proposals`
+(list / show) and may act through `adaptive_proposal_decide` only when told
+to — both tools are denied to canary, worker and cron sessions.
 
 The two notifications this produces are written for whoever has to act on
 them — including the agent, when a user pastes one back and asks what it
