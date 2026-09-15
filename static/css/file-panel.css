@@ -1416,7 +1416,50 @@ body[data-touch] .adaptive-btn {
 }
 .adaptive-card.suspect { border-color: color-mix(in srgb, var(--warning) 60%, var(--border)); }
 .adaptive-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
-.adaptive-card-actions { margin-top: 6px; display: flex; gap: 6px; }
+.adaptive-card-actions { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+/* Proposal cards explain themselves — the three plain-English lines the
+   server builds (core/adaptive/explain.py) sit between the head row and the
+   collapsed raw row. Sentences, not row data: --text (not --text-dim) and a
+   reading line-height, because this is the part meant to be READ. */
+.adaptive-explain {
+    margin-top: 5px;
+    line-height: 1.45;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+/* An inline lead-in rather than a label column: the Explorer is a
+   drag-resizable panel (200..520px) and full-screen on the compact tier, so
+   any fixed first column is wrong at one of those widths. Inline wraps at
+   every width with no breakpoint. */
+.adaptive-explain-label {
+    color: var(--text-dim);
+    font-size: 0.85em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-right: 6px;
+}
+/* The fate pill reuses the badge palette (ok / warn / off); these only stop it
+   reading as one more metadata chip among the producer and kind badges. */
+.adaptive-badge.adaptive-fate { margin-left: auto; margin-right: 0; font-family: inherit; font-weight: 600; }
+.adaptive-badge.adaptive-fate-held { border: 1px dashed var(--line-faint); }
+/* "Details" — the row the explanation was built from, one click down. */
+.adaptive-details-head {
+    margin-top: 6px;
+    color: var(--text-dim);
+    font-size: 0.85em;
+    cursor: pointer;
+    user-select: none;
+    width: max-content;
+}
+.adaptive-details-head::before { content: '\25B8 '; }
+.adaptive-details-head[aria-expanded="true"]::before { content: '\25BE '; }
+.adaptive-details-head:hover, .adaptive-details-head:focus-visible { color: var(--text); }
+.adaptive-details-body {
+    margin-top: 2px;
+    padding-left: 8px;
+    border-left: 2px solid var(--line-faint);
+}
 /* Entry rows — the Telos tab's row vocabulary (and the read-only rows on the
    Adaptive tab). Same card treatment as .adaptive-card; kept as its own name
    because entries are informational and carry no action row. Without these

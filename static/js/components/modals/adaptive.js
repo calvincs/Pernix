@@ -61,6 +61,20 @@ export async function actionBtn(label, fn, refresh) {
 /**
  * One pending proposal, as a card.
  *
+ * The card used to be the database row: a producer name, a rationale one LLM
+ * wrote for another, and a line per edit reading `policy` `create` `<id>`.
+ * The owner's verdict on the live box was "I as the user have no idea what's
+ * happening or being described here" — and nothing on it said whether the
+ * thing would apply itself tonight, wait for a click forever, or sit held,
+ * so three different objects read as one to-do list.
+ *
+ * So the card leads with the server's plain-English `explanation`
+ * (core/adaptive/explain.py): what would change, why, and what happens if the
+ * person walks away — plus a fate pill coloured on `fate_kind` so the "which
+ * of these actually needs me?" question is answerable at a glance. The row
+ * itself (rationale, per-edit lines, evidence, the canary summary) is still
+ * all here, one disclosure down, because it is what an audit needs.
+ *
  * `payload_json` has two shapes in the wild and only one of them is a list:
  * the adaptive engine and dream write an array of edits, while
  * `core/canary/propose.py` writes an OBJECT — `{"canary": {...}}` — because a
@@ -72,6 +86,9 @@ export async function actionBtn(label, fn, refresh) {
  * (`describe_proposal` in core/adaptive/engine.py). Approving a canary is not
  * an acknowledgement either — it materializes the CANARY.md and queues a
  * vetting run — so the button says what it will do.
+ *
+ * `explanation` is null whenever the server could not build one, so every
+ * branch below degrades to the pre-explanation card rather than to nothing.
  */
 export async function proposalCard(p, refresh) {
     let payload = null;
@@ -79,23 +96,113 @@ export async function proposalCard(p, refresh) {
     const edits = Array.isArray(payload) ? payload : [];
     const isCanary = !!(payload && !Array.isArray(payload) && typeof payload === 'object' && payload.canary);
     const applies = edits.length > 0 || isCanary;
+    const ex = p.explanation && typeof p.explanation === 'object' ? p.explanation : null;
 
     const row = el('div', { class: 'adaptive-card proposal' });
-    row.appendChild(el('div', { class: 'adaptive-card-head' }, [
-        badge(p.producer), text(` #${p.id} · ${relTime(p.created_at)} — ${p.rationale || ''}`),
-    ]));
+
+    // Head: who, which row, how old — then the one thing the old card never
+    // said. The pill is the answer to "does this need me?"; the full sentence
+    // (with the actual deadline) is the third explanation line below and the
+    // pill's tooltip, so the short label never has to carry a timestamp.
+    const head = el('div', { class: 'adaptive-card-head' }, [
+        badge(p.producer),
+        // Without an explanation the rationale is all the card has, so it stays
+        // on the head line exactly where it used to be.
+        text(ex ? ` #${p.id} · ${relTime(p.created_at)} ` : ` #${p.id} · ${relTime(p.created_at)} — ${p.rationale || ''}`),
+    ]);
+    if (ex) {
+        const kind = ex.fate_kind || 'needs_you';
+        const pill = kind === 'auto'
+            ? badge('applies on its own', 'ok')
+            : kind === 'held' ? badge('held for you', 'off') : badge('waiting for you', 'warn');
+        pill.classList.add('adaptive-fate', `adaptive-fate-${kind.replace('_', '-')}`);
+        if (ex.fate) pill.setAttribute('title', ex.fate);
+        head.appendChild(pill);
+    }
+    row.appendChild(head);
+
+    // Body: three labelled sentences, in the order a person asks them.
+    if (ex) {
+        for (const [label, body] of [['What', ex.what], ['Why', ex.why], ['If you do nothing', ex.fate]]) {
+            if (!body) continue;
+            row.appendChild(el('div', { class: 'adaptive-explain' }, [
+                el('span', { class: 'adaptive-explain-label' }, [text(label)]),
+                el('span', { class: 'adaptive-explain-text' }, [text(body)]),
+            ]));
+        }
+    }
+
+    // The raw row, one click down. Collapsed because it is evidence, not
+    // reading — but never dropped: the explanation is a template over this,
+    // and a person who distrusts the template needs the source it was built
+    // from in the same place.
+    //
+    // Only when there IS an explanation, though. With none, these lines are
+    // the entire card, and hiding them behind a disclosure would leave a row
+    // that says less than the one this replaced — so then they render where
+    // they always did.
+    const details = el('div', { class: 'adaptive-details-body', style: 'display:none' });
+    const raw = ex ? details : row;
+    if (ex && p.rationale) {
+        details.appendChild(el('div', { class: 'adaptive-edit-line' }, [badge('rationale'), text(` ${p.rationale}`)]));
+    }
     for (const ed of edits) {
-        row.appendChild(el('div', { class: 'adaptive-edit-line' }, [
+        raw.appendChild(el('div', { class: 'adaptive-edit-line' }, [
             badge(ed.kind), badge(ed.action),
             text(` ${ed.title || ed.entry_id || ''}: ${ed.content || ''}`),
         ]));
     }
     if (!edits.length && p.summary) {
-        row.appendChild(el('div', { class: 'adaptive-edit-line' }, [
+        raw.appendChild(el('div', { class: 'adaptive-edit-line' }, [
             isCanary ? badge('canary') : badge('review'), text(` ${p.summary}`),
         ]));
     }
+    // Evidence ids are for the audit only — they are what the Why line is
+    // made of, so they go in the disclosure or nowhere, exactly as before.
+    let evidence = [];
+    try { evidence = JSON.parse(p.evidence_json || '[]'); } catch (_e) { /* the Why line already said so */ }
+    for (const ref of (ex && Array.isArray(evidence)) ? evidence : []) {
+        details.appendChild(el('div', { class: 'adaptive-edit-line' }, [badge('evidence'), text(` ${ref}`)]));
+    }
+    if (details.childNodes.length) {
+        const detailsHead = el('div', { class: 'adaptive-details-head' }, [text('Details')]);
+        makeDisclosure(
+            detailsHead,
+            () => details.style.display !== 'none',
+            () => { details.style.display = details.style.display === 'none' ? 'block' : 'none'; },
+        );
+        detailsHead.setAttribute('aria-label', `Details of proposal ${p.id}: the rationale, edits and evidence it was built from`);
+        row.appendChild(detailsHead);
+        row.appendChild(details);
+    }
+
     const btns = el('div', { class: 'adaptive-card-actions' });
+    // First, and deliberately: a decision the card cannot answer belongs in a
+    // conversation, not in a guess between two irreversible buttons. NOT
+    // actionBtn — that refreshes the tab on success, which would tear down the
+    // panel we are handing the composer to. Failure still refreshes, because
+    // then the notice is the only thing to show.
+    const chat = el('button', {
+        class: 'adaptive-btn',
+        title: 'Open a chat about this proposal and ask the agent what it means',
+        onClick: async () => {
+            chat.disabled = true;
+            try {
+                const r = await post(`/api/adaptive/proposals/${p.id}/discuss`, {});
+                // app.js owns the composer and the session list; `send()` and
+                // `selectSession()` are module-local there and file-panel.js
+                // already imports this module, so an import back would be a
+                // cycle. One event, one listener.
+                window.dispatchEvent(new CustomEvent('pernix:compose', {
+                    detail: { session_id: r.session_id, text: r.opener, send: true },
+                }));
+            } catch (e) {
+                setActionNotice(`Could not open a chat: ${e.message || e}`, true);
+                await refresh();
+            }
+        },
+    }, [text('Chat about this')]);
+    btns.appendChild(chat);
     btns.appendChild(await actionBtn(applies ? 'Approve & apply' : 'Acknowledge', async () => {
         await post(`/api/adaptive/proposals/${p.id}/approve`, {});
     }, refresh));
@@ -123,10 +230,14 @@ export async function renderAdaptiveTab(container) {
         return;
     }
 
+    // The three-object problem: most proposals apply themselves, self-tests
+    // never do, and held ones cannot. Said here once, and again per card.
     container.appendChild(tabGlossary(
-        'Rules the agent writes about itself — routing hints and prompt notes it '
-        + 'may apply on its own, everything else waiting for your approval, and a '
-        + 'one-click rollback for all of it.',
+        'Changes the agent wants to make to its own standing instructions. Most of '
+        + 'them apply on their own once a veto window passes, unless you reject '
+        + 'them first; new self-tests never apply by themselves and wait for you to '
+        + 'click. Each card says in plain words what it would change, why, and which '
+        + 'of those two it is — and anything that lands can be rolled back here.',
     ));
 
     // Chips then buttons, in one row that wraps below 900px and on touch (E2).
@@ -148,7 +259,7 @@ export async function renderAdaptiveTab(container) {
     const proposals = proposalsRes.proposals || [];
     container.appendChild(section(`Proposals awaiting review (${proposals.length})`));
     if (!proposals.length) {
-        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No proposals waiting — one appears here when the agent wants a change you have to allow, and applies itself if you do not veto it in time.')]));
+        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No proposals waiting. One appears here whenever the agent wants to change its own instructions: most apply on their own once their veto window passes unless you reject them, new self-tests wait for you to approve, and a few are held back because their evidence does not check out. Every card says which it is.')]));
     }
     for (const p of proposals) {
         // One card that throws used to take the whole tab with it: the count
