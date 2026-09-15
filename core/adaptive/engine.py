@@ -72,6 +72,15 @@ def is_canary_proposal(prop: dict) -> bool:
     return isinstance(payload, dict) and bool(payload.get("canary"))
 
 
+def _is_delete_only(payload) -> bool:
+    """Every edit removes an entry (delete/retire) — nothing new enters."""
+    return (
+        isinstance(payload, list)
+        and bool(payload)
+        and all(isinstance(e, dict) and e.get("action") in ("delete", "retire") for e in payload)
+    )
+
+
 def _is_memory_correction(payload) -> bool:
     return (
         isinstance(payload, list)
@@ -132,6 +141,13 @@ def annotate_proposal(prop: dict) -> dict:
         except ValueError:
             pass
     row["summary"] = describe_proposal(prop)
+    try:
+        from core.adaptive.explain import explain_proposal
+
+        row["explanation"] = explain_proposal(prop)
+    except Exception as e:  # decoration; never fails a listing
+        logger.debug("explain_proposal failed for %s: %s", prop.get("id"), e)
+        row["explanation"] = None
     return row
 
 
@@ -716,6 +732,15 @@ def _hold_unfounded(prop: dict) -> bool:
     resolver later learns to see the evidence it cites.
     """
     from core.adaptive.receipts import UNFOUNDED, grade_evidence_json
+
+    # The receipt guard exists so unfounded PROSE never becomes permanent
+    # policy. A proposal that only REMOVES entries is the opposite act, and
+    # dream's retirement sweep mints exactly that with a "retired: ..." note
+    # for evidence (core/dream/retire.py) — so the guard held #499 on the
+    # live box forever, a rule whose own evidence had vanished kept alive by
+    # the check meant to stop unbacked rules. Deletes go to the clock.
+    if _is_delete_only(_payload_of(prop)):
+        return False
 
     try:
         if grade_evidence_json(prop.get("evidence_json")) != UNFOUNDED:
