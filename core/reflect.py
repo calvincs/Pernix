@@ -1514,6 +1514,70 @@ def _sanitize_turn_digest(digest: dict) -> dict:
     return cleaned
 
 
+# Phantom-evidence guard (2026-09-15, session 399fd54cf7b6): the grader
+# twice invented evidence that was in nothing it was shown — a "402
+# payment_required compaction failure" on a turn that ended `complete` with a
+# 2,833-char answer (pushed a HIGH "Needs attention" alert), and a quoted
+# "user's next message" on a sync grade where no such message existed. Both
+# claims are mechanically checkable against the evidence blob, so check them.
+_PHANTOM_ENV_TOKENS = ("compaction", "payment_required", "402", "quota", "rate limit", "rate_limit")
+_PHANTOM_NO_OUTPUT_RE = re.compile(
+    r"could not produce (any )?(a )?response|no agent output|transcript has no agent output|"
+    r"produced no (final )?(response|output)|did not (produce|emit) (a|any) (final )?(response|answer)",
+    re.I,
+)
+_PHANTOM_NEXT_MSG_RE = re.compile(
+    r"user'?s? (own )?(next|follow-up|subsequent) (message|reply)|user now (says|reports)|the user reports",
+    re.I,
+)
+_NO_FINAL_MARKER = "(no final assistant message)"
+_NEXT_MSG_SECTION = "USER'S NEXT MESSAGE"
+
+
+def phantom_evidence_reason(result: "ReflectResult", evidence: str, termination_reason: str | None) -> str | None:
+    """Return why a non-pass verdict rests on evidence the grader was never shown, or None.
+
+    Two claims are checked, both against the exact ``evidence`` string the
+    grader received:
+
+    * an environment failure that supposedly stopped the agent from answering
+      (compaction / 402 / quota / "no agent output") on a turn that terminated
+      ``complete`` with a non-empty final response, when none of the failure
+      tokens the verdict names occur anywhere in the evidence;
+    * a "user's next message" the verdict quotes or relies on, when the
+      evidence carries no USER'S NEXT MESSAGE section (sync grades never do).
+
+    A verdict that fails either check is not a judgment about the turn — it
+    is a hallucination — so the caller downgrades it to pass-with-lessons
+    rather than retrying or paging the user.
+    """
+    if result.verdict not in ("retry", "escalate"):
+        return None
+    text = " ".join(x or "" for x in (result.reasoning, result.diagnostic, result.what_failed, result.missing))
+    if not text.strip():
+        return None
+    ev_lower = (evidence or "").lower()
+
+    if _PHANTOM_NEXT_MSG_RE.search(text) and _NEXT_MSG_SECTION not in (evidence or ""):
+        return "the verdict relies on a user's next message, but the evidence carries no such message"
+
+    has_final = bool(ev_lower) and _NO_FINAL_MARKER not in (evidence or "")
+    if termination_reason == "complete" and has_final:
+        low = text.lower()
+        env_hits = [t for t in _PHANTOM_ENV_TOKENS if t in low]
+        no_output = bool(_PHANTOM_NO_OUTPUT_RE.search(text))
+        if env_hits and not any(t in ev_lower for t in env_hits):
+            return (
+                "the verdict names an environment failure (" + ", ".join(env_hits) + ") that appears "
+                "nowhere in the evidence, on a turn that terminated complete with a final response"
+            )
+        if no_output and result.failure_cause == "env":
+            return (
+                "the verdict says the agent produced no output, but the turn terminated complete with a final response"
+            )
+    return None
+
+
 def _forced_cause(current: str, fallback: str) -> str:
     """Attribution for a verdict the harness forced, not the model.
 
@@ -2061,6 +2125,27 @@ async def reflect_on_session(
                         "attempts. The round budget is not the constraint — the approach is. "
                         "Change tool or source, or narrow the step."
                     )
+
+            # Phantom-evidence guard: a non-pass verdict built on facts the
+            # grader was never shown is a hallucination, not a grade. Downgrade
+            # to pass-with-lessons (same shape as the confidence floor) so it
+            # neither retries the turn nor pages the user.
+            _phantom = phantom_evidence_reason(result, evidence, termination_reason)
+            if _phantom:
+                logger.warning(
+                    "Reflect phantom-evidence guard: %s -> pass for session %s (%s): %s",
+                    result.verdict,
+                    session_id,
+                    _phantom,
+                    (result.reasoning or "")[:160],
+                )
+                result.reasoning = (result.reasoning or "") + (
+                    f" [downgraded from {result.verdict} by the phantom-evidence guard: {_phantom}]"
+                )
+                result.verdict = "pass"
+                result.failure_cause = "none"
+                result.verification = "unknown"
+                result.verification_reason = f"downgraded: {_phantom}"
 
             # Gate clamp (plan 3a): a failing deterministic gate makes `pass`
             # unreachable — mechanically, AFTER the LLM call, BEFORE the
