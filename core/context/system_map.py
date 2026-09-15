@@ -147,7 +147,7 @@ _STORE_TOOLS = """\
 |---|---|---|
 | long-term memory | recall, deep_recall | remember (supersede= for one-call repair), update_memory, forget |
 | session history | list_recent_sessions, read_session_summary, search_sessions | (automatic) |
-| adaptive store | rendered into prompt; /api/adaptive/* | adaptive_note (2/day, linted) |
+| adaptive store | rendered into prompt; adaptive_proposals (pending, plain-language); /api/adaptive/* | adaptive_note (2/day, linted); adaptive_proposal_decide (only when the user says so) |
 | candor ledger | predict_reliability, why_reliability, reliability_questions | (automatic capture) |
 | telos layer | telos_status, telos_ask | telos_ask (mints questions) |
 | skills | load_skill, read_skill_instructions | create_skill / update_skill |

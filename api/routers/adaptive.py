@@ -154,6 +154,41 @@ async def approve(proposal_id: int):
     return result
 
 
+@router.post("/api/adaptive/proposals/{proposal_id}/discuss")
+async def discuss(proposal_id: int):
+    """Open a normal chat session about one proposal.
+
+    The Learning tab's cards are the row that produced them — enough to
+    audit, not enough to decide by. This mints a session titled after the
+    proposal and hands back the first message for the composer to send, so
+    the person can ask the agent what a proposal means, what the session it
+    came from actually did, and whether to take it — in the same window
+    every other conversation happens in. The agent reads the row through
+    the `adaptive_proposals` tool and can act on `adaptive_proposal_decide`
+    only when told to; the opener says so.
+    """
+    from core.adaptive.explain import producer_label
+    from sessions.manager import get_manager
+
+    prop = await _asyncio.to_thread(db.adaptive_get_proposal, proposal_id)
+    if prop is None:
+        raise HTTPException(404, detail=f"no proposal {proposal_id}")
+    from core.adaptive import describe_proposal
+
+    short = describe_proposal(prop)
+    short = short.split(":", 1)[1].strip() if ":" in short else short
+    title = f"Proposal #{proposal_id} — {short}"[:80]
+    sid = get_manager().create_session(title=title, session_type="normal")
+    opener = (
+        f"I'm looking at adaptive proposal #{proposal_id} in Self-tuning → Learning "
+        f"(from {producer_label(prop.get('producer'))}). Read it with "
+        f'adaptive_proposals(action="show", proposal_id={proposal_id}) and explain it to me in plain '
+        "language: what would change, why the system suggested it, what happens if I approve or reject it, "
+        "and what you would do. Keep it short. I'll decide after — don't approve or reject anything unless I say so."
+    )
+    return {"session_id": sid, "opener": opener, "title": title}
+
+
 @router.post("/api/adaptive/proposals/{proposal_id}/reject")
 async def reject(proposal_id: int):
     prop = await _asyncio.to_thread(db.adaptive_get_proposal, proposal_id)
