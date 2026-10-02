@@ -342,17 +342,21 @@ def restore_skill_backup(proposal_id: str, actor: str = "user") -> dict:
         len(current),
         len(restored),
     )
+    # skill_verify rolls back on a red verify canary and raises its own, more
+    # specific "Skill auto-rolled-back" notice; this one would be a second
+    # bell item for the same event.
     try:
-        db.add_notification(
-            title=f"Skill rolled back: {skill_name}",
-            body=(
-                f"Proposal {proposal_id} ({status}) was rolled back by {actor}. "
-                f"{skill_md.name} restored from {backup.name} "
-                f"({len(current)} -> {len(restored)} bytes). The state it replaced was "
-                "backed up first, in the same directory."
-            ),
-            urgency="normal",
-        )
+        if actor != "skill-verify":
+            db.add_notification(
+                title=f"Skill rolled back: {skill_name}",
+                body=(
+                    f"Proposal {proposal_id} ({status}) was rolled back by {actor}. "
+                    f"{skill_md.name} restored from {backup.name} "
+                    f"({len(current)} -> {len(restored)} bytes). The state it replaced was "
+                    "backed up first, in the same directory."
+                ),
+                urgency="normal",
+            )
     except Exception as e:
         logger.debug("Rollback notification failed for %s: %s", proposal_id, e)
     return result

@@ -567,11 +567,13 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
     # 'unhealthy' is reported by _report_suite_health with its own urgency and
     # its own dedupe, each retired probe already got its own summary
     # notification, and unsafe verify blocks notify once per content hash;
-    # folding any of them in here would double-notify.
+    # folding any of them in here would double-notify. 'skills_changed' is the
+    # canary-side echo of a skill apply that _auto_apply_skill_proposals has
+    # already announced (12 of the 14 maintenance notices in 17 days).
     mutations = {
         k: v
         for k, v in changed.items()
-        if k not in ("unhealthy", "probes_retired", "verify_unsafe", "parked_contaminated")
+        if k not in ("unhealthy", "probes_retired", "verify_unsafe", "parked_contaminated", "skills_changed")
     }
     if mutations:
         import hashlib

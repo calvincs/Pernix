@@ -93,8 +93,11 @@ def ask_user(
     # Emit on global bus (for headless/webhook consumers)
     from core.events import get_event_bus
 
-    bus = get_event_bus()
-    bus.emit({**event_payload, "session_id": session_id})
+    # A statement has nothing to answer, so it must not push the phone the way
+    # a real question does; it still reaches the panel and open browsers above.
+    if question_type != "statement":
+        bus = get_event_bus()
+        bus.emit({**event_payload, "session_id": session_id})
 
     # Statements are informational — deliver them to the question panel but do
     # NOT park the session in AWAITING_USER. Pausing on announcements ("I'll

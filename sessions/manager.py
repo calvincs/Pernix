@@ -2477,8 +2477,9 @@ class SessionManager:
             # Notify the user so they know which session needs a nudge, rather
             # than leaving them to wonder why their conversation went quiet.
             # Skip for worker sessions — the orchestrator handles those
-            # internally; firing on every worker would spam the user.
-            if is_budget_exhausted and session.session_type != "worker":
+            # internally; firing on every worker would spam the user. Canary
+            # runs are synthetic and already recorded in the Canary tab.
+            if is_budget_exhausted and session.session_type not in ("worker", "canary"):
                 _broadcast_session_timeout_notification(session)
         finally:
             # This task owns the run until verification, retries and cleanup
