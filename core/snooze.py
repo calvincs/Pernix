@@ -2033,7 +2033,7 @@ Output valid JSON only. No markdown fences. /no_think"""
             finding = await asyncio.to_thread(check_fallback_burn)
             if not finding:
                 return
-            self._bump("fallback_burn_alerts")
+            self._bump("fallback_burn_alerts", 1)
             await asyncio.to_thread(
                 db.add_notification,
                 "",
