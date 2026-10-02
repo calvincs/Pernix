@@ -1232,11 +1232,14 @@ body[data-touch] .ce-fallback {
 .bell-panel .notif-item {
     padding: var(--sp-2) var(--sp-3);
 }
+.bell-panel .notif-item-title {
+    max-width: 65%;
+}
 .bell-panel .notif-item-type {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 65%;
+    min-width: 0;
 }
 .bell-panel .notif-item-text {
     word-break: break-word;
@@ -1245,9 +1248,24 @@ body[data-touch] .ce-fallback {
     flex-wrap: wrap;
     justify-content: flex-end;
 }
-.bell-panel .notif-item-buttons .btn-sm {
-    min-height: 36px;
+.bell-panel .notif-item-buttons .btn-sm,
+.bell-panel .bell-toolbar .btn-sm,
+.bell-panel .bell-more .btn-sm {
+    min-height: 44px;
     padding: var(--sp-2) var(--sp-3);
+}
+/* Every control in the panel is a thumb's target: the area chips and the
+   session chip take the same 44px floor (.modal-close already has it). */
+.bell-panel .bell-chip {
+    min-height: 44px;
+    min-width: 44px;
+    padding: var(--sp-1) var(--sp-3);
+    font-size: var(--text-xs);
+}
+.bell-panel .notif-session-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
 }
 .bell-panel .notif-status {
     width: 100%;
