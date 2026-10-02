@@ -646,4 +646,61 @@ tl_log(
     eval_count=1,
 )
 
+# --- notifications: one row per tier, a coalesced repeat, a dismissed row ------
+# check.py's bell pass finds these by title. Only the interrupt row may count
+# on the badge; the two open bell rows make the dot; the log row and the
+# dismissed row live in Activity only.
+db.add_notification(
+    main,
+    "Job failed: nightly-backup",
+    "exit 1 after 42s — the disk is full.",
+    "high",
+    category="jobs.failed",
+    tier="interrupt",
+    link={"kind": "session", "id": main},
+)
+db.add_notification(
+    "",
+    "Embeddings are down",
+    "Falling back to keyword search until the embed server answers.",
+    category="system.embeddings_down",
+    tier="bell",
+    link={"kind": "tab", "tab": "settings"},
+)
+for i in range(3):
+    db.add_notification(
+        "",
+        "Canary probe parked",
+        f"file-create parked after {i + 1} failed run(s).",
+        category="canary.parked",
+        tier="bell",
+        subject="file-create",
+        coalesce=True,
+        link={"kind": "tab", "tab": "canary"},
+    )
+db.add_notification(
+    "",
+    "Adaptive edits applied",
+    "2 prompt edits applied after the veto window.",
+    "low",
+    category="adaptive.edits_applied",
+    tier="log",
+    link={"kind": "tab", "tab": "learning"},
+)
+gone = db.add_notification(
+    "",
+    "MCP server boxpriv unreachable",
+    "Connection refused on :9100.",
+    category="system.mcp_down",
+    tier="bell",
+)
+db.dismiss_notification(gone)
+# The log row and the dismissed row are from yesterday, so Activity has two days.
+_yday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+with connect_sessions() as conn:
+    conn.execute(
+        "UPDATE notifications SET created_at = ? WHERE title IN (?, ?)",
+        (_yday, "Adaptive edits applied", "MCP server boxpriv unreachable"),
+    )
+
 print(json.dumps({"main": main, "long": long_sid, "parent": parent_sid, "scale": scale_id, "timeline": tl_sid}))
