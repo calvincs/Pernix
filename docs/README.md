@@ -23,6 +23,7 @@ How Pernix behaves day-to-day. Read the ones that match what you're trying to do
 - [guides/using-skills.md](guides/using-skills.md) — installing and invoking skills
 - [guides/workers.md](guides/workers.md) — spawning parallel sub-agents for multi-part work
 - [guides/scheduling-cron.md](guides/scheduling-cron.md) — recurring agents on a cron schedule
+- [guides/notifications.md](guides/notifications.md) — what interrupts you, what is only logged, and how to change it
 - [guides/recipes.md](guides/recipes.md) — runnable, copy-pasteable end-to-end examples
 
 ## I want to extend Pernix

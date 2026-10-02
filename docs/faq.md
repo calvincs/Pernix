@@ -184,6 +184,10 @@ There's no built-in coordination between instances — they're fully independent
 
 ## Authoring and customization
 
+### Why didn't I get a notification for X? / Why is the bell so quiet?
+
+On purpose. Only things that need you — a question, a failed job, a turn that stopped and needs a reply, a goal out of budget — interrupt you. Self-maintenance (skill and adaptive auto-applies, dream corrections, canary upkeep) is written to the **Activity** tab of the bell instead, where you can read it when you want; dismissing an item never deletes it. Everything is listed in [guides/notifications.md](guides/notifications.md), including how to promote or demote a whole area in Settings → Notifications.
+
 ### How do I make Pernix talk less / more / differently?
 
 Edit `data/agent/SOUL.md` — that's the agent's identity file, injected into every turn. Want it terse? Verbose? Opinionated about a domain? Just write it in.
@@ -211,7 +215,7 @@ Only when the agent makes a request that explicitly goes outbound:
 - LLM calls to OpenRouter (cloud) — every request you route through OpenRouter
 - Web search via Tavily
 - Page fetches via `browse_web` or `http_get`
-- Configured webhook (`notify_webhook_url`) when the agent uses `ask_user`
+- Configured webhook (`notify_webhook_url`) when the agent uses `ask_user` or raises an interrupt-tier notification (a failed job, a stopped turn — see [notifications](guides/notifications.md))
 
 Ollama inference, memory storage, and session DB all stay local. Settings and API keys are never sent to any LLM.
 

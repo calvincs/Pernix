@@ -1,5 +1,7 @@
 # Reflect and Snooze
 
+> **Notifications.** Every "notification" this page mentions goes through `core/notices.py` and lands in the tier its category is registered under — most self-maintenance receipts are *log* tier (the bell's Activity tab, never a badge); only things that need you interrupt. See [guides/notifications.md](../guides/notifications.md) for the full list.
+
 Two non-obvious subsystems that run alongside the agent loop:
 
 - **Reflect** — a quality-gate pass that runs after every turn, verifies whether the user's intent was actually fulfilled, and can trigger bounded retries if it wasn't.

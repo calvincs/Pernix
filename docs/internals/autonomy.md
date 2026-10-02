@@ -100,8 +100,9 @@ blown, emits `goal.budget_exceeded {reason}`, sets
 round is enough to bound the overshoot without paying for a DB read per
 round.
 
-**When a budget runs out**, the goal moves to `budget_limited` and a
-high-urgency notification is written and broadcast (`Goal #N budget-limited`,
+**When a budget runs out**, the goal moves to `budget_limited` and an
+interrupt-tier notification (`sessions.goal_budget`; a bell item in a cron
+session) is written and broadcast (`Goal #N budget-limited`,
 with the reason — e.g. `continuation budget spent (5/5)`). Token, time and
 continuation exhaustion all take the same path, and it fires once: later
 turns short-circuit on the goal no longer being `active`. Nothing fails
