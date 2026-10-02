@@ -19,6 +19,52 @@ from core.events import get_event_bus
 
 logger = logging.getLogger("pernix.notify")
 
+# Consecutive 401/403 answers from one endpoint before the user hears about it.
+_PUSH_REJECT_NOTICE_AFTER = 3
+
+
+def _vapid_subject_problem(subject: str) -> str:
+    """Why this VAPID subject is likely to be refused, or "" when it looks like a real contact."""
+    s = (subject or "").strip()
+    if not s:
+        return "is empty"
+    if "localhost" in s.lower():
+        return f"is {s!r}, which points at localhost"
+    if not s.lower().startswith(("mailto:", "https:")):
+        return f"is {s!r}, which is neither a mailto: nor an https: URL"
+    return ""
+
+
+def _warn_if_vapid_subject_suspect(subject: str) -> None:
+    # Apple answers a bad subject with 403 BadJwtToken on every push, which
+    # looks exactly like a dead phone unless someone says so at boot.
+    problem = _vapid_subject_problem(subject)
+    if problem:
+        logger.warning(
+            "vapid_subject %s; Apple and Google push services may reject every push (HTTP 403). "
+            "Set it to a real mailto: or https: contact.",
+            problem,
+        )
+
+
+def _notice_push_rejected(host: str, status: int | None, reason: str) -> None:
+    """Bell notice for a push service that keeps refusing our credentials. One call site, easy to reroute."""
+    from db import models as db
+
+    detail = f"HTTP {status} {reason}".strip()
+    try:
+        db.add_notification(
+            title=f"Push rejected by {host}",
+            body=(
+                f"{host} answered {detail}. Check vapid_subject in settings "
+                "(it must be a real mailto: or https: contact, not localhost)."
+            ),
+            urgency="normal",
+            dedup_key=f"push_rejected:{host}",
+        )
+    except Exception as e:
+        logger.warning("Could not record push-rejected notice: %s", e)
+
 
 class NotificationDispatcher:
     """Watches the global event bus and dispatches to notification handlers."""
@@ -27,6 +73,10 @@ class NotificationDispatcher:
         self._handlers: list = []
         self._task: asyncio.Task | None = None
         self._queue: asyncio.Queue | None = None
+        # endpoint -> consecutive 401/403 answers; a success or deletion clears it.
+        self._push_rejects: dict[str, int] = {}
+        # Endpoints already given their bell notice in this process.
+        self._push_reject_noticed: set[str] = set()
 
     def start(self) -> None:
         """Subscribe to the global bus and begin processing events."""
@@ -36,6 +86,7 @@ class NotificationDispatcher:
             self._handlers.append(self._send_webhook)
         if settings.vapid_private_key:
             self._handlers.append(self._send_web_push)
+            _warn_if_vapid_subject_suspect(settings.vapid_subject)
         self._task = asyncio.create_task(self._process_events())
         self._task.add_done_callback(self._on_task_done)
         logger.info("Notification dispatcher started (%d handler(s))", len(self._handlers))
@@ -110,7 +161,7 @@ class NotificationDispatcher:
             logger.warning("Webhook POST to %s failed: %s", url, e)
 
     async def _send_web_push(self, event: dict) -> None:
-        from core.push import send_push
+        from core.push import PushResult, endpoint_host, send_push
         from db import models as db
 
         subscriptions = db.get_push_subscriptions()
@@ -130,17 +181,42 @@ class NotificationDispatcher:
             title = event.get("title") or "Pernix"
             body = event.get("body") or ""
         session_id = event.get("source_session_id") or event.get("session_id") or ""
-        stale = []
+        gone = []
         for sub in subscriptions:
+            ep = sub.get("endpoint", "")
             try:
-                ok = await send_push(sub, title, body, session_id)
-                if not ok:
-                    stale.append(sub["endpoint"])
+                result = await send_push(sub, title, body, session_id)
             except Exception as e:
                 logger.warning("Web Push send failed: %s", e)
-        for ep in stale:
+                continue
+            if isinstance(result, bool):  # a bare bool (older fakes/callers): True = sent, False = gone
+                result = PushResult(ok=result, gone=not result)
+            if result.ok:
+                self._push_rejects.pop(ep, None)
+            elif result.gone:
+                gone.append(ep)
+            elif result.rejected:
+                self._note_push_rejected(ep, result)
+        for ep in gone:
+            self._push_rejects.pop(ep, None)
             db.delete_push_subscription(ep)
-            logger.info("Removed stale push subscription: %s…", ep[:40])
+            logger.info("Removed gone push subscription on %s", endpoint_host(ep))
+
+    def _note_push_rejected(self, endpoint: str, result) -> None:
+        """Count a 401/403 for this endpoint and raise one bell notice once it is clearly persistent.
+
+        The subscription is kept: a 401/403 is the push service refusing our
+        VAPID credentials, which a settings fix repairs without the phone
+        having to re-subscribe. Three in a row rules out a one-off blip.
+        """
+        from core.push import endpoint_host
+
+        count = self._push_rejects.get(endpoint, 0) + 1
+        self._push_rejects[endpoint] = count
+        if count < _PUSH_REJECT_NOTICE_AFTER or endpoint in self._push_reject_noticed:
+            return
+        self._push_reject_noticed.add(endpoint)
+        _notice_push_rejected(endpoint_host(endpoint), result.status, result.reason)
 
     @staticmethod
     def _post(url: str, payload: bytes) -> None:
