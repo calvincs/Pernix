@@ -77,7 +77,8 @@ _CANARY = {"canary": {"name": "tar-archive-loop-no-overwrite", "prompt": "p"}}
 
 
 def _latest_notification() -> dict:
-    return max(db.get_notifications(), key=lambda n: n["created_at"])
+    # v42: adaptive.queue_full is a log-tier category, so it lives in the activity log, not the bell.
+    return max(db.list_notifications("log"), key=lambda n: n["created_at"])
 
 
 # ---------------------------------------------------------------------------

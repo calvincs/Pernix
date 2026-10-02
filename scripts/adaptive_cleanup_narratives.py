@@ -81,6 +81,7 @@ def main() -> int:
     ap.add_argument("--yes", action="store_true", help="required with --apply")
     args = ap.parse_args()
 
+    from core import notices
     from db import models as db
 
     entries = db.adaptive_list_entries(status="active", limit=200)
@@ -125,16 +126,17 @@ def main() -> int:
         except Exception as exc:  # keep sweeping — one refusal must not stop the pass
             print(f"failed to retire {e['id']}: {exc}", file=sys.stderr)
     try:
-        db.add_notification(
-            title=f"Adaptive cleanup: {len(retired)} narrative entr{'y' if len(retired) == 1 else 'ies'} retired",
-            body=(
+        notices.notify(
+            "adaptive.cleanup",
+            f"Adaptive cleanup: {len(retired)} narrative entr{'y' if len(retired) == 1 else 'ies'} retired",
+            (
                 "One-time sweep of pre-lint content (descriptive findings and duplicate hints "
                 "that rendered into every prompt). Each deletion is journaled with a full "
                 "snapshot — roll any of them back from the Adaptive tab.\n"
                 + "\n".join(f"• {i}" for i in retired[:20])
                 + (f"\n(+{len(retired) - 20} more)" if len(retired) > 20 else "")
             ),
-            urgency="normal",
+            link={"kind": "tab", "tab": "learning"},
         )
     except Exception as exc:
         print(f"notification failed: {exc}", file=sys.stderr)

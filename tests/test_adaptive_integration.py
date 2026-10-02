@@ -621,7 +621,8 @@ async def test_adaptive_step_drains_and_enqueues_sweeps(monkeypatch):
 
     assert db.adaptive_get_entry("drained") is not None
     assert swept == [r["batch_id"]]
-    assert any("auto-applied" in (n.get("title") or "") for n in db.get_notifications())
+    # v42: "edits auto-applied" is a log-tier category, so it lives in the activity log, not the bell.
+    assert any("auto-applied" in (n.get("title") or "") for n in db.list_notifications("log"))
 
 
 async def test_adaptive_step_skips_sweep_and_notify_when_nothing_applied(monkeypatch):
@@ -652,7 +653,7 @@ async def test_adaptive_step_skips_sweep_and_notify_when_nothing_applied(monkeyp
     assert db.adaptive_get_batch(r["batch_id"])["status"] == "rejected"
     assert swept == []
     assert runner._stats.get("adaptive_batches_applied") is None
-    assert not any("auto-applied" in (n.get("title") or "") for n in db.get_notifications())
+    assert not any("auto-applied" in (n.get("title") or "") for n in db.list_notifications("log"))
 
 
 # ---------------------------------------------------------------------------

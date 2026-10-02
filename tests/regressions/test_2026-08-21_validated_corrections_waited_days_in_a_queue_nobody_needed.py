@@ -61,7 +61,8 @@ async def test_corrections_apply_on_promotion_even_with_the_queue_full(monkeypat
     assert db.adaptive_count_pending_proposals() == 1  # the unrelated pending row is untouched
     assert len(journal) == 2 and all("memory correction applied on validation" in j for j in journal)
 
-    notes = db.get_notifications()
+    # v42: dream.corrections_applied is a log-tier category, so it lives in the activity log, not the bell.
+    notes = db.list_notifications("log")
     assert len(notes) == 1
     assert notes[0]["title"] == "Dream: 2 memory correction(s) applied"
     assert "no veto window" in notes[0]["body"] and "test.paths" in notes[0]["body"]
@@ -69,7 +70,7 @@ async def test_corrections_apply_on_promotion_even_with_the_queue_full(monkeypat
     # Same day, another pass: journal yes, second notification no.
     _validated("M9 is stale too", file="test.more")
     assert await promote_validated(limit=10) == 1
-    assert len(journal) == 3 and len(db.get_notifications()) == 1
+    assert len(journal) == 3 and len(db.list_notifications("log")) == 1
 
 
 def test_auto_applied_is_a_documented_status_with_its_own_provenance(monkeypatch):
