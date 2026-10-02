@@ -3157,7 +3157,10 @@ async def _end_turn_on_stream_error(
     # reflect, so nothing downstream ever says what happened (field case
     # ae952f40e3d1: 61 rounds of work ended mid-flight with no final message,
     # no verdict, no notification — the session just went quiet). Leave a
-    # durable trace a human will actually see.
+    # durable trace a human will actually see. Canary and worker sessions are
+    # not the user's conversations, so they leave no bell item.
+    if getattr(session, "session_type", "normal") in ("canary", "worker"):
+        return
     try:
         sess_row = await asyncio.to_thread(db.get_session, session_id)
         title = (sess_row or {}).get("title") or session_id[:12]

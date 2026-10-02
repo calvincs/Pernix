@@ -352,6 +352,16 @@ def _broadcast_reflect_notification(
     from core.events import get_event_bus
     from sessions.manager import get_manager
 
+    # Canary runs are synthetic: the Canary tab already records each outcome,
+    # and a push for a test run (17 of 19 high-urgency pushes in the 17 days
+    # before this guard) trains the user to ignore the phone. Workers report
+    # to their orchestrator, which decides what the user needs to see.
+    if session.get("session_type") in ("canary", "worker"):
+        logger.info(
+            "Reflect notification suppressed for %s session %s: %s", session.get("session_type"), session_id[:12], title
+        )
+        return
+
     session_title = session.get("title", "")
     label = f"{session_title}: {title}" if session_title else title
 
