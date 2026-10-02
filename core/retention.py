@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from config import settings
+from core import notices
 from core.pools import run_background
 from db import models as db
 
@@ -421,13 +422,15 @@ async def nudge_stale_canaries(max_age_days: int = 90) -> int:
             key = f"canary_stale_notified:{c.name}:{c.last_reviewed}"
             if db.get_snooze_state(key):
                 continue
-            db.add_notification(
-                title=f"Canary '{c.name}' is stale",
-                body=(
+            notices.notify(
+                "canary.stale",
+                f"Canary '{c.name}' is stale",
+                (
                     f"last_reviewed {c.last_reviewed} is over {max_age_days} days old. Re-verify its "
                     f"gates still reflect a daily-driver task, then bump last_reviewed."
                 ),
-                urgency="normal",
+                subject=c.name,
+                link={"kind": "tab", "tab": "canary"},
             )
             db.set_snooze_state(key, "1")
             raised += 1

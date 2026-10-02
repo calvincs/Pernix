@@ -187,6 +187,11 @@ async def patch_canary(name: str, body: dict = {}):
     ok = await _asyncio.to_thread(_rewrite_frontmatter, d.path, {"parked": parked})
     if not ok:
         raise HTTPException(500, detail="frontmatter rewrite failed — see logs")
+    if not parked:
+        # The user unparked it, which answers the "Canary parked" bell item.
+        from core import notices
+
+        notices.resolve("canary.parked", name)
     return {"name": name, "parked": parked, "changed": True}
 
 
