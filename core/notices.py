@@ -60,7 +60,10 @@ class Category:
     legacy_emit: str = "none"
 
 
-_NOT_FOR_SYNTHETIC = {"canary": "log", "worker": "log", "snooze": "log"}
+# Canary runs are synthetic (the Canary tab records each outcome) and a worker
+# reports to its orchestrator, so their reflect/timeout/stream-error alerts are
+# not recorded at all; a background (snooze) session's go to the activity log.
+_NOT_FOR_SYNTHETIC = {"canary": "drop", "worker": "drop", "snooze": "log"}
 
 CATEGORIES: dict[str, Category] = {
     # --- the agent talking to the user -------------------------------------

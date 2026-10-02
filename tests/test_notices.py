@@ -41,8 +41,9 @@ def test_default_tier_and_session_type_map():
     assert notices.resolve_tier("sessions.reflect_attention") == "interrupt"
     assert notices.resolve_tier("sessions.reflect_attention", "normal") == "interrupt"
     assert notices.resolve_tier("sessions.reflect_attention", "cron") == "bell"
-    assert notices.resolve_tier("sessions.reflect_attention", "canary") == "log"
-    assert notices.resolve_tier("sessions.reflect_attention", "worker") == "log"
+    assert notices.resolve_tier("sessions.reflect_attention", "canary") == "drop"
+    assert notices.resolve_tier("sessions.reflect_attention", "worker") == "drop"
+    assert notices.resolve_tier("sessions.reflect_attention", "snooze") == "log"
 
 
 def test_category_override_beats_area_override_and_bad_values_are_ignored(monkeypatch):
@@ -87,15 +88,17 @@ def test_interrupt_tier_reaches_sse_and_the_bus(wires):
     assert bus.events[0]["urgency"] == "high"
 
 
-def test_canary_session_reflect_is_a_log_row_not_an_interrupt(wires):
+def test_canary_session_reflect_is_recorded_nowhere(wires):
     sse, bus = wires
-    notices.notify("sessions.reflect_attention", "Canary: x: Needs attention", session_type="canary")
+    assert notices.notify("sessions.reflect_attention", "Canary: x: Needs attention", session_type="canary") == ""
     assert sse.events == [] and bus.events == []
-    assert db.list_notifications("log")[0]["tier"] == "log"
+    assert db.list_notifications("log") == []
 
 
 def test_session_type_is_looked_up_from_the_session_row(wires, monkeypatch):
     monkeypatch.setattr(db, "get_session", lambda sid: {"session_type": "canary"})
+    assert notices.notify("sessions.timeout", "Session ran out of LLM time", session_id="abc") == ""
+    monkeypatch.setattr(db, "get_session", lambda sid: {"session_type": "snooze"})
     notices.notify("sessions.timeout", "Session ran out of LLM time", session_id="abc")
     assert db.list_notifications("log")[0]["tier"] == "log"
 
