@@ -170,9 +170,22 @@ function _b64Key(buffer) {
 }
 
 /**
+ * Whether a `dialog.notification` event should raise an OS notification.
+ * Only the interrupt tier does — a bell row is a dot, a log row is the
+ * activity log, and a `resolved` refresh (the cause cleared) carries no
+ * title at all. An event with no `tier` is from a server older than v42,
+ * where every notification alerted; keep doing that for it.
+ */
+export function shouldAlert(data) {
+    if (!data || data.resolved) return false;
+    return data.tier === undefined || data.tier === null || data.tier === 'interrupt';
+}
+
+/**
  * Connect to the global notification SSE stream.
  * This runs on page load — no session selection required.
- * Handles dialog.notification events and shows browser notifications.
+ * Handles dialog.notification events: every one refreshes the bell; only
+ * interrupt-tier ones show a browser notification (see shouldAlert).
  */
 export function connectGlobalNotifications() {
     _wantsGlobalConnection = true;
@@ -184,10 +197,12 @@ export function connectGlobalNotifications() {
     _globalSource.addEventListener('dialog.notification', (e) => {
         try {
             const data = JSON.parse(e.data);
-            showNotification(data.title || 'Pernix', data.body || '', {
-                session_id: data.source_session_id || null,
-                urgency: data.urgency || 'normal',
-            });
+            if (shouldAlert(data)) {
+                showNotification(data.title || 'Pernix', data.body || '', {
+                    session_id: data.source_session_id || null,
+                    urgency: data.urgency || 'normal',
+                });
+            }
             window.dispatchEvent(new CustomEvent('pernix:bell-update'));
         } catch { /* ignore parse errors */ }
     });
