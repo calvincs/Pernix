@@ -13,6 +13,7 @@ router = APIRouter(tags=["health"])
 @router.get("/api/health")
 async def health():
     from api.app import BUILD_ID
+    from core.push import push_stats
     from maintenance import get_maintenance
     from sessions.manager import get_manager
 
@@ -31,6 +32,9 @@ async def health():
         "sessions_active": manager.busy_count(),
         "sessions_loaded": manager.active_count(),
         "maintenance": maint.get_stats(),
+        # Web Push outcomes since boot. push_rejected climbing while
+        # push_sent_ok stays flat is our VAPID credentials being refused.
+        "push": push_stats(),
     }
 
 
