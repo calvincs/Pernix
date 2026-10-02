@@ -358,7 +358,8 @@ def test_nothing_writes_notifications_except_the_policy_layer():
     allowed = {"core/notices.py"}
     offenders = []
     for rel, text in _py_sources():
-        if rel.parts[0] == "db" or str(rel) in allowed:
+        # tools/ui-gate seeds fixture rows with explicit tiers — test tooling, not a producer.
+        if rel.parts[0] in ("db", "tools") or str(rel) in allowed:
             continue
         if re.search(r"\badd_notification\(", text):
             offenders.append(str(rel))
