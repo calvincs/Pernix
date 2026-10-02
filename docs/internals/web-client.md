@@ -527,6 +527,43 @@ show a finished turn.
 
 ---
 
+## The notification bell
+
+`components/notification-bell.js` owns the bell in the status bar and its
+panel. The badge is a **number** for what needs the user — open questions
+(`/api/questions`) plus `needs_you` from `/api/notifications/counts` (open
+`interrupt` rows) — and a **dot** when the number is zero but `bell` (open
+quiet rows) is not. `log` rows never touch it. The badge polls only the two
+cheap endpoints: every 15 s with the panel closed, every 5 s with it open, and
+at once on `pernix:bell-update`.
+
+The panel has two tabs (`role="tablist"`, arrow keys move between them):
+
+- **Needs you** — questions, then open interrupt rows, then open bell rows,
+  each newest first. Every row has Dismiss; **Clear** calls
+  `POST /api/notifications/dismiss-all` (questions stay). Dismiss is soft.
+- **Activity** — `view=log`, a day at a time under sticky day headers, with
+  area filter chips built from the areas seen, `×N` on a row that folded
+  repeats, dismissed/resolved rows in a quiet style, and **Load more** paging
+  with `before`. Opening the tab calls `read-all`, but the header keeps
+  saying "N new since your last visit" (and the rows keep their New tag) for
+  the rest of that visit; **Mark all read** clears it.
+
+A row's `link` becomes an Open button: a session opens through the same
+`selectSession` the session chip uses; a tab opens its owner —
+`openFilePanel({tab})` for `learning` (→ `adaptive`), `canary`, `skills`,
+`jobs`, `mcp` and `dream` (→ `memory`), `openSettings()` for `settings`.
+
+`notifications.js` raises an OS notification for a `dialog.notification`
+event only when `shouldAlert()` says so: `tier === "interrupt"`, or no tier at
+all (a pre-v42 server). Bell and log rows and `resolved` refreshes only
+dispatch `pernix:bell-update`.
+
+The UI gate's `bell_tiers` pass (last in m2, because it dismisses a row and
+marks the log read) asserts the badge, the dot, both tabs, soft dismiss, Mark
+all read, the area filter, and that the panel fits 375px with 44px targets on
+touch; `seed.py` writes one row of each tier, a ×3 repeat and a dismissed row.
+
 ## Gotchas
 
 - **Deploy skew.** `static/sw.js` precaches the stylesheets and modules by
