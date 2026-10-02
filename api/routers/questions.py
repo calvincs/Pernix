@@ -144,46 +144,78 @@ async def dismiss_question(question_id: str):
 
 
 @router.get("/api/notifications")
-async def list_notifications():
-    notifications = db.get_notifications()
+async def list_notifications(view: str = "bell", area: str = "", before: str = "", limit: int = 200):
+    """view=bell (default, what needs a look) or view=log (the activity log:
+    every row in every state, newest first, paged with `before`)."""
+    if view not in ("bell", "log"):
+        raise HTTPException(400, detail="view must be 'bell' or 'log'")
+    limit = max(1, min(int(limit), 500))
+    notifications = await asyncio.to_thread(db.list_notifications, view, area or None, before or None, limit)
     return {"notifications": notifications}
+
+
+@router.get("/api/notifications/counts")
+async def notification_counts():
+    """Cheap badge numbers: needs_you (open interrupt rows), bell (open quiet
+    rows), unread (never looked at, any tier)."""
+    return await asyncio.to_thread(db.notification_counts)
+
+
+@router.post("/api/notifications/dismiss-all")
+async def dismiss_all_notifications():
+    n = await asyncio.to_thread(db.dismiss_all_notifications)
+    return {"status": "dismissed", "count": n}
+
+
+@router.post("/api/notifications/read-all")
+async def read_all_notifications():
+    n = await asyncio.to_thread(db.mark_notifications_read, None)
+    return {"status": "read", "count": n}
 
 
 @router.post("/api/notifications/{notification_id}/dismiss")
 async def dismiss_notification(notification_id: str):
-    db.delete_notification(notification_id)
+    # Soft: the row leaves the bell and stays in the activity log.
+    await asyncio.to_thread(db.dismiss_notification, notification_id)
     return {"status": "dismissed"}
+
+
+@router.post("/api/notifications/{notification_id}/read")
+async def read_notification(notification_id: str):
+    await asyncio.to_thread(db.mark_notifications_read, [notification_id])
+    return {"status": "read"}
 
 
 @router.post("/api/notify")
 async def send_notification(body: dict):
-    """Send a browser push notification (stores in DB + broadcasts via SSE)."""
+    """Send a notification from an external caller. Routed through the tier
+    policy: high/urgent urgency is an interrupt (badge + push), anything else is
+    a quiet bell item."""
+    from core import notices
+
     title = body.get("title", "Pernix")
     msg = body.get("body", "")
     urgency = body.get("urgency", "normal")
     session_id = body.get("session_id")
 
-    nid = db.add_notification(session_id=session_id or "", title=title, body=msg, urgency=urgency)
+    category = "external.message_urgent" if urgency in ("high", "urgent") else "external.message"
+    nid = await asyncio.to_thread(notices.notify, category, title, msg, session_id=session_id or "")
+    if session_id and nid:
+        from sessions.manager import get_manager
 
-    from sessions.manager import get_manager
-
-    manager = get_manager()
-
-    event_payload = {
-        "type": "dialog.notification",
-        "notification_id": nid,
-        "title": title,
-        "body": msg,
-        "urgency": urgency,
-        "source_session_id": session_id,
-    }
-
-    if session_id:
-        manager.emit(session_id, event_payload)
-
-    reached = manager.broadcast(event_payload)
-
-    return {"status": "sent", "notification_id": nid, "session_id": session_id, "clients_reached": reached}
+        get_manager().emit(
+            session_id,
+            {
+                "type": "dialog.notification",
+                "notification_id": nid,
+                "title": title,
+                "body": msg,
+                "urgency": urgency,
+                "source_session_id": session_id,
+                "tier": "interrupt" if category.endswith("_urgent") else "bell",
+            },
+        )
+    return {"status": "sent", "notification_id": nid, "session_id": session_id}
 
 
 @router.get("/api/notifications/events")

@@ -2683,12 +2683,24 @@ def delete_question(question_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+NOTIFICATION_TIERS = ("interrupt", "bell", "log")
+# A row is "open" until the user dismisses it or its cause resolves.
+_NOTIFICATION_OPEN = "dismissed_at IS NULL AND resolved_at IS NULL"
+_NOTIFICATION_MAX_ROWS = 5000
+
+
 def add_notification(
     session_id: str = "",
     title: str = "",
     body: str = "",
     urgency: str = "normal",
     dedup_key: str = "",
+    *,
+    category: str = "legacy",
+    tier: str = "bell",
+    subject: str = "",
+    link: dict | None = None,
+    coalesce: bool = False,
 ) -> str:
     """Insert a notification row.
 
@@ -2698,32 +2710,151 @@ def add_notification(
     notification of a day is byte-identical to the pre-dedup behavior; only
     the repeats are swallowed (returned id is "" then). Empty key = always
     insert (the old behavior).
+
+    `category`/`tier`/`subject`/`link` come from core/notices.py, the one
+    caller that should set them. `coalesce=True` folds a repeat of an OPEN
+    (category, subject) row into that row — new text, `occurrences` + 1, unread
+    again — instead of stacking a second one.
     """
     if dedup_key:
         marker = f"notify_dedup:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}:{dedup_key}"
         if get_snooze_state(marker):
             return ""
         set_snooze_state(marker, "1")
-    nid = _new_id()
+    now = _now()
+    link_json = json.dumps(link) if link else None
     with connect_sessions() as conn:
+        if coalesce and subject:
+            row = conn.execute(
+                f"SELECT id FROM notifications WHERE category = ? AND subject = ? AND {_NOTIFICATION_OPEN} "
+                "ORDER BY created_at DESC LIMIT 1",
+                (category, subject),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE notifications SET title = ?, body = ?, urgency = ?, tier = ?, updated_at = ?, "
+                    "occurrences = occurrences + 1, read_at = NULL, link_json = COALESCE(?, link_json) WHERE id = ?",
+                    (title, body, urgency, tier, now, link_json, row["id"]),
+                )
+                return row["id"]
+        nid = _new_id()
         conn.execute(
-            """INSERT INTO notifications (id, session_id, title, body, urgency, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (nid, session_id, title, body, urgency, _now()),
+            """INSERT INTO notifications
+                   (id, session_id, title, body, urgency, created_at, category, tier, subject, link_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (nid, session_id, title, body, urgency, now, category, tier, subject, link_json),
         )
     return nid
 
 
-def get_notifications(limit: int = 200) -> list[dict]:
-    """Newest first, bounded — the bell renders a list, not an archive."""
+def _notification_row(row) -> dict:
+    d = dict(row)
+    raw = d.pop("link_json", None)
+    try:
+        d["link"] = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        d["link"] = None
+    cat = d.get("category") or "legacy"
+    d["area"] = cat.split(".", 1)[0] if "." in cat else cat
+    return d
+
+
+def list_notifications(
+    view: str = "bell", area: str | None = None, before: str | None = None, limit: int = 50
+) -> list[dict]:
+    """Newest first, bounded. view='bell' = open interrupt/bell rows (what needs
+    a look); view='log' = every row in every state (the activity log)."""
+    where, params = [], []
+    if view == "bell":
+        where.append(f"tier IN ('interrupt', 'bell') AND {_NOTIFICATION_OPEN}")
+    if area:
+        where.append("(category = ? OR category LIKE ?)")
+        params += [area, f"{area}.%"]
+    if before:
+        where.append("created_at < ?")
+        params.append(before)
+    sql = "SELECT * FROM notifications"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
     with connect_sessions() as conn:
-        rows = conn.execute(
-            "SELECT * FROM notifications ORDER BY created_at DESC LIMIT ?", (max(1, int(limit)),)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return [_notification_row(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def get_notifications(limit: int = 200) -> list[dict]:
+    """The bell's contents, newest first, bounded — the bell renders a list, not an archive."""
+    return list_notifications("bell", limit=limit)
+
+
+def notification_counts() -> dict:
+    """needs_you = open interrupt rows (the badge, alongside open questions);
+    bell = open quiet rows (a dot); unread = rows never looked at (Activity)."""
+    with connect_sessions() as conn:
+        row = conn.execute(f"""SELECT
+                   COALESCE(SUM(CASE WHEN tier = 'interrupt' AND {_NOTIFICATION_OPEN} THEN 1 ELSE 0 END), 0) AS needs_you,
+                   COALESCE(SUM(CASE WHEN tier = 'bell' AND {_NOTIFICATION_OPEN} THEN 1 ELSE 0 END), 0) AS bell,
+                   COALESCE(SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END), 0) AS unread
+               FROM notifications""").fetchone()
+        return {"needs_you": row["needs_you"], "bell": row["bell"], "unread": row["unread"]}
+
+
+def dismiss_notification(notification_id: str) -> bool:
+    """Soft dismiss: the row leaves the bell and stays in the activity log."""
+    now = _now()
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "UPDATE notifications SET dismissed_at = ?, read_at = COALESCE(read_at, ?) "
+            "WHERE id = ? AND dismissed_at IS NULL",
+            (now, now, notification_id),
+        )
+        return cur.rowcount > 0
+
+
+def dismiss_all_notifications() -> int:
+    """Clear the bell (every open interrupt/bell row); the log keeps them."""
+    now = _now()
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "UPDATE notifications SET dismissed_at = ?, read_at = COALESCE(read_at, ?) "
+            f"WHERE tier IN ('interrupt', 'bell') AND {_NOTIFICATION_OPEN}",
+            (now, now),
+        )
+        return cur.rowcount
+
+
+def mark_notifications_read(ids: list[str] | None = None) -> int:
+    """Mark rows read (all unread rows when ids is None)."""
+    now = _now()
+    with connect_sessions() as conn:
+        if ids is None:
+            cur = conn.execute("UPDATE notifications SET read_at = ? WHERE read_at IS NULL", (now,))
+        else:
+            ids = [str(i) for i in ids][:500]
+            if not ids:
+                return 0
+            marks = ",".join("?" * len(ids))
+            cur = conn.execute(
+                f"UPDATE notifications SET read_at = ? WHERE read_at IS NULL AND id IN ({marks})", (now, *ids)
+            )
+        return cur.rowcount
+
+
+def resolve_notifications(category: str, subject: str = "") -> int:
+    """The cause went away: close open rows of this category (and subject,
+    when given) so they leave the bell without the user clicking."""
+    now = _now()
+    sql = f"UPDATE notifications SET resolved_at = ? WHERE category = ? AND {_NOTIFICATION_OPEN}"
+    params: list = [now, category]
+    if subject:
+        sql += " AND subject = ?"
+        params.append(subject)
+    with connect_sessions() as conn:
+        return conn.execute(sql, params).rowcount
 
 
 def delete_notification(notification_id: str) -> None:
+    """Hard delete (tests, retention). The API dismisses softly instead."""
     with connect_sessions() as conn:
         conn.execute("DELETE FROM notifications WHERE id = ?", (notification_id,))
 
@@ -2732,12 +2863,21 @@ def prune_notifications(retention_days: int) -> int:
     """Delete notifications older than the retention window. Returns count.
 
     Until v3.1 nothing pruned this table — it only ever shrank by manual
-    dismiss clicks while idle-loop producers refilled it on a cadence.
+    dismiss clicks while idle-loop producers refilled it on a cadence. Since
+    v42 Dismiss keeps the row (it is the activity log), so this is the only
+    thing that bounds it: the age cutoff, plus a hard row cap. An OPEN
+    interrupt row is never pruned — it is still waiting on the user.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))).isoformat()
+    keep = f"NOT (tier = 'interrupt' AND {_NOTIFICATION_OPEN})"
     with connect_sessions() as conn:
-        cur = conn.execute("DELETE FROM notifications WHERE created_at < ?", (cutoff,))
-        return cur.rowcount
+        deleted = conn.execute(f"DELETE FROM notifications WHERE created_at < ? AND {keep}", (cutoff,)).rowcount
+        deleted += conn.execute(
+            f"DELETE FROM notifications WHERE {keep} AND id NOT IN "
+            "(SELECT id FROM notifications ORDER BY created_at DESC, id DESC LIMIT ?)",
+            (_NOTIFICATION_MAX_ROWS,),
+        ).rowcount
+        return deleted
 
 
 # ---------------------------------------------------------------------------
