@@ -887,7 +887,8 @@ def test_promotion_health_alarms_on_stalled_validated_queue():
     with connect_sessions() as conn:
         conn.execute("UPDATE dream_hypotheses SET created_at = ? WHERE id = ?", (backdated, hid))
     _check_promotion_health()
-    titles = [n.get("title", "") for n in db.get_notifications()]
+    # v42: dream.promotion_stalled is a log-tier category, so it lives in the activity log, not the bell.
+    titles = [n.get("title", "") for n in db.list_notifications("log")]
     assert any("not reaching promotion" in t for t in titles)
 
 
@@ -897,5 +898,5 @@ def test_promotion_health_quiet_on_fresh_validated_rows():
     from core.dream import _check_promotion_health
 
     _check_promotion_health()
-    titles = [n.get("title", "") for n in db.get_notifications()]
+    titles = [n.get("title", "") for n in db.list_notifications("log")]
     assert not any("not reaching promotion" in t for t in titles)

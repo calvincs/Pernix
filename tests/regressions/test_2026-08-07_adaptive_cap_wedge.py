@@ -66,7 +66,8 @@ def _fill_routing_hints(n: int, source: str = "refine") -> None:
 def test_cap_rejection_notifies_rather_than_only_logging(monkeypatch):
     monkeypatch.setattr(settings, "adaptive_max_entries_per_kind", 3)
     _fill_routing_hints(3)
-    before = len(db.get_notifications())
+    # v42: adaptive.cap_reached is a log-tier category, so it lives in the activity log, not the bell.
+    before = len(db.list_notifications("log"))
 
     result = queue_edits(
         [
@@ -84,7 +85,7 @@ def test_cap_rejection_notifies_rather_than_only_logging(monkeypatch):
 
     assert applied["applied"] == []
     assert CAP_REJECTION_MARKER in applied["rejected"][0]["reason"]
-    notes = db.get_notifications()
+    notes = db.list_notifications("log")
     assert len(notes) == before + 1
     assert "cap" in notes[0]["title"].lower()
     assert "routing_hint" in notes[0]["body"]
@@ -109,7 +110,7 @@ def test_a_normal_rejection_does_not_notify(monkeypatch):
             "updated_at": "2026-01-01T00:00:00+00:00",
         }
     )
-    before = len(db.get_notifications())
+    before = len(db.list_notifications("log"))
     result = queue_edits(
         [
             {
@@ -126,7 +127,7 @@ def test_a_normal_rejection_does_not_notify(monkeypatch):
     )
     applied = apply_batch(result["batch_id"])
     assert applied["applied"] == []
-    assert len(db.get_notifications()) == before
+    assert len(db.list_notifications("log")) == before
 
 
 # ---------------------------------------------------------------------------

@@ -47,9 +47,12 @@ import logging
 import math
 
 from config import settings
+from core import notices
 from db import models as db
 
 logger = logging.getLogger("pernix.adaptive")
+
+_LEARNING_TAB = {"kind": "tab", "tab": "learning"}
 
 
 def _flaky_tasks() -> set[str]:
@@ -327,6 +330,8 @@ def _expire_stale_suspect(batch: dict, actions: list[dict]) -> bool:
         flagged_reason=reason + f" [auto-cleared: passive-signal flag aged past {ttl}d with no confirmation]",
     )
     actions.append({"batch_id": bid, "action": "suspect_expired", "detail": reason})
+    # No longer suspect, so no longer something the bell should hold open.
+    notices.resolve("adaptive.tripwire_suspect", bid)
     return True
 
 
@@ -438,10 +443,12 @@ def evaluate_tripwire() -> list[dict]:
                 db.adaptive_update_batch(bid, status="suspect", flagged_reason=details)
                 db.set_snooze_state(f"adaptive_suspect_since:{bid}", _now_iso())
                 actions.append({"batch_id": bid, "action": "flagged", "detail": details})
-                db.add_notification(
-                    title="Adaptive tripwire: batch flagged suspect",
-                    body=f"Batch {bid}: {details}. Review in the Adaptive panel.",
-                    urgency="high",
+                notices.notify(
+                    "adaptive.tripwire_suspect",
+                    "Adaptive tripwire: batch flagged suspect",
+                    f"Batch {bid}: {details}. Review in the Adaptive panel.",
+                    subject=bid,
+                    link=_LEARNING_TAB,
                 )
                 why = ""
                 if settings.adaptive_auto_rollback and canary_confirmed:
@@ -453,17 +460,25 @@ def evaluate_tripwire() -> list[dict]:
 
                     rollback(batch_id=bid, actor="tripwire")
                     actions.append({"batch_id": bid, "action": "auto_rolled_back", "detail": details})
-                    db.add_notification(
-                        title="Adaptive tripwire: batch auto-rolled-back",
-                        body=f"Batch {bid} rolled back on {why}: {details}",
-                        urgency="high",
+                    notices.notify(
+                        "adaptive.tripwire_rolled_back",
+                        "Adaptive tripwire: batch auto-rolled-back",
+                        f"Batch {bid} rolled back on {why}: {details}",
+                        subject=bid,
+                        link=_LEARNING_TAB,
                     )
+                    # The rollback settles what the suspect item asked about;
+                    # the rolled-back item now carries the story.
+                    notices.resolve("adaptive.tripwire_suspect", bid)
             elif not regressed and batch["status"] == "suspect" and (canary is not None or pm is not None):
                 # A subsequent clean comparison clears the flag.
                 from db.models import _now as _now_fn
 
                 db.adaptive_update_batch(bid, status="applied", cleared_at=_now_fn())
                 actions.append({"batch_id": bid, "action": "cleared", "detail": details})
+                # The suspect bell item answered a question the evidence has
+                # now answered too — it leaves the bell by itself.
+                notices.resolve("adaptive.tripwire_suspect", bid)
             elif canary is None and batch["status"] == "applied":
                 # Nothing testified, and past the window nothing ever will.
                 _settle_unjudged(batch, applied_at, actions)

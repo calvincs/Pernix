@@ -37,6 +37,7 @@ import logging
 import time
 
 from config import settings
+from core import notices
 from db import models as db
 
 logger = logging.getLogger("pernix.dream")
@@ -185,9 +186,10 @@ def _announce_applied_corrections(applied: list[dict]) -> None:
     try:
         if db.get_snooze_state(marker):
             return
-        db.add_notification(
-            title=f"Dream: {len(applied)} memory correction(s) applied",
-            body=(
+        notices.notify(
+            "dream.corrections_applied",
+            f"Dream: {len(applied)} memory correction(s) applied",
+            (
                 "Validated dream findings now write their corrective entry when they are promoted — no "
                 "veto window, because a correction is additive (the disputed entries stay; recall surfaces "
                 "the correction beside them). Undo one by deleting the entry tagged dream:<id> in that "
@@ -195,7 +197,7 @@ def _announce_applied_corrections(applied: list[dict]) -> None:
                 + "\n".join(f"• {line}" for line in lines[:12])
                 + (f"\n(+{len(lines) - 12} more in the journal)" if len(lines) > 12 else "")
             ),
-            urgency="normal",
+            link={"kind": "tab", "tab": "dream"},
         )
         db.set_snooze_state(marker, "1")
     except Exception as e:

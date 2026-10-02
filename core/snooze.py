@@ -40,9 +40,13 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from config import settings
+from core import notices
 from core.pools import run_background
 
 logger = logging.getLogger("pernix.snooze")
+
+# Where the adaptive-layer notices send their "open" button.
+_LEARNING_TAB = {"kind": "tab", "tab": "learning"}
 
 # Activity 13c bound: max pending memory_stale hypotheses the skill-change
 # sweep may hold open at once (its own origin only — deliberately NOT the
@@ -1010,8 +1014,6 @@ Output valid JSON only. No markdown fences. /no_think"""
         Announces applied changes as a notification so a veto-after-the-fact
         is one file restore away.
         """
-        from db import models as db
-
         try:
             from core.skills.proposals import auto_apply_ripe_proposals
 
@@ -1026,9 +1028,10 @@ Output valid JSON only. No markdown fences. /no_think"""
         self._bump("skill_proposals_auto_applied", len(applied))
         lines = out.get("summaries") or [str(p) for p in applied]
         try:
-            db.add_notification(
-                title="Skill proposals auto-applied",
-                body=(
+            notices.notify(
+                "skills.proposals_auto_applied",
+                "Skill proposals auto-applied",
+                (
                     f"{len(applied)} skill proposal(s) past the "
                     f"{settings.skill_proposal_auto_apply_after_hours}h veto window "
                     "were validated and applied to SKILL.md.\n"
@@ -1037,7 +1040,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                     "back; reject a pending proposal in the Skills tab to veto it "
                     "inside the window."
                 ),
-                urgency="normal",
+                link={"kind": "tab", "tab": "skills"},
             )
         except Exception as e:
             logger.debug("Snooze: skill auto-apply notification failed: %s", e)
@@ -1818,7 +1821,11 @@ Output valid JSON only. No markdown fences. /no_think"""
         post-batch sweeps → evaluate the tripwire. Each stage guarded; a
         failure never kills the cycle."""
         if _mutation_blocked():
-            return  # global prompt/policy mutations wait for genuine idle
+            # Global prompt/policy mutations wait for genuine idle — but the
+            # review rollup only reads, and a human decision made since the
+            # last pass should still clear the bell.
+            await self._refresh_review_pending()
+            return
         # Veto-window drain first: proposals older than the window apply
         # themselves (same engine as a human approval; approve_proposal
         # enqueues its own post-batch sweeps). Runs before drain_pending so a
@@ -1831,7 +1838,6 @@ Output valid JSON only. No markdown fences. /no_think"""
             if auto.get("approved"):
                 ids = auto["approved"]
                 self._bump("adaptive_proposals_auto_approved", len(ids))
-                from db import models as db
 
                 # One line per proposal: what it was, where it landed, how to
                 # undo it. Bare ids sent the reader (and the agent asked to
@@ -1850,16 +1856,17 @@ Output valid JSON only. No markdown fences. /no_think"""
                     tail.append(
                         "Memory corrections create no batch — the Adaptive panel has nothing to roll back for them; undo by deleting the tagged memory entry."
                     )
-                db.add_notification(
-                    title="Adaptive layer: proposals auto-approved",
-                    body=(
+                notices.notify(
+                    "adaptive.auto_approved",
+                    "Adaptive layer: proposals auto-approved",
+                    (
                         f"{len(ids)} proposal(s) past the "
                         f"{settings.adaptive_auto_approve_after_hours}h veto window applied at idle "
                         f"({', '.join(f'#{i}' for i in ids)}).\n"
                         + "\n".join(f"• {line}" for line in lines)
                         + ("\n" + " ".join(tail) if tail else "")
                     ),
-                    urgency="normal",
+                    link=_LEARNING_TAB,
                 )
         except Exception as e:
             logger.warning("Adaptive auto-approve failed: %s", e)
@@ -1877,12 +1884,12 @@ Output valid JSON only. No markdown fences. /no_think"""
             if landed:
                 edits_n = sum(len(r["applied"]) for r in landed)
                 self._bump("adaptive_batches_applied", len(landed))
-                from db import models as db
 
-                db.add_notification(
-                    title="Adaptive layer: edits auto-applied",
-                    body=f"{edits_n} edit(s) across {len(landed)} batch(es) applied at idle — review in the Adaptive panel.",
-                    urgency="normal",
+                notices.notify(
+                    "adaptive.edits_applied",
+                    "Adaptive layer: edits auto-applied",
+                    f"{edits_n} edit(s) across {len(landed)} batch(es) applied at idle — review in the Adaptive panel.",
+                    link=_LEARNING_TAB,
                 )
                 # Post-batch sweeps: batch-tagged canary data for the
                 # tripwire join. Enqueued through the scheduler for its own
@@ -1917,15 +1924,14 @@ Output valid JSON only. No markdown fences. /no_think"""
         # journaled, one aggregated once-a-day notification with the undo.
         try:
             from core.adaptive.retire import retire_unused_entries
-            from db import models as db
 
             swept = await asyncio.to_thread(retire_unused_entries)
             if swept["retired"]:
                 self._bump("adaptive_unused_retired", len(swept["retired"]))
                 lines = [f"• {eid} — {swept['reasons'].get(eid, '')}" for eid in swept["retired"][:12]]
                 await asyncio.to_thread(
-                    db.add_notification,
-                    "",
+                    notices.notify,
+                    "adaptive.value_sweep",
                     "Adaptive: value sweep retired entries",
                     (
                         "Retired by the value sweep — unused for the whole retire window, "
@@ -1935,8 +1941,8 @@ Output valid JSON only. No markdown fences. /no_think"""
                         + "\n".join(lines)
                         + (f"\n(+{len(swept['retired']) - 12} more)" if len(swept["retired"]) > 12 else "")
                     ),
-                    "normal",
-                    "adaptive_usage_sweep",
+                    dedup_key="adaptive_usage_sweep",
+                    link=_LEARNING_TAB,
                 )
         except Exception as e:
             logger.warning("Adaptive usage sweep failed: %s", e)
@@ -1950,15 +1956,14 @@ Output valid JSON only. No markdown fences. /no_think"""
         # indefinitely.
         try:
             from core.adaptive.retire import retire_lint_failures
-            from db import models as db
 
             linted = await asyncio.to_thread(retire_lint_failures)
             if linted["retired"]:
                 self._bump("adaptive_lint_retired", len(linted["retired"]))
                 lines = [f"• {eid} — {linted['reasons'].get(eid, '')}" for eid in linted["retired"][:12]]
                 await asyncio.to_thread(
-                    db.add_notification,
-                    "",
+                    notices.notify,
+                    "adaptive.lint_sweep",
                     "Adaptive: lint sweep retired entries",
                     (
                         "Retired by the retro content-lint sweep — machine-authored "
@@ -1968,8 +1973,8 @@ Output valid JSON only. No markdown fences. /no_think"""
                         + "\n".join(lines)
                         + (f"\n(+{len(linted['retired']) - 12} more)" if len(linted["retired"]) > 12 else "")
                     ),
-                    "normal",
-                    "adaptive_lint_sweep",
+                    dedup_key="adaptive_lint_sweep",
+                    link=_LEARNING_TAB,
                 )
         except Exception as e:
             logger.warning("Adaptive lint sweep failed: %s", e)
@@ -1982,7 +1987,6 @@ Output valid JSON only. No markdown fences. /no_think"""
         # fate on an outcome rather than on a clock or a counter.
         try:
             from core.adaptive.trial import sweep_trials
-            from db import models as db
 
             trials = await asyncio.to_thread(sweep_trials)
             settled = trials["promoted"] + trials["retired"]
@@ -1995,8 +1999,8 @@ Output valid JSON only. No markdown fences. /no_think"""
                     for eid in settled[:12]
                 ]
                 await asyncio.to_thread(
-                    db.add_notification,
-                    "",
+                    notices.notify,
+                    "adaptive.trial_sweep",
                     "Adaptive: trial arms settled",
                     (
                         "Entries that had been rendering on half the turns are now decided on "
@@ -2004,8 +2008,8 @@ Output valid JSON only. No markdown fences. /no_think"""
                         "journaled with its counts and p-value — roll any back from the "
                         "Adaptive tab, or read the arms in the Trust tab.\n" + "\n".join(lines)
                     ),
-                    "normal",
-                    "adaptive_trial_sweep",
+                    dedup_key="adaptive_trial_sweep",
+                    link=_LEARNING_TAB,
                 )
         except Exception as e:
             logger.warning("Adaptive trial sweep failed: %s", e)
@@ -2019,6 +2023,19 @@ Output valid JSON only. No markdown fences. /no_think"""
         except Exception as e:
             logger.warning("Adaptive tripwire failed: %s", e)
 
+        # Last, after every stage above has approved, held or expired what it
+        # will: the one bell row counting what only a human can decide.
+        await self._refresh_review_pending()
+
+    async def _refresh_review_pending(self) -> None:
+        """Recount the never-auto-apply proposals into review.pending. Never raises."""
+        try:
+            from core.adaptive.review import refresh_review_pending
+
+            await asyncio.to_thread(refresh_review_pending)
+        except Exception as e:
+            logger.warning("Review-pending rollup failed: %s", e)
+
     # ------------------------------------------------------------------
     # Activity 17: fallback-burn watch
     # ------------------------------------------------------------------
@@ -2028,15 +2045,14 @@ Output valid JSON only. No markdown fences. /no_think"""
         carrying a threshold share of the trailing 24h's tokens. Never raises."""
         try:
             from core.llm.burnwatch import check_fallback_burn
-            from db import models as db
 
             finding = await asyncio.to_thread(check_fallback_burn)
             if not finding:
                 return
             self._bump("fallback_burn_alerts", 1)
             await asyncio.to_thread(
-                db.add_notification,
-                "",
+                notices.notify,
+                "system.fallback_burn",
                 "Fallback model is carrying the load",
                 (
                     f"{finding['model']} served {finding['share']:.0%} of all tokens in the last "
@@ -2046,8 +2062,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                     "provider key/endpoint (the 2026-08-19 signature: container-local env keys die "
                     "on rebuild; the durable copy belongs in the compose-level .env)."
                 ),
-                "high",
-                "fallback_burn",
+                dedup_key="fallback_burn",
             )
         except Exception as e:
             logger.warning("Fallback-burn watch failed: %s", e)

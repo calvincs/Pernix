@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 
 from config import settings
+from core import notices
 from db import models as db
 
 logger = logging.getLogger("pernix.dream")
@@ -190,15 +191,16 @@ def _check_queue_health(pending: list[dict]) -> None:
     if age_days < _STALL_DAYS:
         return
     try:
-        db.add_notification(
-            title="Dream: validation queue is not draining",
-            body=(
+        notices.notify(
+            "dream.queue_stalled",
+            "Dream: validation queue is not draining",
+            (
                 f"The oldest pending hypothesis is {age_days} days old and {len(pending)} "
                 "candidates are waiting. Dream validates roughly one per idle cycle, so a "
                 "backlog this old means validation is failing or starved rather than busy. "
                 "Check the dream log for validator errors."
             ),
-            urgency="normal",
+            link={"kind": "tab", "tab": "dream"},
         )
     except Exception as e:
         logger.warning("dream: queue health notification failed: %s", e)
@@ -232,9 +234,10 @@ def _check_promotion_health() -> None:
     if age_days < _STALL_DAYS:
         return
     try:
-        db.add_notification(
-            title="Dream: validated findings are not reaching promotion",
-            body=(
+        notices.notify(
+            "dream.promotion_stalled",
+            "Dream: validated findings are not reaching promotion",
+            (
                 f"The oldest validated hypothesis is {age_days} days old and {len(validated)} "
                 "are waiting. Promotion is backpressured by the adaptive proposal queue "
                 "(adaptive_max_pending_per_producer) and the veto-window drain "
@@ -242,7 +245,7 @@ def _check_promotion_health() -> None:
                 "are being minted faster than they are applied. Drain the review queue, or "
                 "reduce inflow, or raise the drain caps."
             ),
-            urgency="normal",
+            link={"kind": "tab", "tab": "dream"},
         )
     except Exception as e:
         logger.warning("dream: promotion health notification failed: %s", e)

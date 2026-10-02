@@ -476,12 +476,13 @@ def test_unfounded_proposal_is_not_taken_by_the_clock(_adaptive_on):
     assert out["approved"] == []
     assert out["skipped_unfounded"] == 1
     assert db.adaptive_get_proposal(pid)["status"] == "pending"  # a human can still approve
-    notes = [n for n in db.get_notifications() if "no receipts" in n["title"]]
+    # v42: adaptive.proposal_held is a log-tier category, so it lives in the activity log, not the bell.
+    notes = [n for n in db.list_notifications("log") if "no receipts" in n["title"]]
     assert len(notes) == 1 and f"#{pid}" in notes[0]["body"]
 
     # Held again on the next sweep, but announced only once.
     assert auto_approve_stale_proposals()["skipped_unfounded"] == 1
-    assert len([n for n in db.get_notifications() if "no receipts" in n["title"]]) == 1
+    assert len([n for n in db.list_notifications("log") if "no receipts" in n["title"]]) == 1
 
 
 def test_grounded_proposal_still_flows_through_the_veto_window(_adaptive_on):

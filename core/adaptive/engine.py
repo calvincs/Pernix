@@ -23,9 +23,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from config import settings
+from core import notices
 from db import models as db
 
 logger = logging.getLogger("pernix.adaptive")
+
+_LEARNING_TAB = {"kind": "tab", "tab": "learning"}
 
 # worker_spec was carved in v3.1: fully-built consumption, zero live rows,
 # and no reachable producer (high-risk gating meant a human approving YAML
@@ -484,10 +487,12 @@ def _notify_proposal_queue_full(producer: str) -> None:
                 f" {human_gated} of the pending are canary proposals, which never auto-approve — "
                 "they wait for your approve/reject."
             )
-        db.add_notification(
-            title="Adaptive layer: review queue is full",
-            body=f"{reason} {drain_hint}",
-            urgency="normal",
+        notices.notify(
+            "adaptive.queue_full",
+            "Adaptive layer: review queue is full",
+            f"{reason} {drain_hint}",
+            subject=producer,
+            link=_LEARNING_TAB,
         )
         db.set_snooze_state(marker, "1")
     except Exception as e:
@@ -511,16 +516,18 @@ def _notify_capped(producer: str, rejected: list[dict]) -> None:
     if not capped:
         return
     try:
-        db.add_notification(
-            title="Adaptive layer: entry cap reached",
-            body=(
+        notices.notify(
+            "adaptive.cap_reached",
+            "Adaptive layer: entry cap reached",
+            (
                 f"{producer} produced edits that were dropped — kind(s) "
                 f"{', '.join(sorted(capped))} are at the "
                 f"{settings.adaptive_max_entries_per_kind}-entry cap "
                 "(adaptive_max_entries_per_kind). Retire or delete an entry in the Adaptive tab, "
                 "or raise the cap; until then this producer's output is being discarded."
             ),
-            urgency="normal",
+            subject=producer,
+            link=_LEARNING_TAB,
             # A wedged kind + a chatty producer used to mean one identical
             # notification per drained batch, forever. Once per producer per
             # day says the same thing without the pile.
@@ -758,14 +765,16 @@ def _hold_unfounded(prop: dict) -> bool:
     try:
         if not db.get_snooze_state(key):
             db.set_snooze_state(key, _now_iso())
-            db.add_notification(
-                title="Adaptive proposal held: no receipts",
-                body=(
+            notices.notify(
+                "adaptive.proposal_held",
+                "Adaptive proposal held: no receipts",
+                (
                     f"Proposal #{pid} ({prop.get('producer', '?')}) passed its veto window but its evidence "
                     "resolves to nothing recorded — no post-mortem, candor fact, signal, feedback or "
                     "hypothesis. It stays pending for human review in the Adaptive panel."
                 ),
-                urgency="normal",
+                subject=str(pid),
+                link=_LEARNING_TAB,
             )
     except Exception as e:
         logger.debug("Adaptive unfounded notice failed for proposal %s: %s", pid, e)
