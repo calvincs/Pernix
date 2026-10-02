@@ -70,7 +70,8 @@ def test_skill_verify_rollback_leaves_one_notice(tmp_path, monkeypatch):
     _skill_env(tmp_path, monkeypatch)
     pid = _auto_applied("heal-me")
     restore_skill_backup(pid, actor="skill-verify")
-    assert not [n for n in db.get_notifications() if "rolled back" in n["title"].lower()]
+    # The log view holds every row, so this proves none was written at all.
+    assert not [n for n in db.list_notifications("log") if "rolled back" in n["title"].lower()]
 
 
 def test_user_rollback_still_notifies(tmp_path, monkeypatch):
@@ -79,7 +80,9 @@ def test_user_rollback_still_notifies(tmp_path, monkeypatch):
     _skill_env(tmp_path, monkeypatch)
     pid = _auto_applied("heal-me")
     restore_skill_backup(pid)
-    assert [n for n in db.get_notifications() if "rolled back" in n["title"].lower()]
+    # skills.rolled_back is log tier (the user did it, or the Skills tab shows it).
+    rows = [n for n in db.list_notifications("log") if "rolled back" in n["title"].lower()]
+    assert rows and rows[0]["category"] == "skills.rolled_back"
 
 
 def test_skills_changed_alone_does_not_raise_a_maintenance_notice(tmp_path, monkeypatch):

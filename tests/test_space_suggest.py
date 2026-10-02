@@ -519,8 +519,12 @@ async def test_a_stored_suggestion_raises_exactly_one_notification(monkeypatch):
     assert row["topic_key"] == "fact-checking" and row["session_ids"] == members
     assert result["kept"][0]["id"] == row["id"]
 
-    notes = db.get_notifications()
+    # spaces.suggested is a log-tier category: the sidebar rows are the
+    # surface, so the suggestion lands in the activity log, not the bell.
+    assert db.get_notifications() == []
+    notes = db.list_notifications("log")
     assert len(notes) == 1
+    assert notes[0]["category"] == "spaces.suggested" and notes[0]["tier"] == "log"
     assert notes[0]["title"] == "Suggested space: Fact Checking"
     assert "Review it under Spaces in the sidebar." in notes[0]["body"]
     # The dedup key is what stops a re-scan re-ringing the same bell.
@@ -536,7 +540,7 @@ async def test_an_existing_kind_suggestion_names_the_space_in_its_notification(m
     _stub_llm(monkeypatch, {"clusters": [_cluster(members, kind="existing", existing_space_id=sp["id"])]})
 
     await ss.scan(force=True)
-    assert db.get_notifications()[0]["title"] == "12 chats belong in Pernix"
+    assert db.list_notifications("log")[0]["title"] == "12 chats belong in Pernix"
 
 
 async def test_scan_stamps_watermarks_even_when_nothing_survives(monkeypatch):

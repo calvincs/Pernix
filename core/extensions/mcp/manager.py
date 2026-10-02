@@ -85,14 +85,22 @@ def describe_error(e: BaseException) -> str:
     return msg if msg else type(e).__name__
 
 
-def _notify(title: str, body: str, urgency: str = "normal") -> None:
-    """One-shot operator notification (web extension precedent). Best-effort."""
-    try:
-        from db import models as _db
+def _notify(name: str, title: str, body: str) -> None:
+    """One-shot operator notification, keyed by server name so the bell row
+    coalesces per server and closes itself when that server is ready again
+    (see `_resolve_alert`). Best-effort: notices.notify never raises."""
+    from core import notices
 
-        _db.add_notification(title=title, body=body, urgency=urgency)
-    except Exception as e:
-        logger.debug("MCP alert (%s) could not be persisted: %s", title, e)
+    notices.notify("system.mcp_down", title, body, subject=name, link={"kind": "tab", "tab": "mcp"})
+
+
+def _resolve_alert(name: str) -> None:
+    """The server is reachable again — close its open "unreachable" row.
+    Unconditional (not gated on `_alerted`) so a row left open by a previous
+    process also clears on the first successful connect after a restart."""
+    from core import notices
+
+    notices.resolve("system.mcp_down", name)
 
 
 class MCPConnection:
@@ -382,6 +390,7 @@ class MCPConnection:
                     self._alerted = False
                     backoff = _BACKOFF_INITIAL
                     self.status = "ready"
+                    _resolve_alert(self.cfg.name)
                     # Consume any pending wake-up: a kick from ensure_ready
                     # during the connect is satisfied by being ready — left
                     # set, it would fall straight through the next idle wait
@@ -509,6 +518,7 @@ class MCPConnection:
         if not self._alerted and (self._was_ready or self._fail_cycles >= _NEVER_READY_ALERT_CYCLES):
             self._alerted = True
             _notify(
+                self.cfg.name,
                 f"MCP server '{self.cfg.name}' unreachable",
                 f"{self.error}\n\nIt will keep retrying with backoff. Fix the server or its config "
                 f"(Explorer → MCP), or ask the agent to run mcp_reload_server('{self.cfg.name}').",

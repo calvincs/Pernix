@@ -30,17 +30,17 @@ def _quarantine_custom_module(pkg, modname: str, err: Exception) -> None:
         dest = src.with_suffix(".py.broken")
         src.rename(dest)
         logger.error("Quarantined %s -> %s (%s)", src.name, dest.name, err)
-        try:
-            from db import models as _db
+        from core import notices
 
-            _db.add_notification(
-                title=f"Custom tool '{modname}' was quarantined",
-                body=f"It failed to import ({type(err).__name__}: {err}) and was renamed to {dest.name}.",
-                urgency="normal",
-                dedup_key=f"custom-tool-broken:{modname}",
-            )
-        except Exception:
-            pass
+        # Same dedup key as before the notices registry, so a deploy-day
+        # repeat of an already-announced quarantine stays suppressed.
+        notices.notify(
+            "system.tool_quarantined",
+            title=f"Custom tool '{modname}' was quarantined",
+            body=f"It failed to import ({type(err).__name__}: {err}) and was renamed to {dest.name}.",
+            subject=modname,
+            dedup_key=f"custom-tool-broken:{modname}",
+        )
     except OSError as e:
         logger.warning("Could not quarantine %s: %s", modname, e)
 

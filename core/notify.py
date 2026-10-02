@@ -49,21 +49,21 @@ def _warn_if_vapid_subject_suspect(subject: str) -> None:
 
 def _notice_push_rejected(host: str, status: int | None, reason: str) -> None:
     """Bell notice for a push service that keeps refusing our credentials. One call site, easy to reroute."""
-    from db import models as db
+    from core import notices
 
     detail = f"HTTP {status} {reason}".strip()
-    try:
-        db.add_notification(
-            title=f"Push rejected by {host}",
-            body=(
-                f"{host} answered {detail}. Check vapid_subject in settings "
-                "(it must be a real mailto: or https: contact, not localhost)."
-            ),
-            urgency="normal",
-            dedup_key=f"push_rejected:{host}",
-        )
-    except Exception as e:
-        logger.warning("Could not record push-rejected notice: %s", e)
+    # A bell item (never an interrupt): an interrupt would ask the push path
+    # that just failed to deliver news of its own failure.
+    notices.notify(
+        "system.push_rejected",
+        f"Push rejected by {host}",
+        (
+            f"{host} answered {detail}. Check vapid_subject in settings "
+            "(it must be a real mailto: or https: contact, not localhost)."
+        ),
+        subject=host,
+        dedup_key=f"push_rejected:{host}",
+    )
 
 
 class NotificationDispatcher:

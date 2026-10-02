@@ -440,6 +440,7 @@ def _notification_for(cluster: dict, spaces_by_id: dict[str, dict]) -> tuple[str
 
 def _store(kept: list[dict], spaces_by_id: dict[str, dict]) -> None:
     """Persist the survivors and raise one notification each."""
+    from core import notices
     from db import models as db
 
     for cluster in kept:
@@ -455,7 +456,14 @@ def _store(kept: list[dict], spaces_by_id: dict[str, dict]) -> None:
         )
         cluster["id"] = row["id"]
         title, body = _notification_for(cluster, spaces_by_id)
-        db.add_notification("", title, body, "normal", dedup_key=f"space_suggest:{row['id']}")
+        notices.notify(
+            "spaces.suggested",
+            title,
+            body,
+            subject=row["id"],
+            link={"kind": "tab", "tab": "spaces"},
+            dedup_key=f"space_suggest:{row['id']}",
+        )
 
 
 def _skip(reason: str) -> dict:
