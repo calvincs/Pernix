@@ -32,7 +32,7 @@ Some items close themselves when their cause goes away — the embeddings outage
 
 ## Changing it
 
-Settings → Notifications has one choice per **area** (Default, Interrupt, Bell, Log only, Off). The default needs no tuning; override an area only if you disagree with it. In `settings.json`:
+Settings → Integrations → **Notification tiers** has one choice per **area** (Default, Interrupt, Bell, Log only, Off). The default needs no tuning; override an area only if you disagree with it. In `settings.json`:
 
 ```json
 { "notify_tier_overrides": { "canary": "bell", "system.mcp_down": "interrupt" } }
