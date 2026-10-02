@@ -46,6 +46,7 @@ from pathlib import Path
 import yaml
 
 from config import settings
+from core import notices
 from core.canary.parser import CanaryDef, CanaryParseError, canaries_dir, parse_canary_md
 from core.skills.parser import parse_frontmatter_md
 from db import models as db
@@ -176,6 +177,10 @@ def retire_canary(c: CanaryDef, base: Path, reason: str, by: str) -> bool:
         (dest / _RETIRED_MARKER).write_text(
             json.dumps({"retired_at": datetime.now(timezone.utc).isoformat(), "reason": reason, "by": by})
         )
+        # A retired task is off the nightly heartbeat for good, so its
+        # "parked" bell item has nothing left to ask the user.
+        if c.parked:
+            notices.resolve("canary.parked", c.name)
         return True
     except Exception as e:
         logger.warning("Canary retirement failed for '%s': %s", c.name, e)
@@ -216,9 +221,10 @@ def _retire_exhausted_probes(suite: list[CanaryDef], base: Path, stats: dict) ->
             stats["probes_retired"].append(c.name)
             last = window[0] if window else None
             try:
-                db.add_notification(
-                    title=f"Canary probe retired: {c.name}",
-                    body=(
+                notices.notify(
+                    "canary.probe_retired",
+                    f"Canary probe retired: {c.name}",
+                    (
                         f"{why}: {passed}/{len(runs)} runs passed"
                         + (
                             f", final outcome {last.get('outcome') or ('pass' if last.get('passed') else 'fail')}"
@@ -228,7 +234,8 @@ def _retire_exhausted_probes(suite: list[CanaryDef], base: Path, stats: dict) ->
                         + f". The directory sits in .retired/ for {settings.canary_purge_after_days} days "
                         "if you want it back."
                     ),
-                    urgency="normal",
+                    subject=c.name,
+                    link={"kind": "tab", "tab": "canary"},
                 )
             except Exception:
                 pass
@@ -277,9 +284,12 @@ def _park_contaminated(c: CanaryDef, runs: list[dict], stats: dict) -> None:
         return
     stats["parked_contaminated"].append({"name": c.name, "detail": reason or "isolation broken"})
     try:
-        db.add_notification(
-            title=f"Canary parked — contaminated on {_CONTAMINATION_WINDOW} runs in a row: {c.name}",
-            body=(
+        # Same dedup key as before the notices registry, so the marker written
+        # on deploy day keeps suppressing the repeat.
+        notices.notify(
+            "canary.parked",
+            f"Canary parked — contaminated on {_CONTAMINATION_WINDOW} runs in a row: {c.name}",
+            (
                 f"Every one of the last {_CONTAMINATION_WINDOW} runs broke canary isolation, so none of "
                 f"them measured the pipeline. Findings: {reason or 'see the run rows'}. The task itself "
                 "is almost certainly written against something outside its temp workspace; rewrite it "
@@ -287,7 +297,8 @@ def _park_contaminated(c: CanaryDef, runs: list[dict], stats: dict) -> None:
                 "heartbeat, still in the suite — and no more nightly alerts about a task that cannot "
                 "report anything."
             ),
-            urgency="normal",
+            subject=c.name,
+            link={"kind": "tab", "tab": "canary"},
             dedup_key=f"canary_contaminated_park:{c.name}",
         )
     except Exception as e:
@@ -320,6 +331,7 @@ def _maintain_one(c: CanaryDef, base: Path, stats: dict) -> None:
         if c.parked and md is not None:
             if _rewrite_frontmatter(md, {"parked": False}):
                 stats["unparked"].append(c.name)
+                notices.resolve("canary.parked", c.name)
         return
 
     if md is None:
@@ -443,6 +455,12 @@ def check_suite_health(canaries: list[CanaryDef]) -> dict:
 def _report_suite_health(health: dict) -> None:
     """Notify on suite health, deduped so it nags once per day, not per sweep."""
     chronic = health.get("chronic") or []
+    noop = health.get("noop") or []
+    # The bell row for a noop/blackout suite closes itself once the suite no
+    # longer is one — checked before the once-per-day signature, which would
+    # otherwise keep a stale "agent is not running" open until tomorrow.
+    if not (noop or health.get("blackout")):
+        notices.resolve("canary.suite_unhealthy", "suite")
     if not chronic:
         db.set_snooze_state(_HEALTH_STATE_KEY, "")
         return
@@ -450,7 +468,6 @@ def _report_suite_health(health: dict) -> None:
     if db.get_snooze_state(_HEALTH_STATE_KEY) == signature:
         return
 
-    noop = health.get("noop") or []
     if noop:
         title = "Canary suite: the agent is not running"
         body = (
@@ -460,7 +477,7 @@ def _report_suite_health(health: dict) -> None:
             "against the seeded fixtures. Until it is fixed the suite measures nothing and the "
             "adaptive tripwire is disarmed."
         )
-        urgency = "high"
+        category = "canary.suite_unhealthy"
     elif health.get("blackout"):
         title = "Canary suite: every scored canary is failing"
         body = (
@@ -469,7 +486,7 @@ def _report_suite_health(health: dict) -> None:
             "of 0% can never register a regression — so the adaptive layer is applying batches "
             "with no working safety net. Investigate before trusting further auto-applies."
         )
-        urgency = "high"
+        category = "canary.suite_unhealthy"
     else:
         title = "Canary suite: chronically failing task(s)"
         body = (
@@ -477,9 +494,15 @@ def _report_suite_health(health: dict) -> None:
             "no pass in between. Either the agent has genuinely regressed on this task or the "
             "canary needs updating; both are worth a look, and neither will surface on its own."
         )
-        urgency = "normal"
+        category = "canary.suite_chronic"
     try:
-        db.add_notification(title=title, body=body, urgency=urgency)
+        notices.notify(
+            category,
+            title,
+            body,
+            subject="suite" if category == "canary.suite_unhealthy" else "",
+            link={"kind": "tab", "tab": "canary"},
+        )
         db.set_snooze_state(_HEALTH_STATE_KEY, signature)
     except Exception as e:
         logger.warning("Canary health notification failed: %s", e)
@@ -564,7 +587,7 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
     if changed:
         summary = "; ".join(f"{k}: {', '.join(_describe(i) for i in v)}" for k, v in changed.items())
         logger.info("Canary maintenance: %s", summary)
-    # 'unhealthy' is reported by _report_suite_health with its own urgency and
+    # 'unhealthy' is reported by _report_suite_health under its own category and
     # its own dedupe, each retired probe already got its own summary
     # notification, and unsafe verify blocks notify once per content hash;
     # folding any of them in here would double-notify. 'skills_changed' is the
@@ -583,13 +606,14 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
             # One notification per distinct set of mutations per day: the
             # sweep runs every idle cycle, and a change that re-derives the
             # same way twice is one piece of news, not twenty.
-            db.add_notification(
-                title="Canary suite auto-maintenance",
-                body=summary + ". Parked canaries leave the nightly heartbeat but stay in "
+            notices.notify(
+                "canary.maintenance",
+                "Canary suite auto-maintenance",
+                summary + ". Parked canaries leave the nightly heartbeat but stay in "
                 "the suite — coverage triggers, full sweeps and manual runs "
                 "still fire them, a red run unparks them, and the Canary tab "
                 "can unpark one any time.",
-                urgency="normal",
+                link={"kind": "tab", "tab": "canary"},
                 dedup_key="canary_maintain:" + hashlib.sha1(summary.encode()).hexdigest()[:12],
             )
         except Exception:

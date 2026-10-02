@@ -178,13 +178,14 @@ def contamination_record(findings: list[str]) -> dict:
 
 
 def notify(canary_name: str, session_id: str, findings: list[str]) -> None:
-    """One notification per contaminated run."""
-    from db import models as db
+    """One activity-log line per contaminated run (the Canary tab shows the run)."""
+    from core import notices
 
     try:
-        db.add_notification(
-            title=f"Canary run contaminated: {canary_name}",
-            body=(
+        notices.notify(
+            "canary.contaminated",
+            f"Canary run contaminated: {canary_name}",
+            (
                 f"Session {session_id[:12]} broke canary isolation, so the run was "
                 f"recorded as outcome='contaminated' and is excluded from tripwire "
                 f"testimony and baselines. Findings: {'; '.join(findings)[:400]}. "
@@ -192,7 +193,10 @@ def notify(canary_name: str, session_id: str, findings: list[str]) -> None:
                 "canary denial, or whether a skill body is steering the agent out of "
                 "its workspace."
             ),
-            urgency="normal",
+            session_id=session_id,
+            session_type="canary",
+            subject=canary_name,
+            link={"kind": "tab", "tab": "canary"},
         )
     except Exception as e:
         logger.warning("Contamination notification failed for '%s': %s", canary_name, e)

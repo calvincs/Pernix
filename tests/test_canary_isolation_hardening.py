@@ -921,7 +921,8 @@ async def test_a_contaminated_run_is_recorded_and_notified(monkeypatch):
     stored = _json.loads(row["gate_results_json"])
     assert any(g.get("kind") == "contamination" and not g["passed"] for g in stored)
 
-    notes = db.get_notifications()
+    # canary.contaminated is log-tier: the activity log has it, the bell does not.
+    notes = db.list_notifications("log")
     assert len([n for n in notes if "contaminated" in (n.get("title") or "")]) == 1
 
 
@@ -939,7 +940,7 @@ async def test_a_clean_run_is_not_flagged(monkeypatch):
     result = await run_canary(c, trigger="manual")
     assert result.contamination == [] and result.outcome == "pass"
     assert db.list_canary_runs(task="tidy")[0]["outcome"] == "pass"
-    assert not [n for n in db.get_notifications() if "contaminated" in (n.get("title") or "")]
+    assert not [n for n in db.list_notifications("log") if "contaminated" in (n.get("title") or "")]
 
 
 # ---------------------------------------------------------------------------
@@ -1386,7 +1387,8 @@ def test_a_failing_verify_canary_rolls_back_the_auto_apply(tmp_path, monkeypatch
     assert stats.get("verify_rolled_back") == [pid]
     assert db.get_skill_proposal(pid)["status"] == "rolled_back"
     assert "--device cpu" not in (skill.path / "SKILL.md").read_text(encoding="utf-8")
-    assert any("auto-rolled-back" in (n.get("title") or "") for n in db.get_notifications())
+    hits = [n for n in db.get_notifications() if "auto-rolled-back" in (n.get("title") or "")]
+    assert hits and hits[0]["category"] == "skills.auto_rolled_back" and hits[0]["subject"] == "heal-me"
 
 
 def test_auto_rollback_stays_off_behind_its_flag(tmp_path, monkeypatch):

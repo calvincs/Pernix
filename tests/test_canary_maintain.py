@@ -154,7 +154,8 @@ def test_probe_retires_after_max_runs_with_a_summary():
     assert stats["probes_retired"] == ["probe-x"]
     assert load_canary("probe-x", base=_base()) is None
     assert (retired_dir(_base()) / "probe-x" / "retired.json").is_file()
-    notes = [n for n in db.get_notifications() if "probe retired" in n["title"]]
+    # Probe retirement is a log-tier receipt now (canary.probe_retired), not a bell item.
+    notes = [n for n in db.list_notifications("log") if "probe retired" in n["title"]]
     assert notes and "2/2 runs passed" in notes[0]["body"]
 
 
@@ -167,7 +168,7 @@ def test_probe_retirement_is_exempt_from_the_goodhart_lock():
     _run("probe-red", False)  # newest run failed
     stats = run_maintenance()
     assert stats["probes_retired"] == ["probe-red"]
-    notes = [n for n in db.get_notifications() if "probe-red" in n["title"]]
+    notes = [n for n in db.list_notifications("log") if "probe-red" in n["title"]]
     assert notes and "1/2 runs passed" in notes[0]["body"]
 
 
@@ -297,8 +298,9 @@ def test_health_separates_harness_break_from_quality_regression():
     """Zero tokens + sub-second + failing == the agent never ran.
 
     This is the 2026-08 blackout signature: gates scored against the seeded
-    fixtures. It must raise at high urgency and say so, because the remedy
-    is nothing like the remedy for a genuine regression.
+    fixtures. It must raise a bell item (canary.suite_unhealthy, not the
+    log-tier chronic notice) and say so, because the remedy is nothing like
+    the remedy for a genuine regression.
     """
     _mk("broken", vetting=False)
     for _ in range(3):
@@ -306,7 +308,7 @@ def test_health_separates_harness_break_from_quality_regression():
     run_maintenance()
     notes = db.get_notifications()
     hit = [n for n in notes if "not running" in n["title"]]
-    assert hit and hit[0]["urgency"] == "high"
+    assert hit and hit[0]["category"] == "canary.suite_unhealthy" and hit[0]["tier"] == "bell"
     assert "harness failure" in hit[0]["body"]
 
 
@@ -315,9 +317,11 @@ def test_health_alert_does_not_renotify_on_every_sweep():
     for _ in range(3):
         _real_fail("solo")
     run_maintenance()
-    first = len(db.get_notifications())
+    # A single chronic task is a log-tier notice now, so count the activity log.
+    first = len(db.list_notifications("log"))
+    assert first
     run_maintenance()
-    assert len(db.get_notifications()) == first  # deduped by day + signature
+    assert len(db.list_notifications("log")) == first  # deduped by day + signature
 
 
 def test_health_recovery_clears_the_alert_state():

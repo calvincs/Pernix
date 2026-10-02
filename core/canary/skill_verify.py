@@ -43,6 +43,7 @@ from pathlib import Path
 import yaml
 
 from config import settings
+from core import notices
 from db import models as db
 
 logger = logging.getLogger("pernix.canary")
@@ -177,9 +178,10 @@ def _notify_unsafe_once(skill_name: str, digest: str, problem: str) -> None:
     if db.get_snooze_state(key) == digest:
         return
     try:
-        db.add_notification(
-            title=f"Skill verify block not admitted: {skill_name}",
-            body=(
+        notices.notify(
+            "skills.verify_unsafe",
+            f"Skill verify block not admitted: {skill_name}",
+            (
                 f"{problem}. Verify-gate commands run on the host, so they must "
                 "pass the same allowlist proof as canary auto-admission "
                 "(python -m pytest/unittest and a short list of read-only "
@@ -187,7 +189,8 @@ def _notify_unsafe_once(skill_name: str, digest: str, problem: str) -> None:
                 "verify: block in the skill, or create the canary by hand via "
                 "the Canary tab, where you are the authority."
             ),
-            urgency="normal",
+            subject=skill_name,
+            link={"kind": "tab", "tab": "skills"},
         )
         db.set_snooze_state(key, digest)
     except Exception as e:
@@ -347,16 +350,18 @@ def check_verify_rollbacks(canaries_base: Path, stats: dict) -> None:
         stats.setdefault("verify_rolled_back", []).append(pid)
         logger.info("Skill '%s' auto-rolled-back after its verify canary failed (proposal %s)", skill, pid)
         try:
-            db.add_notification(
-                title=f"Skill auto-rolled-back: {skill}",
-                body=(
+            notices.notify(
+                "skills.auto_rolled_back",
+                f"Skill auto-rolled-back: {skill}",
+                (
                     f"The verify canary for '{skill}' gate-failed within "
                     f"{ROLLBACK_WINDOW_DAYS} days of proposal {pid} being auto-applied, so "
                     f"{result['skill_md_path']} was restored from {Path(result['backup']).name}. "
                     "The state it replaced was backed up first. Turn this off with "
                     "skill_proposal_auto_rollback."
                 ),
-                urgency="high",
+                subject=skill,
+                link={"kind": "tab", "tab": "skills"},
             )
         except Exception as e:
             logger.debug("Auto-rollback notification failed for '%s': %s", skill, e)

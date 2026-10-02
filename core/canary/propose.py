@@ -33,6 +33,7 @@ from pathlib import Path
 import yaml
 
 from config import settings
+from core import notices
 from db import models as db
 
 logger = logging.getLogger("pernix.canary")
@@ -304,14 +305,17 @@ def queue_canary_proposals(proposals: list, producer: str, session_id: str = "")
                     enqueue_manual_canary(name)
                 except Exception as e:
                     logger.warning("Vetting run enqueue failed for auto-admitted '%s': %s", name, e)
-                db.add_notification(
-                    title=f"Canary auto-admitted: {name}",
-                    body=(
+                notices.notify(
+                    "canary.auto_admitted",
+                    f"Canary auto-admitted: {name}",
+                    (
                         f"Proposed by {producer}, gate commands allowlist-proven. Runs as "
                         f"flaky (informs, never trips) until {settings.canary_vetting_runs} "
                         f"consistent runs promote it. {str(p.get('rationale') or '')[:200]}"
                     ),
-                    urgency="normal",
+                    session_id=session_id or "",
+                    subject=name,
+                    link={"kind": "tab", "tab": "canary"},
                 )
                 logger.info("Canary '%s' auto-admitted (producer=%s)", name, producer)
                 continue

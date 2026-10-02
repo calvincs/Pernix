@@ -134,18 +134,19 @@ async def test_staleness_nudge_once_per_review_date(monkeypatch, tmp_path):
     runner = SnoozeRunner.__new__(SnoozeRunner)
     runner._stats = {}
     await SnoozeRunner._cleanup_canary_runs(runner)
-    notes = [n for n in db.get_notifications() if "stale" in (n.get("title") or "")]
+    # canary.stale is log-tier, so the nudge lives in the activity log, not the bell.
+    notes = [n for n in db.list_notifications("log") if "stale" in (n.get("title") or "")]
     assert len(notes) == 1 and "old-canary" in notes[0]["title"]
 
     # Second sweep: watermarked, no duplicate.
     await SnoozeRunner._cleanup_canary_runs(runner)
-    notes = [n for n in db.get_notifications() if "stale" in (n.get("title") or "")]
+    notes = [n for n in db.list_notifications("log") if "stale" in (n.get("title") or "")]
     assert len(notes) == 1
 
     # Human bumps the date past 90d ago -> re-arms.
     stale.last_reviewed = "2025-06-01"
     await SnoozeRunner._cleanup_canary_runs(runner)
-    notes = [n for n in db.get_notifications() if "stale" in (n.get("title") or "")]
+    notes = [n for n in db.list_notifications("log") if "stale" in (n.get("title") or "")]
     assert len(notes) == 2
 
 
@@ -208,7 +209,8 @@ class TestAutoAdmission:
         assert c is not None
         assert c.flaky is True  # informs, never trips, until promoted
         assert "vetting" in c.tags and "auto-admitted" in c.tags
-        notes = [n for n in db.get_notifications() if "auto-admitted" in (n.get("title") or "")]
+        # canary.auto_admitted is a log-tier receipt (the Canary tab shows the task).
+        notes = [n for n in db.list_notifications("log") if "auto-admitted" in (n.get("title") or "")]
         assert len(notes) == 1
 
     def test_unsafe_gate_falls_back_to_human_review(self, monkeypatch):
