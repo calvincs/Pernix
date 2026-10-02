@@ -492,7 +492,7 @@ Every event includes `seq` (sequence number), `session_id`, and `timestamp`. The
 | Event | Description |
 |---|---|
 | `dialog.question` | The agent is pausing to ask the user a question. Fields: `question_id`, `question`, `context`, `urgency`, `session_title`. Answer via `POST /api/questions/{question_id}/answer`. |
-| `dialog.notification` | Broadcast to every connected browser, not just those viewing the session. Also carries goal budget-limited alerts. Fields: `notification_id`, `title`, `body`, `urgency`, `source_session_id`. |
+| `dialog.notification` | Broadcast to every connected browser, not just those viewing the session. Also carries goal budget-limited alerts. Fields: `notification_id`, `title`, `body`, `urgency`, `source_session_id`, `tier`, `category`, `area`. A "cause cleared" refresh carries `resolved: true` and no title. The web client raises an OS notification only for `tier: "interrupt"` (or no `tier`, from a pre-v42 server); every event refreshes the bell. |
 | `dialog.answered` / `dialog.dismissed` | The question was resolved. |
 
 #### Context Management
@@ -1256,12 +1256,33 @@ POST /api/questions/{question_id}/dismiss
 Marks the question as dismissed without providing an answer (the agent receives an empty/dismiss signal).
 
 ### Notifications
+
+Every notification has a **tier**, set by its category (`core/notices.py`):
+
+| Tier | Meaning | Where it shows |
+|---|---|---|
+| `interrupt` | The system needs the user | Bell badge (counted), OS notification, Web Push |
+| `bell` | Worth a look, never a buzz | A dot on the bell; the "Needs you" list |
+| `log` | Routine background work | The activity log only |
+
+A row is **open** until it is dismissed or its cause resolves on its own. Dismiss is soft: the row leaves the bell and stays in the log.
+
 ```
-GET    /api/notifications                       List unread agent notifications
-POST   /api/notifications/{id}/dismiss          Mark a notification dismissed
+GET    /api/notifications?view=bell|log&area=&before=&limit=   List notifications
+GET    /api/notifications/counts                Badge numbers: {needs_you, bell, unread}
+POST   /api/notifications/{id}/dismiss          Soft-dismiss one row
+POST   /api/notifications/{id}/read             Mark one row read
+POST   /api/notifications/dismiss-all           Dismiss every open interrupt/bell row
+POST   /api/notifications/read-all              Mark every row read
 GET    /api/notifications/events                SSE stream of notification events
 POST   /api/notify                              Trigger a manual notification
 ```
+
+`view=bell` (the default) returns open `interrupt` and `bell` rows; `view=log` returns every row in every state, newest first — page it with `before=<created_at of the last row>`. `area` filters by the category prefix (`canary`, `jobs`, `system`, ...). `limit` is capped at 500. In `counts`, `needs_you` is open interrupt rows (the badge adds open questions), `bell` is open quiet rows, `unread` is rows never marked read in any tier.
+
+Each row carries `id`, `session_id`, `title`, `body`, `urgency`, `created_at`, `updated_at`, `category`, `area`, `tier`, `subject`, `occurrences` (how many repeats were folded into it), `read_at`, `dismissed_at`, `resolved_at` and `link` — `{"kind": "session", "id": ...}`, `{"kind": "tab", "tab": ...}` or `null`.
+
+`POST /api/notify` with `urgency` `high` or `urgent` is an interrupt; anything else is a bell row.
 
 ---
 
