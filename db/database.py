@@ -1249,6 +1249,30 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_sessions_recency ON sessions(archived_at, updated_at DESC)",
         ],
     ),
+    (
+        42,
+        "notifications become a tiered activity log (category, tier, read/dismissed/resolved)",
+        [
+            # The table was a bell and nothing else: 41 producers wrote into
+            # it, Dismiss hard-deleted the row, and in the 17 days before this
+            # migration ~95% of what landed needed nothing from the user. The
+            # new columns let one policy layer (core/notices.py) decide what a
+            # row IS (tier: interrupt | bell | log) and let Dismiss keep the
+            # row, so the same table is also the rolling activity log.
+            # Defaults make a surviving pre-v42 row a plain bell item.
+            "ALTER TABLE notifications ADD COLUMN category TEXT NOT NULL DEFAULT 'legacy'",
+            "ALTER TABLE notifications ADD COLUMN tier TEXT NOT NULL DEFAULT 'bell'",
+            "ALTER TABLE notifications ADD COLUMN subject TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE notifications ADD COLUMN occurrences INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE notifications ADD COLUMN updated_at TEXT",
+            "ALTER TABLE notifications ADD COLUMN read_at TEXT",
+            "ALTER TABLE notifications ADD COLUMN dismissed_at TEXT",
+            "ALTER TABLE notifications ADD COLUMN resolved_at TEXT",
+            "ALTER TABLE notifications ADD COLUMN link_json TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_notifications_open ON notifications(tier, dismissed_at, resolved_at, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_notifications_subject ON notifications(category, subject)",
+        ],
+    ),
 ]
 
 
