@@ -349,3 +349,17 @@ def test_every_category_has_a_valid_tier_and_name():
         assert cat.tier in notices.TIERS, name
         assert set(cat.by_session_type.values()) <= set(notices.TIERS), name
         assert cat.legacy_emit in ("none", "sse", "push"), name
+
+
+def test_nothing_writes_notifications_except_the_policy_layer():
+    """A producer that calls db.add_notification directly skips the tier policy
+    (and so can put a receipt in the user's bell again). Only core/notices.py
+    and the db package may."""
+    allowed = {"core/notices.py"}
+    offenders = []
+    for rel, text in _py_sources():
+        if rel.parts[0] == "db" or str(rel) in allowed:
+            continue
+        if re.search(r"\badd_notification\(", text):
+            offenders.append(str(rel))
+    assert not offenders, f"route these through core.notices.notify: {offenders}"
