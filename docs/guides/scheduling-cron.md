@@ -129,7 +129,7 @@ For end-to-end recipes, see [recipes.md](recipes.md).
 If you want to know when a cron job did something:
 
 - **Webhook** — set `notify_webhook_url` in Settings. The agent will POST to it whenever `ask_user` fires (which in unattended mode is rare, but happens for explicit user confirmation requests).
-- **Web Push** — if you've subscribed via the UI, push notifications fire on `ask_user`.
+- **Web Push** — if you've subscribed via the UI, push notifications fire on `ask_user`, on a failed job (`Job failed: <name>`) and on a `notify_user` the agent marks urgent from a cron session. Everything else a job does is a quiet bell item or an *Activity* line — see [notifications](notifications.md).
 - **Workspace files** — the agent can write a file the cron job creates; you find it in the Explorer's Files → Workspace tab next time you check.
 - **A follow-up cron job** — schedule a 9 AM "what did the 8 AM job produce?" session.
 

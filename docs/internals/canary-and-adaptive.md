@@ -1,5 +1,7 @@
 # Canary Suite & Adaptive Layer — Measured Self-Improvement
 
+> **Notifications.** Every "notification" this page mentions goes through `core/notices.py` and lands in the tier its category is registered under — most self-maintenance receipts are *log* tier (the bell's Activity tab, never a badge); only things that need you interrupt. See [guides/notifications.md](../guides/notifications.md) for the full list.
+
 Pernix has long had the *observation* half of self-improvement — post-mortems,
 scout signals, [Candor](candor.md), [Dream](dream.md), the refine pass. These
 two subsystems ship the other half:

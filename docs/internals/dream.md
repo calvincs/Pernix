@@ -1,5 +1,7 @@
 # Dream — Idle-Time Introspection
 
+> **Notifications.** Every "notification" this page mentions goes through `core/notices.py` and lands in the tier its category is registered under — most self-maintenance receipts are *log* tier (the bell's Activity tab, never a badge); only things that need you interrupt. See [guides/notifications.md](../guides/notifications.md) for the full list.
+
 The Dream subsystem (`core/dream/`) gives Pernix an idle-time faculty that
 examines its own memory, Candor evidence, and post-mortems; generates typed
 hypotheses about itself; and then **tries to falsify them** against recorded
