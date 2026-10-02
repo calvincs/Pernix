@@ -3158,22 +3158,25 @@ async def _end_turn_on_stream_error(
     # ae952f40e3d1: 61 rounds of work ended mid-flight with no final message,
     # no verdict, no notification — the session just went quiet). Leave a
     # durable trace a human will actually see. Canary and worker sessions are
-    # not the user's conversations, so they leave no bell item.
-    if getattr(session, "session_type", "normal") in ("canary", "worker"):
-        return
+    # not the user's conversations: the sessions.stream_error category drops
+    # them, so they leave no bell item.
     try:
+        from core import notices
+
         sess_row = await asyncio.to_thread(db.get_session, session_id)
         title = (sess_row or {}).get("title") or session_id[:12]
         await asyncio.to_thread(
-            db.add_notification,
-            session_id=session_id,
-            title=f"{title}: turn ended on a stream error",
-            body=(
+            notices.notify,
+            "sessions.stream_error",
+            f"{title}: turn ended on a stream error",
+            (
                 f"The LLM stream failed after retries and fallback: {error[:300]} — "
                 "the turn's partial work is in the transcript, but it was not graded "
                 "(reflect skips errored turns). Reply in the session to resume."
             ),
-            urgency="high",
+            session_id=session_id,
+            link={"kind": "session", "id": session_id},
+            session_type=getattr(session, "session_type", None) or (sess_row or {}).get("session_type"),
         )
     except Exception as _ne:
         logger.debug("stream-error notification failed for %s: %s", session_id, _ne)

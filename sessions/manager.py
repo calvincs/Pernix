@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, NamedTuple
 
 from config import settings
+from core import notices
 from db import models as db
 from sessions import state_v2 as sv2
 from sessions.state import AgentSession, PendingMessage, TurnState
@@ -256,9 +257,9 @@ def _broadcast_session_timeout_notification(session) -> None:
     so the user doesn't have to guess from a silent UI.
 
     Best-effort. Never re-raises — failure to notify must not mask the
-    underlying error path. Fires on the same channels as reflect
-    notifications: db.notifications (bell panel), session SSE
-    (dialog.notification event), and global event bus (push subscribers).
+    underlying error path. Tier and delivery come from the sessions.timeout
+    category (interrupt for a normal session, bell for cron, nothing for
+    canary/worker).
     """
     try:
         session_id = session.session_id
@@ -275,39 +276,16 @@ def _broadcast_session_timeout_notification(session) -> None:
             "Send a new message to give it a fresh time window — your reply "
             "resets the clock."
         )
-        notification = {
-            "type": "dialog.notification",
-            "title": title,
-            "body": body,
-            "urgency": "high",
-            "source_session_id": session_id,
-        }
-        try:
-            nid = db.add_notification(
-                session_id=session_id,
-                title=title,
-                body=body,
-                urgency="high",
-            )
-            notification["notification_id"] = nid
-        except Exception as _e:
-            logger.debug(
-                "Persisting session-timeout notification for %s failed: %s",
-                session_id,
-                _e,
-            )
-        # Session-scoped event for SSE clients on this session's stream.
-        try:
-            session.emit_event(notification)
-        except Exception as _e:
-            logger.debug("emit_event for session timeout failed: %s", _e)
-        # Global event bus for push subscribers + global notification stream.
-        try:
-            from core.events import get_event_bus
-
-            get_event_bus().emit({**notification, "session_id": session_id})
-        except Exception as _e:
-            logger.debug("event_bus emit for session timeout failed: %s", _e)
+        # core.notices records the row and does the SSE + push emission;
+        # broadcast() also reaches this session's own stream subscribers.
+        notices.notify(
+            "sessions.timeout",
+            title,
+            body,
+            session_id=session_id,
+            link={"kind": "session", "id": session_id},
+            session_type=getattr(session, "session_type", None),
+        )
     except Exception as _outer:
         logger.warning(
             "Broadcasting session-timeout notification failed: %s",
@@ -1501,27 +1479,19 @@ class SessionManager:
 
     async def _limit_goal(self, session: AgentSession, goal: dict, reason: str) -> None:
         await asyncio.to_thread(db.update_goal, goal["id"], status="budget_limited")
-        try:
-            nid = await asyncio.to_thread(
-                db.add_notification,
-                session_id=session.session_id,
-                title=f"Goal #{goal['id']} budget-limited",
-                body=f"{reason}. The goal is paused at budget_limited — raise its budget "
-                f"(goal_update) or complete it to proceed.",
-                urgency="high",
-            )
-            self.broadcast(
-                {
-                    "type": "dialog.notification",
-                    "notification_id": nid,
-                    "title": f"Goal #{goal['id']} budget-limited",
-                    "body": reason,
-                    "urgency": "high",
-                    "source_session_id": session.session_id,
-                }
-            )
-        except Exception as _e:
-            logger.warning("Goal budget notification failed: %s", _e)
+        # notify() never raises; it does the DB write (hence the thread) and
+        # the SSE/push emission. The body is the full text — the old broadcast
+        # carried only `reason`, the bell row the full sentence.
+        await asyncio.to_thread(
+            notices.notify,
+            "sessions.goal_budget",
+            f"Goal #{goal['id']} budget-limited",
+            f"{reason}. The goal is paused at budget_limited — raise its budget "
+            f"(goal_update) or complete it to proceed.",
+            session_id=session.session_id,
+            link={"kind": "session", "id": session.session_id},
+            session_type=session.session_type,
+        )
         logger.info("Goal #%d budget-limited for %s: %s", goal["id"], session.session_id[:12], reason)
 
     def remove(self, session_id: str) -> None:
@@ -2476,10 +2446,9 @@ class SessionManager:
 
             # Notify the user so they know which session needs a nudge, rather
             # than leaving them to wonder why their conversation went quiet.
-            # Skip for worker sessions — the orchestrator handles those
-            # internally; firing on every worker would spam the user. Canary
-            # runs are synthetic and already recorded in the Canary tab.
-            if is_budget_exhausted and session.session_type not in ("worker", "canary"):
+            # Worker and canary sessions record nothing: the sessions.timeout
+            # category drops them (the orchestrator / Canary tab owns those).
+            if is_budget_exhausted:
                 _broadcast_session_timeout_notification(session)
         finally:
             # This task owns the run until verification, retries and cleanup
