@@ -27,18 +27,16 @@ _tavily_alert_lock = threading.Lock()
 _tavily_alerted: bool = False
 
 
-def _emit_backend_alert(title: str, body: str, urgency: str = "normal") -> None:
+def _emit_backend_alert(category: str, title: str, body: str) -> None:
     """Push a one-shot operator notification when a search backend degrades.
 
-    Best-effort: failures here are logged at debug because the alert is
-    advisory — the wrapper still returns useful errors to the agent.
+    The category (system.tavily_key / system.tavily_limit) carries the tier.
+    Best-effort: notices.notify never raises, because the alert is advisory —
+    the wrapper still returns useful errors to the agent.
     """
-    try:
-        from db import models as _db
+    from core import notices
 
-        _db.add_notification(title=title, body=body, urgency=urgency)
-    except Exception as e:
-        logger.debug("backend alert (%s) could not be persisted: %s", title, e)
+    notices.notify(category, title, body, link={"kind": "tab", "tab": "settings"})
 
 
 # ---------------------------------------------------------------------------
@@ -248,9 +246,9 @@ def search_web(
     except _TavilyKeyError:
         logger.warning("Tavily API key invalid")
         _alert_tavily_once(
+            "system.tavily_key",
             "Tavily API key rejected",
             "TAVILY_API_KEY is invalid. Update it in Settings → Web → Tavily API Key.",
-            "high",
         )
         # On error paths, return the error directly so executor.py's
         # `result.startswith("Error:")` was_error detection still trips.
@@ -261,9 +259,9 @@ def search_web(
     except _TavilyLimitError:
         logger.warning("Tavily usage limit exceeded")
         _alert_tavily_once(
+            "system.tavily_limit",
             "Tavily plan limit reached",
             "TAVILY_API_KEY is over its usage limit. Upgrade your plan or wait for the monthly reset.",
-            "normal",
         )
         return "Error: Tavily usage limit reached. Upgrade your plan or wait for the monthly reset."
     except Exception as e:
@@ -275,14 +273,14 @@ def search_web(
     return web_text
 
 
-def _alert_tavily_once(title: str, body: str, urgency: str) -> None:
+def _alert_tavily_once(category: str, title: str, body: str) -> None:
     """One-shot alert; resets when key is rotated (env vars are idempotent)."""
     global _tavily_alerted
     with _tavily_alert_lock:
         if _tavily_alerted:
             return
         _tavily_alerted = True
-    _emit_backend_alert(title, body, urgency)
+    _emit_backend_alert(category, title, body)
 
 
 def _tavily_search(query: str, num_results: int, api_key: str) -> str:

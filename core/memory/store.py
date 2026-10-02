@@ -211,20 +211,20 @@ def _entry_body(section: str) -> str:
 
 def _notify_oversized_file(md_path) -> None:
     """Tell the user when a memory file is too large to index."""
-    try:
-        from db import models as _db
+    from core import notices
 
-        _db.add_notification(
-            title="A memory file is too large to index",
-            body=(
-                f"{md_path.name} is over the 50MB reindex cap, so its entries are absent from "
-                "search until it is split or compacted."
-            ),
-            urgency="normal",
-            dedup_key=f"memory-oversized:{md_path.name}",
-        )
-    except Exception as e:
-        logger.debug("Could not raise the oversized-memory notification: %s", e)
+    # notify() never raises; the dedup key predates the registry and is kept
+    # so existing same-day markers still suppress the repeat.
+    notices.notify(
+        "system.memory_oversized",
+        title="A memory file is too large to index",
+        body=(
+            f"{md_path.name} is over the 50MB reindex cap, so its entries are absent from "
+            "search until it is split or compacted."
+        ),
+        subject=md_path.name,
+        dedup_key=f"memory-oversized:{md_path.name}",
+    )
 
 
 def _bucket_matches(file_name: str, space_prefix: str | None) -> bool:

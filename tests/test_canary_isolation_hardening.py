@@ -1264,7 +1264,8 @@ def test_restore_skill_backup_undoes_an_auto_applied_proposal(tmp_path, monkeypa
         for b in applied_backup
         if not b.name.endswith("pre-rollback")
     )
-    assert any("rolled back" in (n.get("title") or "").lower() for n in db.get_notifications())
+    # skills.rolled_back is a log-tier row: the activity log, not the bell.
+    assert any("rolled back" in (n.get("title") or "").lower() for n in db.list_notifications("log"))
 
 
 def test_rollback_picks_the_backup_from_this_apply_not_the_newest(tmp_path, monkeypatch):
