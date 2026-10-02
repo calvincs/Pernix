@@ -136,7 +136,65 @@ async def get_settings():
     # Redacted, so the value never leaves the server; the flag is what lets the
     # UI distinguish "no webhook configured" from "configured but hidden".
     data["notify_webhook_url_set"] = bool(settings.notify_webhook_url)
+    # Read-only: what the Notifications rows need to show each area's default
+    # tier(s), computed from the registry so a new category appears on its own.
+    data["notify_areas"] = _notify_areas()
     return data
+
+
+def _notify_areas() -> dict:
+    """{area: {"default_tiers": [...], "categories": [...]}} from core.notices.CATEGORIES.
+
+    default_tiers is the set of registry tiers in the area for a normal
+    session (session-type exceptions are not tuning the user does), in TIERS
+    order.
+    """
+    from core.notices import CATEGORIES, TIERS, area_of
+
+    areas: dict[str, dict] = {}
+    for name, cat in CATEGORIES.items():
+        entry = areas.setdefault(area_of(name), {"tiers": set(), "categories": []})
+        entry["tiers"].add(cat.tier)
+        entry["categories"].append(name)
+    return {
+        area: {"default_tiers": [t for t in TIERS if t in e["tiers"]], "categories": e["categories"]}
+        for area, e in areas.items()
+    }
+
+
+def _validate_notify_settings(body: dict) -> None:
+    """400 on a malformed notify_tiers_enabled / notify_tier_overrides; normalise in place.
+
+    An override key is a registered category or its area; a value is one of
+    core.notices.TIERS. "", None and "default" mean "no override" and are
+    dropped before saving. No key is protected: the user owns his notifications.
+    """
+    if "notify_tiers_enabled" in body and not isinstance(body["notify_tiers_enabled"], bool):
+        raise HTTPException(400, detail="notify_tiers_enabled must be true or false")
+    if "notify_tier_overrides" not in body:
+        return
+    from core.notices import CATEGORIES, TIERS, area_of
+
+    raw = body["notify_tier_overrides"]
+    if not isinstance(raw, dict):
+        raise HTTPException(400, detail="notify_tier_overrides must be an object of {area or category: tier}")
+    known = set(CATEGORIES) | {area_of(c) for c in CATEGORIES}
+    clean = {}
+    for key, value in raw.items():
+        if key not in known:
+            raise HTTPException(
+                400,
+                detail=f"notify_tier_overrides: unknown area or category {key!r}",
+            )
+        if value is None or value == "" or value == "default":
+            continue
+        if value not in TIERS:
+            raise HTTPException(
+                400,
+                detail=f"notify_tier_overrides[{key!r}]: tier must be one of {', '.join(TIERS)} or default",
+            )
+        clean[key] = value
+    body["notify_tier_overrides"] = clean
 
 
 def is_local_client(host: str) -> bool:
@@ -410,6 +468,9 @@ async def update_settings(body: dict):
     if settings.network_enabled:
         locked |= {"llm_base_url", "openrouter_base_url"}
     valid_fields = {f.name for f in fields(settings)} - _NO_PERSIST - locked
+    # Rejected outright (not skipped) before anything is applied, so a bad
+    # override never half-saves the rest of the request.
+    _validate_notify_settings(body)
     updated = []
     for key, value in body.items():
         if key not in valid_fields:

@@ -488,7 +488,11 @@ Esc cancels a recording without transcribing.
 | `notify_webhook_url` | *(empty)* | If set, Pernix sends a POST request to this URL whenever the agent uses `ask_user` to pause and wait for input. Useful for alerting via Slack, Home Assistant, etc. |
 | `vapid_private_key` | *(auto-generated)* | VAPID private key for Web Push. Auto-generated on first run. |
 | `vapid_public_key` | *(auto-generated)* | VAPID public key shared with service worker subscriptions. |
-| `vapid_subject` | `mailto:admin@localhost` | VAPID subject — typically a `mailto:` address or URL identifying the push sender. |
+| `vapid_subject` | `mailto:admin@localhost` | VAPID subject identifying the push sender. Must be a real contact: a `mailto:` address or an `https:` URL. Not localhost — Apple's push service rejects placeholder subjects, so the default silently breaks push to iPhones and iPads. |
+| `notify_tiers_enabled` | `true` | Tiered notifications. Every notice has a category, and each category one tier: `interrupt` (bell badge + phone push), `bell` (quiet item, never a buzz), `log` (activity log only), `drop` (not recorded). `false` is the kill switch: every notice goes back to the old bell with its old urgency and channels. |
+| `notify_tier_overrides` | `{}` | Per-area or per-category tier: `{"canary": "drop", "jobs.test_failed": "interrupt"}`. Keys are an area (`agent`, `external`, `sessions`, `jobs`, `canary`, `skills`, `adaptive`, `review`, `dream`, `spaces`, `system`) or a full category name from `core/notices.py`; values are `interrupt`, `bell`, `log` or `drop`. A category override beats its area's. The API rejects (HTTP 400) unknown keys and tiers; `""` or `"default"` removes an entry. Empty = registry defaults, no tuning needed. Settings → Integrations → Notification tiers has one row per area. |
+| `push_urgency_floor` | `normal` | Web Push floor: only notifications at or above this urgency (`low`, `normal`, `high`, `urgent`) reach a phone. Agent questions always push. The in-app bell still shows everything. |
+| `notification_retention_days` | `30` | Notifications older than this are pruned (snooze Activity 11 + the maintenance 24h tier) — the bell is a recent-events surface, not an archive. `0` = keep forever. |
 
 ---
 
@@ -613,9 +617,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Enforced at parse time. |
 | `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op kept for back-compat. |
 | `post_mortem_retention_days` | `90` | Days to keep synthesized post-mortem records before snooze cleans them. |
-| `notification_retention_days` | `30` | Notifications older than this are pruned (snooze Activity 11 + the maintenance 24h tier) — the bell is a recent-events surface, not an archive. `0` = keep forever. |
 | `notify_webhook_timeout` | `10` | HTTP timeout for `notify_webhook_url` POST (seconds). |
-| `push_urgency_floor` | `normal` | Web Push floor: only notifications at or above this urgency (`low`, `normal`, `high`, `urgent`) reach a phone. Agent questions always push. The in-app bell still shows everything. |
 | `snooze_max_cycle_seconds` | `900` | Hang backstop per Snooze cycle — runaway protection, not a budget. Cycles run until the activity ladder completes; user activity cancels them instantly. Local (Ollama) background models get 4x headroom. |
 | `snooze_cooldown_minutes` | `5` | Minimum idle time before Snooze starts running. |
 | `snooze_dedup_interval_days` | `7` | Days between memory-dedup sweeps per file. |

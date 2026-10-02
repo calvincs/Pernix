@@ -382,12 +382,6 @@ const SECTIONS = [
             },
             { key: 'grader_holdout_schedule', label: 'Grader Hold-out Schedule (cron)', type: 'text' },
             { key: 'post_mortem_retention_days', label: 'Post-mortem retention (days)', type: 'number' },
-            {
-                key: 'notification_retention_days',
-                label: 'Notification retention (days)',
-                type: 'number', min: 0, max: 365,
-                hint: 'The bell is a recent-events surface, not an archive. 0 = keep forever (pre-v3.1 behavior).',
-            },
         ],
     },
     {
@@ -633,14 +627,42 @@ const SECTIONS = [
                     + 'notify_webhook_url in data/settings.json — the API refuses to blank a URL field.',
             },
             { key: 'notify_webhook_timeout', label: 'Webhook Timeout (seconds)', type: 'number', min: 1, max: 60 },
+        ],
+    },
+    {
+        // What each kind of notice does. The per-area rows are not schema
+        // fields (they are entries of one dict-valued setting), so the section
+        // builds them itself via `extra` — see buildNotifyTierRows().
+        title: 'Notification tiers',
+        name: 'notify-tiers',
+        tab: 'integrations',
+        term: 'Settings keys: notify_tiers_enabled, notify_tier_overrides.',
+        description: 'Every notice belongs to a category with one tier. Interrupt: a badge on the bell plus a phone '
+            + 'push. Bell: a quiet item with a dot, never a buzz. Log only: the activity log, no badge. Off: not '
+            + 'recorded at all. Default needs no tuning; pick a tier for an area to move all of its notices there. '
+            + 'A per-category override in data/settings.json still beats the area row.',
+        fields: [
+            {
+                key: 'notify_tiers_enabled',
+                label: 'Tiered notifications',
+                type: 'bool',
+                hint: 'Off = every notice goes back to the old bell with its old urgency.',
+            },
             {
                 key: 'push_urgency_floor',
                 label: 'Push floor',
                 type: 'select',
                 options: ['low', 'normal', 'high', 'urgent'],
-                help: 'Only notifications at or above this urgency buzz a phone. Agent questions always push; the bell still shows everything.',
+                hint: 'Only notifications at or above this urgency buzz a phone. Agent questions always push; the bell still shows everything.',
+            },
+            {
+                key: 'notification_retention_days',
+                label: 'Notification retention (days)',
+                type: 'number', min: 0, max: 365,
+                hint: 'The bell is a recent-events surface, not an archive. 0 = keep forever (pre-v3.1 behavior).',
             },
         ],
+        extra: settings => buildNotifyTierRows(settings),
     },
 ];
 
@@ -1402,6 +1424,12 @@ function _revertField(key) {
     } else if (key === 'cors_origins') {
         const editor = document.getElementById('origins-editor');
         if (editor) editor.replaceWith(_buildOriginsEditor(_original.cors_origins || []));
+    } else if (key === 'notify_tier_overrides') {
+        const saved = _original.notify_tier_overrides || {};
+        for (const area of Object.keys(_notifyAreas)) {
+            const sel = document.getElementById(`setting-notify-tier-${area}`);
+            if (sel) sel.value = saved[area] || '';
+        }
     }
 }
 
@@ -1462,6 +1490,12 @@ function collectChanges() {
     // Include CORS origins if changed
     if (JSON.stringify(_corsOrigins) !== JSON.stringify(_original.cors_origins || [])) {
         changes.cors_origins = _corsOrigins;
+    }
+
+    // Notification tier rows: the whole dict is the setting.
+    const tiers = _collectTierOverrides();
+    if (tiers && _stableJson(tiers) !== _stableJson(_cleanTiers(_original.notify_tier_overrides))) {
+        changes.notify_tier_overrides = tiers;
     }
 
     return changes;
@@ -2320,6 +2354,101 @@ function buildThisBrowserSection() {
         row,
         buildEnterSendsRow(),
     ]);
+}
+
+// ---------------------------------------------------------------------------
+// Notification tiers, per area
+//
+// notify_tier_overrides is one dict-valued setting: {area or category: tier}.
+// Each area gets a row of its own, and "Default" simply leaves the area out.
+// Category-level keys (a full name like "canary.parked") have no row: they are
+// carried through a save untouched, so hand-tuning in settings.json survives
+// the modal. The default tiers come from the server (GET /api/settings
+// notify_areas, built from the registry); the labels are UI copy and live here.
+// ---------------------------------------------------------------------------
+
+const NOTIFY_AREA_LABELS = {
+    agent: ['Agent messages', 'The agent telling you something with notify_user'],
+    external: ['External messages', 'Messages from outside services and integrations'],
+    sessions: ['Sessions', 'A turn that needs you, timed out, ran out of budget or errored'],
+    jobs: ['Scheduled jobs', 'Job failures, test runs, and jobs left uncertain by a restart'],
+    canary: ['Canary suite', 'Test results and upkeep'],
+    skills: ['Skills', 'Unsafe verifications, rollbacks and auto-applied proposals'],
+    adaptive: ['Self-tuning', 'Learning-tab proposals, tripwires and sweeps'],
+    review: ['Waiting for review', 'The one "N proposals wait for your decision" item'],
+    dream: ['Dreaming', 'Corrections applied and stalled queues'],
+    spaces: ['Spaces', 'New space suggestions'],
+    system: ['System health', 'Model fallback, embeddings, MCP, search keys, quarantined tools'],
+};
+
+const NOTIFY_TIER_OPTIONS = [
+    { value: '', label: 'Default' },
+    { value: 'interrupt', label: 'Interrupt (badge + phone)' },
+    { value: 'bell', label: 'Bell (quiet)' },
+    { value: 'log', label: 'Log only' },
+    { value: 'drop', label: 'Off (don\u2019t record)' },
+];
+
+const NOTIFY_TIER_NAMES = { interrupt: 'interrupt', bell: 'bell', log: 'log only', drop: 'off' };
+
+let _notifyAreas = {};  // area -> {default_tiers, categories}, from GET /api/settings
+
+function _stableJson(obj) {
+    return JSON.stringify(Object.keys(obj || {}).sort().map(k => [k, obj[k]]));
+}
+
+// Only well-formed entries count: a hand-edited settings.json holding a
+// tier this client cannot show must not open the modal already dirty.
+function _cleanTiers(obj) {
+    return Object.fromEntries(Object.entries(obj || {}).filter(([, v]) => v in NOTIFY_TIER_NAMES));
+}
+
+function _collectTierOverrides() {
+    const areas = Object.keys(_notifyAreas);
+    if (!areas.length || !document.getElementById(`setting-notify-tier-${areas[0]}`)) return null;
+    const out = {};
+    // Category-level overrides have no row; keep them as they are.
+    for (const [k, v] of Object.entries(_cleanTiers(_original.notify_tier_overrides))) {
+        if (!(k in _notifyAreas)) out[k] = v;
+    }
+    for (const area of areas) {
+        const sel = document.getElementById(`setting-notify-tier-${area}`);
+        if (sel && sel.value) out[area] = sel.value;
+    }
+    return out;
+}
+
+function buildNotifyTierRows(settings) {
+    _notifyAreas = settings.notify_areas || {};
+    const areas = Object.keys(_notifyAreas);
+    // An older server publishes no registry: no rows rather than rows that
+    // cannot say what Default means.
+    if (!areas.length || !('notify_tier_overrides' in settings)) return null;
+    const saved = settings.notify_tier_overrides || {};
+
+    const rows = areas.map(area => {
+        const [label, blurb] = NOTIFY_AREA_LABELS[area] || [area, ''];
+        const info = _notifyAreas[area] || {};
+        const defaults = (info.default_tiers || []).map(t => NOTIFY_TIER_NAMES[t] || t).join(' / ');
+        const cats = (info.categories || []).filter(c => c in saved);
+        let hint = `${blurb ? blurb + '. ' : ''}Default: ${defaults || 'bell'}.`;
+        if (cats.length) {
+            hint += ` ${cats.length} categor${cats.length === 1 ? 'y here has' : 'ies here have'} a `
+                + 'per-category override in settings.json, which wins over this row.';
+        }
+        const id = `setting-notify-tier-${area}`;
+        const select = el('select', { id },
+            NOTIFY_TIER_OPTIONS.map(o => el('option', { value: o.value }, [text(o.label)])));
+        select.value = saved[area] || '';
+        return el('div', { class: 'setting-row', id: `row-notify-tier-${area}`, 'data-key': `notify_tier_overrides ${area}` }, [
+            el('div', { class: 'setting-label-cell' }, [
+                el('span', { class: 'setting-label-line' }, [el('label', { for: id }, [text(label)])]),
+                el('span', { class: 'setting-hint' }, [text(hint)]),
+            ]),
+            select,
+        ]);
+    });
+    return el('div', { class: 'settings-notify-tiers' }, rows);
 }
 
 function buildNotificationsSection() {
@@ -3607,6 +3736,7 @@ function _buildSettingsSection(section, settings) {
         el('h3', section.term ? { title: section.term } : {}, heading),
         ...(section.description ? [buildSectionDesc(section.description)] : []),
         ...fields,
+        ...(section.extra ? [section.extra(settings)].filter(Boolean) : []),
     ]);
 }
 
