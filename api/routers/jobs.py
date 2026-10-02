@@ -178,35 +178,27 @@ async def test_job_endpoint(name: str):
         raise HTTPException(404, detail=f"Job '{name}' not found")
 
     async def _run_and_notify():
-        from sessions.manager import get_manager
+        from core import notices
 
         try:
             result = await run_job_test(name)
         except Exception as e:
             logger.error("Job test '%s' crashed: %s", name, e)
             return
-        try:
-            title = f"Job test {'passed' if result.get('ok') else 'FAILED'}: {name}"
-            body = (result.get("error") or result.get("answer_preview") or "completed cleanly")[:200]
-            nid = await asyncio.to_thread(
-                db.add_notification,
-                session_id=result.get("session_id") or "",
-                title=title,
-                body=body,
-                urgency="normal" if result.get("ok") else "high",
-            )
-            get_manager().broadcast(
-                {
-                    "type": "dialog.notification",
-                    "notification_id": nid,
-                    "title": title,
-                    "body": body,
-                    "urgency": "normal" if result.get("ok") else "high",
-                    "source_session_id": result.get("session_id") or "",
-                }
-            )
-        except Exception as e:
-            logger.debug("Job test notification failed: %s", e)
+        # A pass is a receipt (activity log); a failure is worth a look (bell).
+        # notices does the DB write and any SSE; notify() never raises.
+        ok = bool(result.get("ok"))
+        title = f"Job test {'passed' if ok else 'FAILED'}: {name}"
+        body = (result.get("error") or result.get("answer_preview") or "completed cleanly")[:200]
+        await asyncio.to_thread(
+            notices.notify,
+            "jobs.test_passed" if ok else "jobs.test_failed",
+            title,
+            body,
+            session_id=result.get("session_id") or "",
+            subject=name,
+            link={"kind": "tab", "tab": "jobs"},
+        )
 
     task = asyncio.create_task(_run_and_notify())
     _bg_tasks.add(task)

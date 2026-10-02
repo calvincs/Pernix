@@ -613,7 +613,8 @@ async def test_budget_exhaustion_fires_user_notification(monkeypatch):
          _broadcast_session_timeout_notification.
       2. The notification carries the source session_id and a body
          that explains the user's recovery path ("send a new message").
-      3. db.add_notification persists for the bell panel.
+      3. db.add_notification persists for the bell panel (via core.notices;
+         a normal session's sessions.timeout is interrupt tier → urgency high).
     """
     from sessions import manager as mgr_mod
 
@@ -629,7 +630,8 @@ async def test_budget_exhaustion_fires_user_notification(monkeypatch):
     notify_calls: list[dict] = []
     real_add = mgr_mod.db.add_notification
 
-    def capturing_add(session_id="", title="", body="", urgency="normal"):
+    # core.notices writes the row with extra fields (category, tier, link...).
+    def capturing_add(session_id="", title="", body="", urgency="normal", **_kw):
         notify_calls.append(
             {
                 "session_id": session_id,

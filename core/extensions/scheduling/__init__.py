@@ -580,15 +580,17 @@ def reconcile_cron_runs() -> int:
     affected = db.reconcile_uncertain_cron_runs()
     if affected:
         names = ", ".join(sorted({r["job_name"] for r in affected}))
-        db.add_notification(
-            session_id="",
-            title=f"{len(affected)} cron run(s) uncertain after restart",
-            body=(
+        from core import notices
+
+        notices.notify(
+            "jobs.uncertain_after_restart",
+            f"{len(affected)} cron run(s) uncertain after restart",
+            (
                 f"Jobs: {names}. The server restarted mid-run; each outcome is "
                 f"unknown and was NOT re-run. Check the job history and re-run "
                 f"manually if needed."
             ),
-            urgency="high",
+            link={"kind": "tab", "tab": "jobs"},
         )
         logger.warning("Marked %d cron run(s) uncertain at startup: %s", len(affected), names)
     return len(affected)
@@ -638,23 +640,22 @@ def _add_job_internal(
 
 
 def _notify_job_failure(manager, bus, job_name: str, session_id: str | None, error: str):
-    """Broadcast a dialog.notification for job failures so push/webhook fire."""
-    notification = {
-        "type": "dialog.notification",
-        "title": f"Job failed: {job_name}",
-        "body": error[:200],
-        "urgency": "high",
-        "source_session_id": session_id or "",
-    }
-    nid = db.add_notification(
+    """Record a jobs.failed notice (interrupt: badge + push/webhook).
+
+    core.notices does the SSE + bus emission and never raises, so a failed
+    notification cannot mask the job error. `manager`/`bus` stay in the
+    signature for existing callers and tests; they are no longer used here.
+    """
+    from core import notices
+
+    notices.notify(
+        "jobs.failed",
+        f"Job failed: {job_name}",
+        error[:200],
         session_id=session_id or "",
-        title=notification["title"],
-        body=notification["body"],
-        urgency="high",
+        subject=job_name,
+        link={"kind": "tab", "tab": "jobs"},
     )
-    notification["notification_id"] = nid
-    manager.broadcast(notification)
-    bus.emit({**notification, "session_id": session_id or ""})
 
 
 def _ensure_dispatch_session(session_id: str | None, title: str = "", space_id: str | None = None) -> str:

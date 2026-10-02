@@ -347,43 +347,30 @@ def _broadcast_reflect_notification(
     session: dict,
     title: str,
     body: str,
+    kind: str = "attention",
 ) -> None:
-    """Broadcast a dialog.notification for reflect events so push/webhook fire."""
-    from core.events import get_event_bus
-    from sessions.manager import get_manager
+    """Record a reflect notice; core.notices decides tier and delivery.
 
-    # Canary runs are synthetic: the Canary tab already records each outcome,
-    # and a push for a test run (17 of 19 high-urgency pushes in the 17 days
-    # before this guard) trains the user to ignore the phone. Workers report
-    # to their orchestrator, which decides what the user needs to see.
-    if session.get("session_type") in ("canary", "worker"):
-        logger.info(
-            "Reflect notification suppressed for %s session %s: %s", session.get("session_type"), session_id[:12], title
-        )
-        return
+    kind="attention": the turn stopped and needs the user (escalate, retries
+    exhausted, circuit breaker, budget skip) — sessions.reflect_attention.
+    kind="followup": the answer was already delivered and a background grade
+    found it incomplete — worth a look, never a buzz (sessions.reflect_followup).
+    Canary/worker sessions record nothing: the registry drops them (the Canary
+    tab records each outcome; a worker reports to its orchestrator).
+    """
+    from core import notices
 
     session_title = session.get("title", "")
     label = f"{session_title}: {title}" if session_title else title
-
-    notification = {
-        "type": "dialog.notification",
-        "title": label,
-        "body": body,
-        "urgency": "high",
-        "source_session_id": session_id,
-    }
-
-    # Persist so the bell panel can display it
-    nid = db.add_notification(
+    category = "sessions.reflect_followup" if kind == "followup" else "sessions.reflect_attention"
+    notices.notify(
+        category,
+        label,
+        body,
         session_id=session_id,
-        title=label,
-        body=body,
-        urgency="high",
+        link={"kind": "session", "id": session_id},
+        session_type=session.get("session_type"),
     )
-    notification["notification_id"] = nid
-
-    get_manager().broadcast(notification)
-    get_event_bus().emit({**notification, "session_id": session_id})
 
 
 async def _run_turn_gates(session_id: str, session: dict, session_obj, emit=None) -> list:
@@ -1008,6 +995,7 @@ def _deferred_verdict_notification(session_id: str, result) -> None:
         _broadcast_reflect_notification(
             session_id,
             session,
+            kind="followup",
             title=f"Turn graded '{result.verdict}' after delivery",
             body=(
                 "The background grade found the last turn incomplete "
