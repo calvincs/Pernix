@@ -29,7 +29,7 @@ Rules the callers rely on:
   same channels its old call site used.
 
 `link` is a small dict the client turns into an "open" button:
-  {"kind": "session", "id": <session_id>}   or   {"kind": "tab", "tab": "learning"|"canary"|"skills"|"dream"|"jobs"|"mcp"|"settings"}
+  {"kind": "session", "id": <session_id>}   or   {"kind": "tab", "tab": "learning"|"canary"|"skills"|"dream"|"jobs"|"mcp"|"settings"|"spaces"}
 """
 
 from __future__ import annotations
@@ -67,8 +67,8 @@ _NOT_FOR_SYNTHETIC = {"canary": "drop", "worker": "drop", "snooze": "log"}
 
 CATEGORIES: dict[str, Category] = {
     # --- the agent talking to the user -------------------------------------
-    "agent.notify_user": Category("bell", legacy_emit="push"),
-    "agent.notify_user_urgent": Category("interrupt", legacy_urgency="high", legacy_emit="push"),
+    "agent.notify_user": Category("bell", {"canary": "drop"}, legacy_emit="push"),
+    "agent.notify_user_urgent": Category("interrupt", {"canary": "drop"}, legacy_urgency="high", legacy_emit="push"),
     "external.message": Category("bell", legacy_emit="push"),
     "external.message_urgent": Category("interrupt", legacy_urgency="high", legacy_emit="push"),
     # --- sessions: the turn stopped, or ended badly ------------------------
@@ -79,7 +79,7 @@ CATEGORIES: dict[str, Category] = {
     "sessions.timeout": Category(
         "interrupt", {**_NOT_FOR_SYNTHETIC, "cron": "bell"}, legacy_urgency="high", legacy_emit="push"
     ),
-    "sessions.goal_budget": Category("interrupt", legacy_urgency="high", legacy_emit="sse"),
+    "sessions.goal_budget": Category("interrupt", {"cron": "bell"}, legacy_urgency="high", legacy_emit="sse"),
     "sessions.stream_error": Category("interrupt", _NOT_FOR_SYNTHETIC, legacy_urgency="high"),
     # --- scheduled jobs -----------------------------------------------------
     "jobs.failed": Category("interrupt", legacy_urgency="high", legacy_emit="push"),
