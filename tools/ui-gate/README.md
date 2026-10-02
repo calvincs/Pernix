@@ -182,11 +182,24 @@ turn's seeded text, Arrow Up moving the selection, and — in both themes —
 that no segment paints black and the story's prose clears 4.5:1 on its card.
 The touch half asserts 44px rows and no sideways scroll at 390px.
 
+### The bell pass
+
+Last in m2, because it dismisses a row and marks the activity log read.
+`seed.py` writes one `interrupt` row, two open `bell` rows (one folded ×3), a
+`log` row and a `bell` row already dismissed — the last two dated yesterday.
+At 1280×800 the pass asserts that the badge counts only the interrupt (there
+are no questions), that Needs you holds the open rows interrupt-first and not
+the other two, that after Dismiss the badge becomes a dot, that Activity shows
+the log row, the dismissed rows (quiet) and both days, that Mark all read
+clears "N new since your last visit", that an area chip filters, and that
+Escape closes. At 375×812 touch it asserts no sideways scroll on either tab
+and that every control in the panel is at least 44px.
+
 ## Files
 
 | | |
 |---|---|
 | `run.sh` | boots, seeds, runs, tears down |
-| `seed.py` | the fixture: a chat with markdown, a code block, a wide table, three tool rounds, a 120-message session for paging, a fan-out parent with three workers, three spaces, cron/snooze/canary sessions, and a three-turn state log for the timeline |
+| `seed.py` | the fixture: a chat with markdown, a code block, a wide table, three tool rounds, a 120-message session for paging, a fan-out parent with three workers, three spaces, cron/snooze/canary sessions, a three-turn state log for the timeline, and one notification of each tier plus a ×3 repeat and a dismissed row |
 | `check.py` | the checks themselves; run directly if you already have a seeded instance |
 | `desktop-baseline.json` | see above |

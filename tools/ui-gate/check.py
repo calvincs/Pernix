@@ -2612,6 +2612,219 @@ def trust_loop_absent(browser):
     ctx.close()
 
 
+BELL_JS = r"""() => {
+  const b = document.getElementById('bell-badge');
+  const cs = b ? getComputedStyle(b) : null;
+  const items = [...document.querySelectorAll('#bell-items .notif-item')].map(r => ({
+    key: r.getAttribute('data-key') || '',
+    title: r.querySelector('.notif-item-type')?.textContent || '',
+    occ: r.querySelector('.notif-occ')?.textContent || '',
+    quiet: r.classList.contains('is-quiet'),
+    state: r.querySelector('.notif-state')?.textContent || '',
+    isNew: r.classList.contains('is-new'),
+  }));
+  const tabs = [...document.querySelectorAll('.bell-panel [role=tab]')].map(t => ({
+    id: t.id, selected: t.getAttribute('aria-selected')}));
+  return {
+    badgeText: b ? b.textContent : null,
+    badgeShown: !!cs && cs.display !== 'none',
+    dot: !!b && b.classList.contains('is-dot'),
+    label: document.getElementById('notification-bell')?.getAttribute('aria-label') || '',
+    open: !!document.querySelector('.bell-panel'),
+    items, tabs,
+    days: [...document.querySelectorAll('#bell-items .notif-day')].map(d => d.textContent),
+    chips: [...document.querySelectorAll('#bell-items .bell-chip')].map(c => c.textContent),
+    newText: document.querySelector('#bell-items .bell-new-count')?.textContent || '',
+  };
+}"""
+
+BELL_FIT_JS = r"""() => {
+  const card = document.querySelector('.bell-panel');
+  if (!card) return null;
+  const r = card.getBoundingClientRect();
+  const vis = el => { const b = el.getBoundingClientRect(); const cs = getComputedStyle(el);
+    return b.width > 0 && b.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
+  const small = [];
+  card.querySelectorAll('button, a[href], [role=tab]').forEach(el => {
+    if (!vis(el)) return;
+    const b = el.getBoundingClientRect();
+    if (b.height < 44 || b.width < 44) small.push((el.getAttribute('data-act') || el.className || el.tagName) + ' ' + Math.round(b.width) + 'x' + Math.round(b.height));
+  });
+  const wide = [...card.querySelectorAll('*')].filter(el => el.getBoundingClientRect().right > innerWidth + 1).length;
+  return {
+    docScroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    cardLeft: Math.round(r.left), cardRight: Math.round(r.right), vw: innerWidth,
+    bodyScroll: (() => { const m = card.querySelector('.modal-body'); return m ? m.scrollWidth - m.clientWidth : 0; })(),
+    wide, small,
+  };
+}"""
+
+
+def _bell(pg):
+    return pg.evaluate(BELL_JS)
+
+
+def _api(pg, path):
+    return pg.evaluate("(p) => fetch(p).then(r => r.json())", path)
+
+
+def bell_tiers(browser):
+    """m2: the bell counts what needs the user and logs the rest (v42).
+
+    seed.py writes one interrupt row, two open bell rows (one of them a
+    repeat folded three times), a log row, and a bell row already dismissed.
+    The badge must count only the interrupt (there are no questions), the
+    panel's Needs you tab must hold the three open rows and neither of the
+    others, Dismiss must be soft — the row leaves Needs you and is still in
+    Activity — and with only the quiet rows left the badge is a dot, not 0.
+    Mutates state (a dismiss, read-all), so it runs after every read-only pass.
+    """
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+    pg = ctx.new_page()
+    pg.on("console", console_sink("bell"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[bell] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+
+    counts = _api(pg, "/api/notifications/counts")
+    questions = len(_api(pg, "/api/questions").get("questions") or [])
+    b = _settle(lambda: (lambda r: r if r["badgeShown"] else None)(_bell(pg))) or _bell(pg)
+    check(
+        "bell",
+        "m2: the badge counts questions + interrupt rows only, not bell or log rows",
+        counts.get("needs_you") == 1
+        and counts.get("bell", 0) >= 2
+        and b["badgeText"] == str(questions + counts["needs_you"])
+        and not b["dot"],
+        {"badge": b["badgeText"], "counts": counts, "questions": questions},
+        "m2",
+    )
+
+    pg.click("#notification-bell")
+    time.sleep(1.2)
+    b = _bell(pg)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-bell-needs.png")
+    titles = [i["title"] for i in b["items"]]
+    coalesced = next((i for i in b["items"] if i["title"] == "Canary probe parked"), None)
+    check(
+        "bell",
+        "m2: Needs you lists the interrupt first, then the open bell rows, with x3 on the repeat",
+        b["open"]
+        and titles[:1] == ["Job failed: nightly-backup"]
+        and "Embeddings are down" in titles
+        and coalesced is not None
+        and coalesced["occ"] == "×3"
+        and "Adaptive edits applied" not in titles
+        and "MCP server boxpriv unreachable" not in titles,
+        {"titles": titles, "coalesced": coalesced},
+        "m2",
+    )
+
+    # Dismiss is soft.
+    key = next((i["key"] for i in b["items"] if i["title"] == "Job failed: nightly-backup"), "")
+    pg.click(f'#bell-items [data-key="{key}"] [data-act="dismiss"]')
+    time.sleep(1.2)
+    b = _bell(pg)
+    titles = [i["title"] for i in b["items"]]
+    check(
+        "bell",
+        "m2: with only quiet rows open the badge is a dot, not a number",
+        "Job failed: nightly-backup" not in titles and b["dot"] and b["badgeShown"] and b["badgeText"] == "",
+        {"titles": titles, "badge": b["badgeText"], "dot": b["dot"], "label": b["label"]},
+        "m2",
+    )
+
+    pg.click("#bell-tab-activity")
+    time.sleep(1.4)
+    b = _bell(pg)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-bell-activity.png")
+    by = {i["title"]: i for i in b["items"]}
+    sel = {t["id"]: t["selected"] for t in b["tabs"]}
+    check(
+        "bell",
+        "m2: Activity lists the log row, the dismissed row and the just-dismissed one, by day",
+        sel.get("bell-tab-activity") == "true"
+        and "Adaptive edits applied" in by
+        and by.get("MCP server boxpriv unreachable", {}).get("quiet") is True
+        and by.get("Job failed: nightly-backup", {}).get("state") == "Dismissed"
+        and b["days"][:2] == ["Today", "Yesterday"]
+        and "All" in b["chips"]
+        and len(b["chips"]) >= 4,
+        {"titles": list(by), "days": b["days"], "chips": b["chips"], "tabs": sel},
+        "m2",
+    )
+    had_new = b["newText"]
+    pg.click('#bell-items [data-act="read-all"]')
+    time.sleep(0.8)
+    b = _bell(pg)
+    after = _api(pg, "/api/notifications/counts")
+    check(
+        "bell",
+        "m2: Activity says what is new, and Mark all read clears it",
+        had_new.endswith("new since your last visit")
+        and not had_new.startswith("Nothing")
+        and b["newText"] == "Nothing new since your last visit"
+        and after.get("unread") == 0
+        and not any(i["isNew"] for i in b["items"]),
+        {"before": had_new, "after": b["newText"], "unread": after.get("unread")},
+        "m2",
+    )
+
+    # An area chip filters the log to that area.
+    pg.evaluate(
+        "() => [...document.querySelectorAll('#bell-items .bell-chip')].find(c => c.textContent === 'Canary')?.click()"
+    )
+    time.sleep(1.0)
+    b = _bell(pg)
+    titles = [i["title"] for i in b["items"]]
+    check(
+        "bell",
+        "m2: an area chip narrows Activity to that area and keeps the other chips",
+        titles == ["Canary probe parked"] and len(b["chips"]) >= 4,
+        {"titles": titles, "chips": b["chips"]},
+        "m2",
+    )
+    pg.keyboard.press("Escape")
+    time.sleep(0.5)
+    check("bell", "m2: Escape closes the bell panel", not _bell(pg)["open"], "", "m2")
+    ctx.close()
+
+    # Phone: 375px, touch. No sideways scroll on either tab, 44px targets.
+    ctx = browser.new_context(
+        viewport={"width": 375, "height": 812}, is_mobile=True, has_touch=True, color_scheme="light"
+    )
+    pg = ctx.new_page()
+    pg.on("console", console_sink("bell-touch"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    pg.evaluate("() => document.getElementById('notification-bell')?.click()")
+    time.sleep(1.2)
+    fits = {}
+    for tab in ("needs", "activity"):
+        pg.evaluate(f"() => document.getElementById('bell-tab-{tab}')?.click()")
+        time.sleep(1.2)
+        pg.screenshot(path=f"{shots}/{tag}-phone375-bell-{tab}.png")
+        fits[tab] = pg.evaluate(BELL_FIT_JS)
+    check(
+        "bell-touch",
+        "m2: the bell panel fits 375px with no sideways scroll on either tab",
+        all(
+            f and f["docScroll"] <= 0 and f["bodyScroll"] <= 0 and f["wide"] == 0 and f["cardRight"] <= f["vw"]
+            for f in fits.values()
+        ),
+        fits,
+        "m2",
+    )
+    check(
+        "bell-touch",
+        "m2: every control in the bell panel is at least 44px on touch",
+        all(f and not f["small"] for f in fits.values()),
+        {k: (v or {}).get("small") for k, v in fits.items()},
+        "m2",
+    )
+    ctx.close()
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch()
     for name, w, h, opts in VPS:
@@ -2698,6 +2911,8 @@ with sync_playwright() as p:
             (message_feedback_touch, "feedback-touch"),
             (trust_tab, "trust"),
             (trust_loop_absent, "absent"),
+            # Last: dismisses a row and marks the log read.
+            (bell_tiers, "bell"),
         ):
             try:
                 fn(browser)
