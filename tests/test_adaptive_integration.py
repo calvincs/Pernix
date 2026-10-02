@@ -539,12 +539,14 @@ async def test_tripwire_dismiss_is_durable(monkeypatch):
     monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
     _seed_canary_history("ab-dismissed", baseline_pass=True, post_pass=False)
     assert any(a["action"] == "flagged" for a in evaluate_tripwire())
+    assert [n["category"] for n in db.get_notifications()] == ["adaptive.tripwire_suspect"]
 
     app = FastAPI()
     app.include_router(adaptive_router.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/api/adaptive/batches/ab-dismissed/dismiss")
     assert resp.status_code == 200 and resp.json()["cleared"]
+    assert db.get_notifications() == []  # a human dismiss closes the flag's bell item too
 
     # Same evidence, next cycle — the dismiss holds instead of re-flagging.
     assert evaluate_tripwire() == []

@@ -229,4 +229,9 @@ async def dismiss_suspect(batch_id: str):
     from db.models import _now
 
     await _asyncio.to_thread(db.adaptive_update_batch, batch_id, "applied", None, _now())
+    # The flag is gone, so its bell item goes with it (the Learning tab is where
+    # the user acted; the row stays in the activity log as resolved).
+    from core import notices
+
+    await _asyncio.to_thread(notices.resolve, "adaptive.tripwire_suspect", batch_id)
     return {"status": "applied", "cleared": True}
