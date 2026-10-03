@@ -328,20 +328,6 @@ async def test_evaluator_dead_end_archives_instead_of_repooling(store, mock_llm_
 # --- what the read surfaces say --------------------------------------------
 
 
-async def test_hypotheses_endpoint_points_at_the_archive(store):
-    """A status filter for a terminal status can only ever return nothing.
-    Saying where the files went beats implying none were ever produced."""
-    from api.routers.telos import telos_hypotheses
-
-    h = _pooled(store, "no falsifier")
-    store.archive_hypothesis(h, "untestable", "dead end")
-
-    out = await telos_hypotheses(status="untestable")
-    assert out["hypotheses"] == []
-    assert "soup/archive/" in out["note"]
-    assert "note" not in await telos_hypotheses(status="soup")
-
-
 def test_status_summary_counts_the_archive_separately(store):
     """The pool count must read as a live queue; the archived total is
     reported beside it so hundreds of entries do not simply vanish."""

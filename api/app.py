@@ -601,7 +601,6 @@ from api.routers import (
     skills,
     spaces,
     storage,
-    telos,
     tools,
     trust,
     voice,
@@ -624,7 +623,6 @@ app.include_router(jobs.router)
 app.include_router(skills.router)
 app.include_router(push.router)
 app.include_router(rlm.router)
-app.include_router(telos.router)
 app.include_router(voice.router)
 app.include_router(mcp.router)
 app.include_router(storage.router)
