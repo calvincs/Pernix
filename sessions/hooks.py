@@ -990,48 +990,9 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
         await _schedule_deferred_reflect(session_id, session, session_obj, gate_results, emit=emit)
         return
 
-    # Pre-reflect enrichment: lessons recall + (when stuck) trial-hint peek at
-    # pending skill proposals. extra_evidence is appended to reflect's prompt
-    # context, never written into SKILL.md. Stuck = we've already retried at
-    # least once on this turn (reflect_count >= 1).
-    extra_evidence_parts: list[str] = []
-    injected_trial_proposals: list[str] = []
-    is_stuck = session_obj.turn.reflect_count >= 1
-
-    lesson_block = await _recall_lesson_evidence(session_id, messages)
-    if lesson_block:
-        extra_evidence_parts.append(lesson_block)
-
-    if is_stuck:
-        try:
-            from core.refine import _identify_active_skill
-
-            active_skill = _identify_active_skill(messages)
-            if active_skill:
-                pending = db.get_pending_proposals_for_skill(active_skill, limit=3)
-                if pending:
-                    lines = [
-                        f"## TRIAL HINTS (unapproved skill proposals for '{active_skill}' "
-                        f"— use with caution; report back what helped)"
-                    ]
-                    for p in pending:
-                        pid = p["id"]
-                        conf = p.get("confidence", 0.0)
-                        problem = (p.get("problem") or "").strip()
-                        change = (p.get("proposed_change") or "").strip()
-                        lines.append(
-                            f"- [proposal {pid[:8]}, confidence {conf:.2f}] "
-                            f"Problem: {problem}\n  Proposed fix: {change}"
-                        )
-                        db.record_proposal_trial_use(pid)
-                        injected_trial_proposals.append(pid)
-                    extra_evidence_parts.append("\n".join(lines))
-        except Exception as e:
-            logger.debug("Reflect stuck-mode peek failed for %s: %s", session_id, e)
-
-    extra_evidence = "\n\n".join(extra_evidence_parts)
-    # Track on session_obj so the post-verdict success bump can find them.
-    session_obj.turn.injected_trial_proposals = injected_trial_proposals
+    # Pre-reflect enrichment: lessons recall. extra_evidence is appended to
+    # reflect's prompt context, never written into SKILL.md.
+    extra_evidence = await _recall_lesson_evidence(session_id, messages) or ""
 
     try:
         from core.reflect import build_retry_context, reflect_on_session
@@ -1061,16 +1022,6 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             gate_results=gate_results,
             tool_summary_attempts=session_obj.turn.tool_summary_attempts or None,
         )
-
-        # If trial hints were injected and reflect now reports pass, count
-        # those proposals as having helped — weak signal toward approval, never
-        # an auto-approval.
-        if result.verdict == "pass" and injected_trial_proposals:
-            for pid in injected_trial_proposals:
-                try:
-                    db.record_proposal_trial_success(pid)
-                except Exception as e:
-                    logger.debug("record_proposal_trial_success failed for %s: %s", pid, e)
 
         # Persist reflect result as a message for visibility
         import json

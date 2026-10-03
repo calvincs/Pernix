@@ -1807,7 +1807,7 @@ async def reflect_on_session(
         tool_summary: Aggregate tool execution stats from the agent loop
         scout_report: Optional ScoutReport from the turn (for deliverables_plan)
         extra_evidence: Optional supplementary text appended to the evidence
-            blob (e.g. recall of past lessons, trial-hint proposals when stuck).
+            blob (e.g. recall of past lessons).
         turn_user_msg_id: Id of the user message that triggered this turn. When
             provided, reflect grades against THIS turn's request, not the latest
             user message in the DB (which may be a queued message for a future

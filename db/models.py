@@ -4872,52 +4872,6 @@ def get_pending_proposal_counts_by_skill() -> dict[str, int]:
         return {r["skill_name"]: int(r["n"]) for r in rows}
 
 
-def get_pending_proposals_for_skill(
-    skill_name: str,
-    min_confidence: float = 0.6,
-    limit: int = 3,
-) -> list[dict]:
-    """Pending proposals for a skill, sorted by confidence desc then recency.
-
-    Used by the stuck-mode peek in sessions/hooks.py — returns proposals the
-    agent can try as trial hints. Caller MUST treat these as unapproved and
-    call record_proposal_trial_use(...) for each one injected.
-    """
-    with connect_sessions() as conn:
-        rows = conn.execute(
-            """SELECT * FROM skill_improvement_proposals
-               WHERE skill_name = ?
-                 AND status = 'pending'
-                 AND confidence >= ?
-               ORDER BY confidence DESC, created_at DESC
-               LIMIT ?""",
-            (skill_name, float(min_confidence), limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def record_proposal_trial_use(proposal_id: str) -> None:
-    """Increment trial_uses counter and bump last_trial_at."""
-    with connect_sessions() as conn:
-        conn.execute(
-            """UPDATE skill_improvement_proposals
-               SET trial_uses = trial_uses + 1, last_trial_at = ?
-               WHERE id = ?""",
-            (_now(), proposal_id),
-        )
-
-
-def record_proposal_trial_success(proposal_id: str) -> None:
-    """Increment trial_successes counter."""
-    with connect_sessions() as conn:
-        conn.execute(
-            """UPDATE skill_improvement_proposals
-               SET trial_successes = trial_successes + 1
-               WHERE id = ?""",
-            (proposal_id,),
-        )
-
-
 def get_skill_proposal(proposal_id: str) -> dict | None:
     with connect_sessions() as conn:
         row = conn.execute("SELECT * FROM skill_improvement_proposals WHERE id = ?", (proposal_id,)).fetchone()

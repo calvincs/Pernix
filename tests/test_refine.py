@@ -574,3 +574,82 @@ def test_pending_proposal_counts_excludes_resolved():
 
     counts = db.get_pending_proposal_counts_by_skill()
     assert "gamma-skill" not in counts
+
+
+# ---------------------------------------------------------------------------
+# add_skill_proposal — session-origin defaults
+# ---------------------------------------------------------------------------
+
+
+def test_add_skill_proposal_session_origin_defaults():
+    from db import models as db
+
+    pid = db.add_skill_proposal(
+        skill_name="x",
+        section="Notes",
+        problem="p",
+        proposed_change="c",
+        confidence=0.7,
+        source_origin="session",
+        session_id="s123",
+    )
+    row = db.get_skill_proposal(pid)
+    assert row["source_origin"] == "session"
+    assert row["session_id"] == "s123"
+    assert row["workflow_name"] is None
+    assert row["run_id"] is None
+
+
+def test_add_skill_proposal_refine_origin():
+    """The authoring pass (core/refine.py) tags its proposals 'refine'."""
+    from db import models as db
+
+    pid = db.add_skill_proposal(
+        skill_name="x",
+        section="Notes",
+        problem="p",
+        proposed_change="c",
+        confidence=0.7,
+        source_origin="refine",
+        session_id="s9",
+    )
+    row = db.get_skill_proposal(pid)
+    assert row["source_origin"] == "refine"
+    assert row["session_id"] == "s9"
+    # Legacy columns are written NULL now that the workflow engine is gone.
+    assert row["workflow_name"] is None
+    assert row["run_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# list_skill_proposals — origin filter
+# ---------------------------------------------------------------------------
+
+
+def test_list_proposals_filter_by_origin():
+    from db import models as db
+
+    db.add_skill_proposal(
+        skill_name="x",
+        section="",
+        problem="p",
+        proposed_change="c",
+        confidence=0.7,
+        source_origin="refine",
+        session_id="s0",
+    )
+    db.add_skill_proposal(
+        skill_name="x",
+        section="",
+        problem="p",
+        proposed_change="c",
+        confidence=0.7,
+        source_origin="session",
+        session_id="s1",
+    )
+    refine_only = db.list_skill_proposals(source_origin="refine")
+    session_only = db.list_skill_proposals(source_origin="session")
+    both = db.list_skill_proposals()
+    assert len(refine_only) == 1
+    assert len(session_only) == 1
+    assert len(both) == 2

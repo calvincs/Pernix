@@ -2475,17 +2475,11 @@ function renderSkills() {
             const originLabel = origin === 'session'
                 ? `SESSION \u00b7 ${(proposal.session_id || '').slice(0, 8)}`
                 : `${origin.toUpperCase()} \u00b7 ${(proposal.session_id || '').slice(0, 8) || '?'}`;
-            const trialUses = proposal.trial_uses || 0;
-            const trialSuccesses = proposal.trial_successes || 0;
-            const trialLabel = trialUses > 0
-                ? ` \u00b7 trial: ${trialUses} use${trialUses === 1 ? '' : 's'} \u00b7 ${trialSuccesses} helped`
-                : '';
             const info = el('div', { class: 'fp-proposal-info' }, [
                 el('span', { class: `fp-proposal-origin fp-proposal-origin-${origin}` }, [text(originLabel)]),
                 el('span', { class: 'fp-proposal-skill' }, [text(proposal.skill_name)]),
                 el('span', { class: 'fp-proposal-section' }, [text(proposal.section ? ` \u00b7 ${proposal.section}` : '')]),
                 el('span', { class: 'fp-proposal-problem' }, [text(` — ${(proposal.problem || '').slice(0, 80)}${(proposal.problem || '').length > 80 ? '\u2026' : ''}`)]),
-                el('span', { class: 'fp-proposal-trial' }, [text(trialLabel)]),
             ]);
             const reviewBtn = el('button', { class: 'fp-btn fp-btn-xs' }, [text('review')]);
             reviewBtn.addEventListener('click', async () => {

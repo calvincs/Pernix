@@ -1071,10 +1071,6 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-proposal-origin-refine {
     color: var(--text-dim);
 }
-.fp-proposal-trial {
-    color: var(--text-faint);
-    font-style: italic;
-}
 .fp-btn-xs { flex-shrink: 0; }
 /* The raw/rendered toggle above a markdown preview. */
 .fp-viewer-toggle { margin-bottom: var(--sp-2); }
