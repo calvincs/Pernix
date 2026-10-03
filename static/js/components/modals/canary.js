@@ -6,8 +6,9 @@
 import { el, text, clear } from '../../render.js';
 import { icon } from '../../icons.js';
 import { get, post, put, del, patch } from '../../api.js';
-import { actionBtn, setActionNotice, takeActionNotice } from './adaptive.js';
-import { makeDisclosure, resultLine, tabGlossary } from './telos.js';
+import {
+    actionBtn, makeDisclosure, resultLine, setActionNotice, tabGlossary, takeActionNotice,
+} from './tab-kit.js';
 import { createCodeEditor } from '../file-panel.js';
 
 // The open raw-CANARY.md editor, if any. Refresh and Cancel both tear the tab

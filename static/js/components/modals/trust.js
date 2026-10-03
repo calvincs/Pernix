@@ -21,7 +21,7 @@
 import { el, text, clear } from '../../render.js';
 import { icon } from '../../icons.js';
 import { get } from '../../api.js';
-import { tabGlossary } from './telos.js';
+import { tabGlossary } from './tab-kit.js';
 
 const MISSING_BACKEND = 'Trust metrics need the 3.2 backend';
 
