@@ -78,7 +78,12 @@ def test_scan_skips_invalid(tmp_path):
 
 def test_seed_suite_parses():
     defs = scan_canaries(Path("data/canaries"))
-    assert len(defs) >= 6
+    assert sorted(d.name for d in defs) == [
+        "gen-file-create",
+        "gen-json-transform",
+        "link-digest",
+        "youtube-captions-digest",
+    ]
     for d in defs:
         if d.generated:
             # A generated canary builds its prompt and gates per run from a

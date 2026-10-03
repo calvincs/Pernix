@@ -11,6 +11,7 @@ rather than a claim.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -473,11 +474,11 @@ def test_pick_seed_is_not_constant():
 
 
 # ---------------------------------------------------------------------------
-# The three shipped generators — determinism and correctness across seeds
+# The shipped generators — determinism and correctness across seeds
 # ---------------------------------------------------------------------------
 
 SEEDS = list(range(1, 21))
-GENERATED = ("gen-file-create", "gen-grep-count", "gen-json-transform")
+GENERATED = ("gen-file-create", "gen-json-transform", "link-digest", "youtube-captions-digest")
 
 
 def _real_canary(name: str):
@@ -518,10 +519,6 @@ def _solve_file_create(spec) -> tuple[str, str]:
     return m.group(1), line
 
 
-def _solve_grep_count(spec) -> int:
-    return sum(1 for content in spec.files.values() for line in content.splitlines() if "ERROR" in line)
-
-
 def _solve_json_transform(spec) -> dict:
     import json
 
@@ -547,11 +544,8 @@ def test_shipped_generators_actually_vary_with_the_seed(name):
     files = {tuple(sorted((k, v) for k, v in _variant(name, s).files.items())) for s in SEEDS}
     # The fixture itself is never repeated across 20 seeds.
     assert len(files) == len(SEEDS)
-    # The expected value moves too. gen-grep-count's answer is a small count,
-    # so its gate command collides by arithmetic, not by design — a spread is
-    # all that can be asserted there.
-    floor = 4 if name == "gen-grep-count" else len(SEEDS) - 2
-    assert len(gates) >= floor, gates
+    # The expected value moves too.
+    assert len(gates) >= len(SEEDS) - 2, gates
 
 
 @pytest.mark.parametrize("seed", SEEDS)
@@ -566,32 +560,6 @@ def test_gen_file_create_gate_agrees_with_its_own_prompt(tmp_path, seed):
     # Off-by-one: the decoy in the workspace is never the right answer.
     (tmp_path / filename).write_text(spec.files["reference/sample.txt"], encoding="utf-8")
     assert _run_gate(spec, tmp_path) != 0
-
-
-@pytest.mark.parametrize("seed", SEEDS)
-def test_gen_grep_count_expected_value_matches_the_fixture(tmp_path, seed):
-    spec = _variant("gen-grep-count", seed)
-    _materialise(spec, tmp_path)
-    expected = _solve_grep_count(spec)
-    assert expected > 0
-
-    (tmp_path / "answer.txt").write_text(f"{expected}\n", encoding="utf-8")
-    assert _run_gate(spec, tmp_path) == 0, spec.gates[0]["command"]
-
-    (tmp_path / "answer.txt").write_text(f"{expected + 1}\n", encoding="utf-8")
-    assert _run_gate(spec, tmp_path) != 0
-
-
-@pytest.mark.parametrize("seed", SEEDS)
-def test_gen_grep_count_keeps_both_traps(seed):
-    """Case-sensitivity and substring semantics are the whole point of the
-    task; a fixture without them is scoring nothing."""
-    spec = _variant("gen-grep-count", seed)
-    lines = [ln for content in spec.files.values() for ln in content.splitlines()]
-    assert any("error" in ln and "ERROR" not in ln for ln in lines), "lowercase trap missing"
-    assert any("ERRORS-SUMMARY" in ln for ln in lines), "substring trap missing"
-    assert 2 <= len(spec.files) <= 4
-    assert all(p.startswith("logs/") for p in spec.files)
 
 
 @pytest.mark.parametrize("seed", SEEDS)
@@ -619,12 +587,100 @@ def test_gen_json_transform_expected_values_match_the_fixture(tmp_path, seed):
     assert _run_gate(spec, tmp_path) != 0
 
 
+@pytest.mark.parametrize("seed", SEEDS)
+def test_link_digest_gates_agree_with_the_served_article(tmp_path, seed):
+    import re
+
+    base = "http://localhost:8090/workspace/.canary-serve/tok"
+    spec = _variant("link-digest", seed)
+    html = spec.files["article.html"]
+    title = re.search(r"<h1>(.*?)</h1>", html).group(1)
+    author = re.search(r'class="byline">By (.*?)</p>', html).group(1)
+    key = re.search(r"Key figure:</strong> ([0-9.]+)", html).group(1)
+    decoy = re.search(r"earlier estimate of ([0-9.]+)", html).group(1)
+    assert key != decoy
+    assert "{{SERVE_BASE}}/article.html" in spec.prompt
+
+    def gates_pass(text: str) -> bool:
+        (tmp_path / "summary.md").write_text(text, encoding="utf-8")
+        return all(
+            subprocess.run(
+                g["command"].replace("{{SERVE_BASE}}", base), shell=True, cwd=tmp_path, capture_output=True
+            ).returncode
+            == 0
+            for g in spec.gates
+        )
+
+    good = f"# {title}\n\nBy {author}. Key figure: {key}.\n\nSource: {base}/article.html\n"
+    assert gates_pass(good)
+    assert not gates_pass(good.replace(key, decoy))  # the decoy is not the key figure
+    assert not gates_pass(good.replace(f"{base}/article.html", "https://example.com/article"))
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_youtube_captions_gates_agree_with_a_clean_transcript(tmp_path, seed):
+    import json
+    import re
+
+    spec = _variant("youtube-captions-digest", seed)
+    _materialise(spec, tmp_path)
+    info_path = next(p for p in spec.files if p.endswith(".info.json"))
+    vtt_path = next(p for p in spec.files if p.endswith(".en.vtt"))
+    info = json.loads(spec.files[info_path])
+    vid = info["id"]
+    vtt = spec.files[vtt_path]
+    # The traps are present: an empty cue, a tags-only cue, rolling duplicates.
+    assert re.search(r"-->.*\n\n", vtt)
+    assert re.search(r"-->.*\n<\d\d:\d\d:\d\d\.\d{3}><c> </c>", vtt)
+
+    # A correct cleaner: strip tags, drop empties, collapse rolling repeats.
+    seen: list[str] = []
+    for block in vtt.split("\n\n"):
+        for line in block.splitlines()[1:] if "-->" in block else []:
+            text = " ".join(re.sub(r"<[^>]+>", "", line).split())
+            if text and (not seen or seen[-1] != text) and text not in seen:
+                seen.append(text)
+    out = tmp_path / "summaries" / vid
+    out.mkdir(parents=True)
+
+    def gates_pass(transcript: str, summary: str) -> bool:
+        (out / "transcript_clean.txt").write_text(transcript, encoding="utf-8")
+        (out / "summary.md").write_text(summary, encoding="utf-8")
+        return all(
+            subprocess.run(g["command"], shell=True, cwd=tmp_path, capture_output=True).returncode == 0
+            for g in spec.gates
+        )
+
+    summary = f"# {info['title']}\n\n{info['channel']}: a short summary.\n"
+    assert gates_pass("\n".join(seen) + "\n", summary)
+    # Rolling duplicates left in: the key sentence appears twice and fails.
+    raw = [" ".join(re.sub(r"<[^>]+>", "", ln).split()) for ln in vtt.splitlines() if ln and "-->" not in ln]
+    assert not gates_pass(
+        "\n".join(t for t in raw if t and not t.startswith(("WEBVTT", "Kind:", "Language:"))), summary
+    )
+    assert not gates_pass("\n".join(seen) + "\n", "# Some other video\n")
+    assert "do not download" in spec.prompt and "If the youtube-whisper skill is not available" in spec.prompt
+
+
 @pytest.mark.parametrize("name", GENERATED)
-def test_shipped_generated_canaries_are_tagged_sentinel_generated_holdout(name):
+def test_shipped_generated_canaries_are_tagged_generated_holdout(name):
     c = _real_canary(name)
     assert c.generated is True and c.generator_path is not None
-    assert set(c.tags) == {"sentinel", "generated", "holdout"}
+    assert {"generated", "holdout"} <= set(c.tags)
     assert c.flaky is False
+
+
+def test_the_curated_suite_is_exactly_four_canaries():
+    """3.2: a small, relevant suite. Run all executes exactly these."""
+    from core.canary.parser import scan_canaries
+
+    assert {c.name for c in scan_canaries(Path("data/canaries"))} == set(GENERATED)
+
+
+def test_link_digest_declares_only_http_get_and_its_served_article():
+    c = _real_canary("link-digest")
+    assert c.tools == ["http_get"] and c.serve == ["article.html"]
+    assert _real_canary("youtube-captions-digest").covers == ["skill:youtube-whisper"]
 
 
 def test_no_expected_value_is_written_into_the_canary_directory():
@@ -698,15 +754,17 @@ async def test_a_generated_canary_runs_scores_and_records_its_seed(monkeypatch):
 
     def solve(ws: Path, _message: str):
         seen["workspace"] = sorted(str(p.relative_to(ws)) for p in ws.rglob("*") if p.is_file())
-        count = 0
-        for log in sorted((ws / "logs").glob("*.log")):
-            count += sum(1 for line in log.read_text().splitlines() if "ERROR" in line)
-        (ws / "answer.txt").write_text(f"{count}\n")
+        records = _json.loads((ws / "data.json").read_text())
+        answer = {
+            "shipped_total": sum(r["amount"] for r in records if r["status"] == "shipped"),
+            "customers": sorted({r["customer"] for r in records}),
+        }
+        (ws / "output.json").write_text(_json.dumps(answer))
 
     _fake_manager(monkeypatch, solve)
     monkeypatch.setattr(fixtures, "pick_seed", lambda: 909090)
 
-    result = await run_canary(_real_canary("gen-grep-count"), trigger="manual")
+    result = await run_canary(_real_canary("gen-json-transform"), trigger="manual")
 
     assert result.passed is True, result.error
     assert result.seed == 909090
@@ -714,14 +772,14 @@ async def test_a_generated_canary_runs_scores_and_records_its_seed(monkeypatch):
     # The seed rides in gate_results_json, next to the gate payloads.
     record = [g for g in result.gate_results if g.get("generated")]
     assert record and record[0]["seed"] == 909090
-    row = db.list_canary_runs(task="gen-grep-count")[0]
+    row = db.list_canary_runs(task="gen-json-transform")[0]
     stored = _json.loads(row["gate_results_json"])
     assert {"seed": 909090, "generated": True}.items() <= [g for g in stored if g.get("generated")][0].items()
     assert any(g.get("kind") == "gate" and g["passed"] for g in stored)
 
     # The workspace the agent saw held the generated INPUT files and nothing
     # else — no answer key, no expectation file.
-    expected_inputs = sorted(fixtures.generate_variant(_real_canary("gen-grep-count"), 909090).files)
+    expected_inputs = sorted(fixtures.generate_variant(_real_canary("gen-json-transform"), 909090).files)
     assert seen["workspace"] == expected_inputs
 
 
@@ -733,7 +791,7 @@ async def test_each_run_of_a_generated_canary_draws_a_fresh_seed(monkeypatch):
     monkeypatch.setattr(fixtures, "pick_seed", lambda: next(seeds))
     _fake_manager(monkeypatch, lambda ws, msg: None)  # agent does nothing; gates fail
 
-    c = _real_canary("gen-grep-count")
+    c = _real_canary("gen-json-transform")
     first = await run_canary(c, trigger="manual")
     second = await run_canary(c, trigger="manual")
     assert (first.seed, second.seed) == (11, 22)
@@ -783,6 +841,8 @@ def _msg(content="", tool_calls=None):
 
 
 def _scan(messages, name="gen-grep-count", known=("file-create", "grep-count", "json-transform")):
+    # Historical names on purpose: the gen-grep-count / grep-count pair is
+    # the false positive the narrowed rule was written for.
     from core.canary.contamination import scan_session
 
     return scan_session("sid", WS, name, known_canaries=list(known), messages=messages)
@@ -1000,9 +1060,11 @@ def test_holdout_is_a_tag_not_a_convention():
     from core.canary.parser import HOLDOUT_TAG
 
     assert HOLDOUT_TAG == "holdout"
+    from core.canary.parser import CanaryDef
+
     for name in GENERATED:
         assert _real_canary(name).holdout is True
-    assert _real_canary("file-create").holdout is False
+    assert CanaryDef(name="plain", prompt="x", gates=[]).holdout is False
 
 
 def test_prompt_safe_canaries_drops_the_holdouts():

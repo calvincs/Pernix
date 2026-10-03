@@ -10,9 +10,9 @@ last_reviewed: 2026-09-04
 GENERATED sentinel — the fixture is built by `generate.py` from a fresh
 random seed on every run, so the target filename, the exact line, and the
 near-miss decoy in `reference/sample.txt` are all different each time. There
-is no answer in this file to memorise, which is the whole point: the static
-`file-create` canary has been green for months and can no longer tell
-"followed the instruction" from "has seen this before".
+is no answer in this file to memorise, which is the whole point: a static
+task that has been green for months can no longer tell "followed the
+instruction" from "has seen this before".
 
 `holdout` — never referenced in refine or dream prompts, and never the
 target of a proposal-derived edit. If this fails, something fundamental

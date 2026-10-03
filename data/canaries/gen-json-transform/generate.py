@@ -1,14 +1,13 @@
 """Generated fixture for the `gen-json-transform` canary (trust-loop W5).
 
 Structured-data category: read, filter, aggregate, emit machine-checkable
-output. The static `json-transform` canary always sums to 175 for the same
-three customers; this one draws a fresh customer set, a fresh record list
-and therefore a fresh pair of expected values on every run.
+output. A fresh customer set, a fresh record list and therefore a fresh pair
+of expected values on every run. The prompt steers the computation into the
+REPL when the session has one, so the suite covers the kernel too.
 
-The trap the original was built around is preserved and guaranteed: at
-least one customer appears ONLY on non-shipped records, so a solution that
-derives the customer list from the shipped subset gets the sum right and the
-list wrong.
+The trap is guaranteed: at least one customer appears ONLY on non-shipped
+records, so a solution that derives the customer list from the shipped
+subset gets the sum right and the list wrong.
 """
 
 from __future__ import annotations
@@ -67,7 +66,8 @@ def generate(seed: int) -> dict:
         '"shipped_total": the sum of "amount" over records whose status is\n'
         '"shipped", and "customers": the sorted list of unique "customer" values\n'
         "across ALL records (not just the shipped ones). Use plain JSON (no\n"
-        "comments, no trailing text).\n"
+        "comments, no trailing text). Do the computation in the repl tool if you\n"
+        "have it; otherwise any method works.\n"
     )
 
     check = (
