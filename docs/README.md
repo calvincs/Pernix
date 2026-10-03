@@ -59,7 +59,7 @@ Beyond the localhost-only default. Read these before exposing Pernix to anything
 - [internals/rlm.md](internals/rlm.md) — recursive long-input processing (sandboxed REPL + sub-LLM broker)
 - [internals/candor.md](internals/candor.md) — calibrated operational memory: earned tool reliability from recorded outcomes
 - [internals/dream.md](internals/dream.md) — idle-time introspection: hypotheses about itself, falsified against the record
-- [internals/autonomy.md](internals/autonomy.md) — long-running autonomy: gates, goals, heartbeats, and the persistent session kernel
+- [internals/autonomy.md](internals/autonomy.md) — long-running autonomy: gates, goals, and the persistent session kernel
 - [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md) — the self-improvement loop: golden-task canaries and the governed adaptive policy store
 - [internals/telos.md](internals/telos.md) — the operational question loop: turn-time anomalies become falsifiable hypotheses (questions, SOUP), evaluated against recorded evidence; the v3.0 goal-DAG (ordo, binding, hevel) was carved out in v3.1 as a no-op
 

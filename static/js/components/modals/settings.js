@@ -395,12 +395,11 @@ const SECTIONS = [
     {
         title: 'Autonomy',
         tab: 'autonomy',
-        term: 'Internal names: gates, goals, heartbeats, session kernel.',
-        description: 'Long-running autonomous task substrate. Gates: deterministic shell checks Reflect cannot overrule. Goals: persistent objectives with budgets and auto-continuations. Heartbeats: recurring instructions steered into running work. Session kernel: a persistent per-session Python REPL whose variables survive turns and restarts.',
+        term: 'Internal names: gates, goals, session kernel.',
+        description: 'Long-running autonomous task substrate. Gates: deterministic shell checks Reflect cannot overrule. Goals: persistent objectives with budgets and auto-continuations. Session kernel: a persistent per-session Python REPL whose variables survive turns and restarts.',
         fields: [
             { key: 'gates_enabled', label: 'Deterministic Gates', type: 'bool' },
             { key: 'goals_enabled', label: 'Persistent Goals', type: 'bool' },
-            { key: 'heartbeats_enabled', label: 'Heartbeats', type: 'bool' },
             { key: 'session_kernel_enabled', label: 'Session Kernel (REPL)', type: 'bool', risk: 'autonomy', restart: RESTART_TOOLS },
         ],
     },

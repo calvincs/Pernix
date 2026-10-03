@@ -1,14 +1,13 @@
-# Autonomy — Gates, Goals, Heartbeats, and the Session Kernel
+# Autonomy — Gates, Goals, and the Session Kernel
 
-Four subsystems that together let Pernix run long, unattended tasks without
+Three subsystems that together let Pernix run long, unattended tasks without
 lying to itself about progress: **gates** (deterministic checks Reflect cannot
-overrule), **goals** (persistent cross-turn objectives with budgets),
-**heartbeats** (recurring instructions steered into running work), and the
+overrule), **goals** (persistent cross-turn objectives with budgets), and the
 **session kernel** (a persistent per-session Python REPL whose state survives
 everything shorter than the task itself).
 
-All four are off by default. Enable them in Settings → Autonomy & idle work →
-Autonomy (Gates, Goals, Heartbeats, Kernel); each flag registers its tools at
+All three are off by default. Enable them in Settings → Autonomy & idle work →
+Autonomy (Gates, Goals, Kernel); each flag registers its tools at
 startup, so flipping one takes a restart. Each is useful alone; the last
 section explains how they compose into an autonomous task.
 
@@ -177,35 +176,9 @@ hook:
   constraint instead of a suggestion. Both the exclusion set and the retry
   counter reset on every genuine user turn.
 
-## Heartbeats — steering without interrupting
-
-Cron spawns *new* turns. A **heartbeat** nudges the *current* one: a
-recurring instruction delivered into a running session. With
-`heartbeats_enabled`:
-
-- **`steer`** (default) injects the instruction as a system row picked up at
-  the next round boundary of the running turn — mid-flight course correction
-  without spawning a competing turn.
-- **`follow_up`** queues it as a normal prompt for the next idle moment.
-- A session parked where no round boundary can arrive (awaiting workers,
-  awaiting user input) degrades `steer` to `follow_up` automatically.
-- A heartbeat whose previous firing is still undelivered coalesces — they
-  never stack.
-- **A no-op tick writes nothing.** A tick that finds no session, no
-  instruction, or that coalesces against an already-steered turn or a still-
-  queued prior tick returns *before* any `cron_runs` row is inserted. A 30-second
-  heartbeat would otherwise write ~2,880 rows a day, almost all of them
-  recording that nothing happened, and drown the real cron history.
-
-There are two strictly separated namespaces. The agent's tools
-(`set_heartbeat`, `clear_heartbeat`, `list_heartbeats`) operate only on its
-own `agent`-owned heartbeats for its own session. **Your** heartbeat — one
-per session — is set only via the UI or the API
-(`GET`/`PUT`/`DELETE /api/sessions/{id}/heartbeat`), and the agent can
-neither see nor clear it. `every` accepts durations (`30s`, `5m`, `2h`;
-floor 30 s) or a 5-field cron expression. Heartbeat jobs persist in
-`data/cron_jobs.json` and survive restarts; heartbeat rows are machine text
-and are excluded from reflect/distill evidence.
+Heartbeats (recurring instructions steered into running work) were removed
+in 3.2; leftover heartbeat entries in `data/cron_jobs.json` are dropped on
+the next start.
 
 ## The session kernel — state that survives the context window
 
@@ -364,13 +337,11 @@ inventory, so "where do I look" costs a read instead of a guess.
 
 A long-running autonomous task is not one feature — it is:
 
-> **a goal with `continuation_budget > 0` + goal-scoped gates +
-> (optionally) a steer heartbeat.**
+> **a goal with `continuation_budget > 0` + goal-scoped gates.**
 
 The goal carries intent and budgets across turns; continuations drive
 re-entry when a turn runs out of rounds or clock; gates are the deterministic
-finish line Reflect cannot overrule and `goal_complete` cannot bypass; the
-heartbeat steers course mid-flight without spawning competing turns; and the
+finish line Reflect cannot overrule and `goal_complete` cannot bypass; and the
 kernel carries working state across every compaction and restart in between.
 
 `AWAITING_USER` blocks continuations *by design* — a question to the human is
@@ -385,4 +356,4 @@ autonomous goal and the nightly measurement baseline can share the box.
 
 ## Settings
 
-See [configuration.md](../configuration.md#autonomy-gates-goals-heartbeats-session-kernel).
+See [configuration.md](../configuration.md#autonomy-gates-goals-session-kernel).

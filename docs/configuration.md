@@ -253,15 +253,14 @@ A non-convergent drive with correction machinery over the whole loop: turn anoma
 
 ---
 
-## Autonomy (Gates, Goals, Heartbeats, Session Kernel)
+## Autonomy (Gates, Goals, Session Kernel)
 
-The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, heartbeats steered into running work, and a persistent per-session Python REPL. All off by default; a goal + gates + a heartbeat compose into an autonomous task. Toggles live in Settings → Autonomy & idle work → Autonomy. How it works: [internals/autonomy.md](internals/autonomy.md).
+The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, and a persistent per-session Python REPL. All off by default; a goal + gates compose into an autonomous task. Toggles live in Settings → Autonomy & idle work → Autonomy. How it works: [internals/autonomy.md](internals/autonomy.md).
 
 | Setting | Default | Description |
 |---|---|---|
 | `gates_enabled` | `false` | Deterministic gates: user-authored shell checks that run before Reflect; a failing gate mechanically clamps a `pass` verdict to `retry`. Registers the `add_gate` / `list_gates` / `remove_gate` tools (restart). |
 | `goals_enabled` | `false` | Persistent cross-turn goals with token/time/continuation budgets; only `goal_complete` finishes one. Registers the `goal_create` / `goal_status` / `goal_update` / `goal_complete` tools (restart). |
-| `heartbeats_enabled` | `false` | Recurring instructions steered into running work at round boundaries. Registers the agent's `set_heartbeat` / `clear_heartbeat` / `list_heartbeats` tools (restart) and enables the user heartbeat API. |
 | `session_kernel_enabled` | `false` | Persistent per-session Python REPL (the `repl` tool, registered at startup): variables survive tool rounds, turns, compaction, and — via snapshots — restarts. |
 | `kernel_idle_seconds` | `1500` | Idle seconds before a kernel is snapshotted and reaped. Deliberately below the 1800 s session reap so a kernel never outlives its session as an orphan process. |
 | `kernel_snapshot_max_bytes` | `268435456` | Cap (256 MB) on a kernel's dill snapshot; oversized namespaces skip the offending variables and report them. |
@@ -595,7 +594,7 @@ Same authentication as every other endpoint: a Bearer token in network mode.
 |---|---|---|
 | `max_pending_messages` | `10` | Maximum messages that can queue for a busy session. If a session is processing and more than this many messages arrive, further messages are rejected with a `session.queue_full` event. |
 | `max_concurrent_workers` | `5` | Maximum simultaneously-running worker sub-agents per parent session. |
-| `cron_dispatch_timeout` | `3600` | Wall-clock ceiling (seconds) on one scheduled dispatch — a cron fire or a heartbeat idle tick. A wedged unattended job fails and notifies within the hour instead of holding its slot for the old implicit `tool_timeout` × `max_tool_rounds` product. |
+| `cron_dispatch_timeout` | `3600` | Wall-clock ceiling (seconds) on one scheduled dispatch — a cron fire. A wedged unattended job fails and notifies within the hour instead of holding its slot for the old implicit `tool_timeout` × `max_tool_rounds` product. |
 
 ---
 

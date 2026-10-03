@@ -78,31 +78,37 @@ def init_scheduler():
 _ENTRY_STRUCTURAL_KEYS = frozenset({"name", "cron_expr", "prompt", "session_id", "model", "cron_trigger", "paused"})
 
 
+def _drop_retired_heartbeats(jobs: list) -> list:
+    """Strip heartbeat entries (retired in the 2026-10 prune) from the
+    persisted job list and rewrite the file once without them.
+
+    The raw list is filtered and rewritten directly rather than through
+    _save_jobs(): that one serializes the live scheduler, which at load time
+    does not yet hold — and would therefore erase — any cron entry that
+    fails to load below.
+    """
+    kept = [j for j in jobs if not (isinstance(j, dict) and j.get("kind") == "heartbeat")]
+    dropped = len(jobs) - len(kept)
+    if dropped:
+        logger.warning("Dropped %d retired heartbeat job(s) from %s", dropped, CRON_PATH)
+        with _json_lock:
+            CRON_PATH.write_text(json.dumps(kept, indent=2))
+    return kept
+
+
 def _load_jobs():
     """Load persisted jobs from JSON."""
     if not CRON_PATH.exists():
         return
     try:
         jobs = json.loads(CRON_PATH.read_text())
+        jobs = _drop_retired_heartbeats(jobs)
         for job in jobs:
             # Round-trip every non-structural field verbatim — dropping
             # unknown keys here silently erased job variants on restart.
             extra = {k: v for k, v in job.items() if k not in _ENTRY_STRUCTURAL_KEYS}
-            # Heartbeat jobs use their own trigger/executor — an empty
-            # cron_expr would crash CronTrigger.from_crontab below.
-            if extra.get("kind") == "heartbeat":
-                meta = {"name": job["name"], "cron_expr": "", "prompt": "", "model": "", "session_id": None}
-                meta.update(extra)
-                try:
-                    _add_heartbeat_job_internal(job["name"], meta)
-                    if job.get("paused") and _scheduler:
-                        _scheduler.pause_job(job["name"])
-                except Exception as hb_err:
-                    logger.warning("Failed to restore heartbeat %s: %s", job["name"], hb_err)
-                continue
-            # Guarded per entry, like the heartbeat branch above. One bad
-            # record — a missing "prompt" key, an expression this APScheduler
-            # rejects — used to abort the loop, so every job AFTER it went
+            # Guarded per entry. One bad record — a missing "prompt" key, an
+            # expression this APScheduler rejects — used to abort the loop, so every job AFTER it went
             # unscheduled and the coalesced catch-up never ran for any of
             # them, all behind a single "Failed to load cron jobs" line.
             try:
@@ -280,7 +286,7 @@ def _schedule_coalesced_catchup(job_entries: list[dict]) -> None:
             continue
         # Only jobs whose callable IS _execute_cron_job — every job added
         # through _add_job_internal. What this excludes are the jobs on other
-        # callables: heartbeats, canary sweeps/batches, telos slow ticks.
+        # callables: canary sweeps/batches, telos slow ticks.
         # Those own their own cadence and must not be catch-up dispatched
         # through the prompt path.
         if job.func is not _execute_cron_job:
@@ -317,259 +323,6 @@ def _schedule_coalesced_catchup(job_entries: list[dict]) -> None:
         logger.info("Job '%s': coalesced %d missed run(s) since %s into one catch-up", name, missed, last)
     if advanced:
         _save_jobs()
-
-
-# ---------------------------------------------------------------------------
-# Heartbeats (adaptation plan 3c) — recurring instructions steered into
-# RUNNING work. Cron spawns turns; a heartbeat steers one. Two namespaces:
-# the user's (one per session, set via API only) and the agent's own
-# (multiple; the agent can never see or touch the user's).
-# ---------------------------------------------------------------------------
-
-# Coalescing: job_id -> the turn (current_turn_user_msg_id) it last steered.
-# One steer per job per turn; undelivered pending follow-ups also coalesce.
-_heartbeat_last_turn: dict[str, int | None] = {}
-
-
-def _parse_every(every: str) -> tuple[str, object]:
-    """'30s'/'5m'/'2h' -> ('interval', seconds); else ('cron', expr)."""
-    e = (every or "").strip()
-    m = re.match(r"^(\d+)\s*([smh])$", e)
-    if m:
-        mult = {"s": 1, "m": 60, "h": 3600}[m.group(2)]
-        return "interval", max(30, int(m.group(1)) * mult)  # floor 30s
-    return "cron", e
-
-
-def _heartbeat_job_id(owner: str, session_id: str, name: str = "") -> str:
-    suffix = f"_{re.sub(r'[^a-z0-9-]', '-', name.lower())[:24]}" if name else ""
-    return f"hb_{owner}_{session_id[:12]}{suffix}"
-
-
-def _add_heartbeat_job_internal(job_id: str, meta: dict):
-    """Register a heartbeat with APScheduler (interval or cron trigger)."""
-    scheduler = _get_scheduler()
-    if not scheduler:
-        return
-    kind, val = _parse_every(meta.get("every", "5m"))
-    if kind == "interval":
-        from apscheduler.triggers.interval import IntervalTrigger
-
-        trigger = IntervalTrigger(seconds=int(val))
-    else:
-        from apscheduler.triggers.cron import CronTrigger
-
-        trigger = CronTrigger.from_crontab(str(val))
-    scheduler.add_job(
-        _execute_heartbeat_job,
-        trigger=trigger,
-        id=job_id,
-        replace_existing=True,
-        coalesce=True,
-        misfire_grace_time=60,
-        kwargs={"meta": meta},
-    )
-
-
-async def _execute_heartbeat_job(meta: dict):
-    """Deliver one heartbeat tick. Steer = a role=system row the next round's
-    compile picks up; follow_up = queued for the next idle dispatch. Parked
-    states (AWAITING_WORKERS/AWAITING_USER) degrade steer to follow_up —
-    they reach no round boundary.
-
-    A cron_runs row is written only for ticks that actually deliver (steer,
-    queue, or dispatch). Coalesced no-op ticks write nothing: a 30s heartbeat
-    recorded ~2,880 rows/day, almost all of them "nothing happened", which
-    buried real job history and defeated the run-stats readout.
-    """
-    from sessions import state_v2 as sv2
-    from sessions.manager import get_manager
-    from sessions.state import PendingMessage
-
-    job_id = meta["name"]
-    sid = meta.get("heartbeat_session_id", "")
-    instruction = meta.get("instruction", "")
-    delivery = meta.get("delivery", "steer")
-    hb_name = meta.get("hb_name", "heartbeat")
-    if not sid or not instruction:
-        return
-
-    session = get_manager().get(sid)
-    text = f"[heartbeat:{hb_name}] {instruction}"
-
-    state = sv2._current_state(session) if session is not None else None
-    mid_turn = state in (
-        sv2.SessionStateV2.SCOUTING,
-        sv2.SessionStateV2.PROCESSING,
-        sv2.SessionStateV2.COMPACTING,
-    )
-    parked = state in (
-        sv2.SessionStateV2.AWAITING_WORKERS,
-        sv2.SessionStateV2.AWAITING_USER,
-        sv2.SessionStateV2.PAUSED,
-        sv2.SessionStateV2.PAUSE_REQUESTED,
-        sv2.SessionStateV2.CANCELLING,
-        sv2.SessionStateV2.FINALIZING,
-    )
-    steering = mid_turn and delivery == "steer"
-    # follow_up (explicit, or steer degraded in a parked state): queue for the
-    # next idle dispatch; coalesce with any undelivered copy of the same
-    # heartbeat.
-    queueing = not steering and session is not None and (parked or mid_turn)
-
-    turn = getattr(session, "current_turn_user_msg_id", None) if session is not None else None
-    if steering and turn is not None and _heartbeat_last_turn.get(job_id) == turn:
-        return  # coalesced: already steered this turn
-    if queueing and any(f"[heartbeat:{hb_name}]" in getattr(p, "message", "") for p in session.pending_messages):
-        return  # coalesced: prior tick still queued
-
-    run_id = db.add_cron_run(job_id, sid, status="claimed", fire_time=datetime.now(timezone.utc).isoformat())
-    try:
-        db.update_cron_run(run_id, "running")
-        if steering:
-            await asyncio.to_thread(db.add_message, sid, "system", text, metadata=json.dumps({"heartbeat": hb_name}))
-            _heartbeat_last_turn[job_id] = turn
-            logger.info("Heartbeat %s steered into running turn of %s", job_id, sid[:12])
-        elif queueing:
-            session.pending_messages.append(PendingMessage(text, None, False))
-            logger.info("Heartbeat %s queued as follow-up for %s (state=%s)", job_id, sid[:12], state)
-        else:
-            # Idle (or non-resident) session: a heartbeat tick IS the turn —
-            # same dispatch, same bound, as a cron fire. And the same outcome
-            # rules: a tick that was refused or whose turn failed is not a
-            # delivered heartbeat.
-            result = await _dispatch_prompt(sid, text)
-            if result.status == DISPATCH_UNRESOLVED:
-                logger.info("Heartbeat %s is still running past the dispatch ceiling", job_id)
-                _watch_unresolved_cron_run(run_id, job_id, sid, result, None, None, time.time())
-                return
-            if not result.completed:
-                db.update_cron_run(run_id, "error", _dispatch_error_text(result))
-                return
-        db.update_cron_run(run_id, "completed")
-    except Exception as e:
-        logger.warning("Heartbeat %s delivery failed: %s", job_id, e)
-        db.update_cron_run(run_id, "error", str(e))
-
-
-def _set_heartbeat(owner: str, session_id: str, instruction: str, every: str, delivery: str, name: str = "") -> str:
-    if delivery not in ("steer", "follow_up"):
-        return "Error: delivery must be steer or follow_up."
-    kind, val = _parse_every(every)
-    if kind == "cron":
-        try:
-            from apscheduler.triggers.cron import CronTrigger
-
-            CronTrigger.from_crontab(str(val))
-        except Exception:
-            return f"Error: '{every}' is neither a duration (30s/5m/2h) nor a valid cron expression."
-    job_id = _heartbeat_job_id(owner, session_id, name)
-    meta = {
-        "name": job_id,
-        "cron_expr": "",
-        "prompt": "",
-        "model": "",
-        "session_id": None,
-        "kind": "heartbeat",
-        "owner": owner,
-        "hb_name": name or ("user" if owner == "user" else "pulse"),
-        "heartbeat_session_id": session_id,
-        "instruction": instruction,
-        "every": every,
-        "delivery": delivery,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _add_heartbeat_job_internal(job_id, meta)
-    _save_jobs()
-    return job_id
-
-
-def _clear_heartbeat(owner: str, session_id: str, name: str = "") -> bool:
-    scheduler = _get_scheduler()
-    if not scheduler:
-        return False
-    job_id = _heartbeat_job_id(owner, session_id, name)
-    job = scheduler.get_job(job_id)
-    if job is None:
-        return False
-    scheduler.remove_job(job_id)
-    _heartbeat_last_turn.pop(job_id, None)
-    _save_jobs()
-    return True
-
-
-def _list_heartbeats(owner: str, session_id: str) -> list[dict]:
-    scheduler = _get_scheduler()
-    if not scheduler:
-        return []
-    out = []
-    for job in scheduler.get_jobs():
-        meta = job.kwargs.get("meta", {})
-        if meta.get("kind") != "heartbeat":
-            continue
-        if meta.get("owner") != owner or meta.get("heartbeat_session_id") != session_id:
-            continue  # namespace separation: the agent never sees the user's
-        out.append(
-            {
-                "name": meta.get("hb_name", ""),
-                "instruction": meta.get("instruction", ""),
-                "every": meta.get("every", ""),
-                "delivery": meta.get("delivery", "steer"),
-            }
-        )
-    return out
-
-
-# Public user-heartbeat surface (API only; one per session).
-def set_user_heartbeat(session_id: str, instruction: str, every: str = "5m", delivery: str = "steer") -> str:
-    return _set_heartbeat("user", session_id, instruction, every, delivery)
-
-
-def clear_user_heartbeat(session_id: str) -> bool:
-    return _clear_heartbeat("user", session_id)
-
-
-def get_user_heartbeat(session_id: str) -> dict | None:
-    hbs = _list_heartbeats("user", session_id)
-    return hbs[0] if hbs else None
-
-
-# Agent-facing tools (registered below when heartbeats_enabled).
-def set_heartbeat(
-    name: str, instruction: str, every: str = "5m", delivery: str = "steer", _context: dict | None = None
-) -> str:
-    session_id = (_context or {}).get("session_id", "")
-    if not session_id:
-        return "Error: set_heartbeat requires a session context."
-    if not name or not instruction:
-        return "Error: name and instruction are required."
-    result = _set_heartbeat("agent", session_id, instruction, every, delivery, name=name)
-    if result.startswith("Error:"):
-        return result
-    return (
-        f"Heartbeat '{name}' set: every {every}, delivery={delivery}. It steers a reminder "
-        f"into running work (or queues it when the session is parked/idle). It cannot touch "
-        f"the user's heartbeat."
-    )
-
-
-def clear_heartbeat(name: str, _context: dict | None = None) -> str:
-    session_id = (_context or {}).get("session_id", "")
-    if not session_id:
-        return "Error: clear_heartbeat requires a session context."
-    if _clear_heartbeat("agent", session_id, name=name):
-        return f"Heartbeat '{name}' cleared."
-    return f"Error: no agent heartbeat named '{name}' for this session."
-
-
-def list_heartbeats(_context: dict | None = None) -> str:
-    session_id = (_context or {}).get("session_id", "")
-    if not session_id:
-        return "Error: list_heartbeats requires a session context."
-    hbs = _list_heartbeats("agent", session_id)
-    if not hbs:
-        return "No agent heartbeats for this session. (The user's heartbeat, if any, is not visible here.)"
-    return "\n".join(f"- {h['name']}: every {h['every']} [{h['delivery']}] — {h['instruction']}" for h in hbs)
 
 
 def reconcile_cron_runs() -> int:
@@ -792,10 +545,9 @@ async def _dispatch_prompt(
 ) -> DispatchResult:
     """Open-or-reuse a session, admit one prompt, and report what became of it.
 
-    The single dispatch path for scheduled work: cron fires and heartbeat
-    ticks into an idle session are the same operation (a scheduled prompt IS
-    the turn), so they share the session handling, the execution options, and
-    the cron_dispatch_timeout ceiling.
+    The single dispatch path for scheduled work (a scheduled prompt IS the
+    turn): session handling, the execution options, and the
+    cron_dispatch_timeout ceiling live here.
 
     The options ride with the admitted message and are applied when its own
     turn starts, so a job firing into a busy session no longer reconfigures
@@ -1960,63 +1712,6 @@ def get_all_jobs_with_status() -> list[dict]:
 def register(reg) -> None:
     common = {"category": "scheduling", "source": "extension"}
     tags = ["schedule", "cron", "recurring", "automated", "periodic", "timer", "job"]
-
-    if settings.heartbeats_enabled:
-        hb_tags = tags + ["heartbeat", "steer", "reminder", "pulse", "long-running"]
-        reg.register(
-            name="set_heartbeat",
-            func=set_heartbeat,
-            description=(
-                "Set a recurring heartbeat for THIS session: an instruction steered into "
-                "running work at the next round boundary (delivery=steer, the default) or "
-                "queued for the next idle moment (delivery=follow_up). Distinct from cron — "
-                "cron spawns new turns; a heartbeat nudges the current one. `every` accepts "
-                "durations (30s/5m/2h, floor 30s) or a 5-field cron expression. Parked "
-                "sessions (awaiting workers/user) degrade steer to follow_up. You cannot "
-                "read or modify the user's own heartbeat."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Short heartbeat name"},
-                    "instruction": {"type": "string", "description": "The recurring reminder text"},
-                    "every": {"type": "string", "description": "Duration (5m) or cron expression (default 5m)"},
-                    "delivery": {"type": "string", "description": "steer (default) | follow_up"},
-                },
-                "required": ["name", "instruction"],
-            },
-            tags=hb_tags,
-            timeout=30,
-            parallel_safe=False,
-            safety_level="caution",
-            **common,
-        )
-        reg.register(
-            name="clear_heartbeat",
-            func=clear_heartbeat,
-            description="Remove one of this session's agent heartbeats by name.",
-            parameters={
-                "type": "object",
-                "properties": {"name": {"type": "string", "description": "Heartbeat name"}},
-                "required": ["name"],
-            },
-            tags=hb_tags,
-            timeout=30,
-            parallel_safe=False,
-            safety_level="safe",
-            **common,
-        )
-        reg.register(
-            name="list_heartbeats",
-            func=list_heartbeats,
-            description="List this session's agent heartbeats (the user's is never shown).",
-            parameters={"type": "object", "properties": {}},
-            tags=hb_tags,
-            timeout=30,
-            parallel_safe=True,
-            safety_level="safe",
-            **common,
-        )
 
     reg.register(
         name="schedule_job",
