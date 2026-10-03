@@ -34,8 +34,12 @@ def _canaries_tmp(monkeypatch, tmp_path):
 
 
 def _mk(name: str = "pin", vetting: bool = True) -> None:
-    got, err = materialize_canary(dict(_SPEC, name=name), vetting=vetting)
+    got, err = materialize_canary(dict(_SPEC, name=name))
     assert got == name, err
+    if vetting:
+        from core.canary.maintain import _rewrite_frontmatter
+
+        assert _rewrite_frontmatter(_base() / name / "CANARY.md", {"flaky": True, "tags": ["auto-admitted", "vetting"]})
 
 
 def _run(name: str, passed: bool) -> None:
@@ -140,7 +144,7 @@ def test_red_run_unparks_a_parked_canary():
 def _mk_probe(name: str, max_runs: int = 2) -> None:
     _mk(name, vetting=False)
     md = _base() / name / "CANARY.md"
-    md.write_text(md.read_text().replace("flaky: false", f"flaky: false\nmax_runs: {max_runs}", 1))
+    md.write_text(md.read_text().replace("timeout: 600", f"timeout: 600\nmax_runs: {max_runs}", 1))
 
 
 def test_probe_retires_after_max_runs_with_a_summary():
@@ -175,7 +179,7 @@ def test_probe_retirement_is_exempt_from_the_goodhart_lock():
 def test_expired_probe_retires_even_without_runs():
     _mk("probe-old", vetting=False)
     md = _base() / "probe-old" / "CANARY.md"
-    md.write_text(md.read_text().replace("flaky: false", "flaky: false\nexpires: '2020-01-01'", 1))
+    md.write_text(md.read_text().replace("timeout: 600", "timeout: 600\nexpires: '2020-01-01'", 1))
     stats = run_maintenance()
     assert stats["probes_retired"] == ["probe-old"]
     assert load_canary("probe-old", base=_base()) is None

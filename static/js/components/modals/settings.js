@@ -406,15 +406,6 @@ const SECTIONS = [
                 hint: 'Long-green canaries are parked: off the heartbeat, still in the suite, auto-unparked by any red run.',
             },
             {
-                key: 'canary_auto_admit',
-                label: 'Auto-admit New Canaries',
-                type: 'bool',
-                risk: 'autonomy',
-                hint: 'Lets the agent write new canary specs into data/canaries/ without asking, once their gate '
-                    + 'commands pass an allowlist proof and vetting runs. Off, or a spec that fails the proof, '
-                    + 'means the spec is logged and dropped.',
-            },
-            {
                 key: 'canary_auto_maintain',
                 label: 'Auto-maintain Suite',
                 type: 'bool',

@@ -127,7 +127,7 @@ def test_parse_refine_output_handles_fences():
     from core.refine import _parse_refine_output
 
     fenced = "```json\n" + json.dumps({"nothing_actionable": False, "proposals": [], "lessons": []}) + "\n```"
-    proposals, lessons, canaries, na = _parse_refine_output(fenced)
+    proposals, lessons, na = _parse_refine_output(fenced)
     assert proposals == []
     assert lessons == []
     assert na is False
@@ -137,22 +137,23 @@ def test_parse_refine_output_nothing_actionable_flag():
     from core.refine import _parse_refine_output
 
     raw = json.dumps({"nothing_actionable": True, "proposals": [], "lessons": []})
-    _, _, _, na = _parse_refine_output(raw)
+    _, _, na = _parse_refine_output(raw)
     assert na is True
 
 
 def test_parse_refine_output_malformed_returns_empty():
     from core.refine import _parse_refine_output
 
-    proposals, lessons, canaries, na = _parse_refine_output("not json at all")
+    proposals, lessons, na = _parse_refine_output("not json at all")
     assert proposals == []
     assert lessons == []
     assert na is False
 
 
 def test_parse_refine_output_ignores_retired_adaptive_edits():
-    """adaptive_edits left the refine contract in 3.2: a model that still
-    emits the key gets a 4-tuple back and nothing queued anywhere."""
+    """adaptive_edits and canary_proposals left the refine contract in 3.2:
+    a model that still emits either key gets a 3-tuple back and nothing
+    queued anywhere."""
     from core.refine import REFINE_PROMPT, _parse_refine_output
 
     raw = json.dumps(
@@ -160,12 +161,14 @@ def test_parse_refine_output_ignores_retired_adaptive_edits():
             "proposals": [],
             "lessons": [],
             "adaptive_edits": [{"action": "create", "kind": "prompt_note", "title": "a", "content": "x"}],
+            "canary_proposals": [{"name": "x", "prompt": "y", "gates": []}],
         }
     )
     out = _parse_refine_output(raw)
-    assert len(out) == 4
-    assert out[0] == [] and out[1] == [] and out[2] == []
+    assert len(out) == 3
+    assert out[0] == [] and out[1] == [] and out[2] is False
     assert "adaptive_edits" not in REFINE_PROMPT
+    assert "canary_proposals" not in REFINE_PROMPT
 
 
 # ---------------------------------------------------------------------------

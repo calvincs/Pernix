@@ -239,12 +239,10 @@ Golden-task canaries: canned tasks with deterministic gates, run headlessly thro
 | `canary_enabled` | `false` | Master switch for the suite: sweeps, the `canary_run` / `canary_status` tools, and the API. |
 | `canaries_dir` | `data/canaries` | Directory scanned for `<name>/CANARY.md` task definitions. |
 | `canary_retention_days` | `30` | Age after which Snooze prunes `canary_runs` rows and their sessions. |
-| `canary_auto_admit` | `true` | Auto-admit machine-proposed canaries whose gate commands pass an allowlist proof plus the vetting runs; specs the machine can't prove safe are logged and dropped. |
 | `canary_auto_maintain` | `true` | Maintenance sweep: promotes vetted canaries, tags flapping ones flaky, parks long-green ones, syncs skill verify blocks, retires exhausted probes. A canary whose latest run failed is never auto-mutated — except that a red run un-parks. |
 | `canary_vetting_runs` | `3` | Consistent runs required to promote a canary out of vetting. |
 | `canary_park_after_passes` | `25` | Consecutive passes before a canary is parked (off the heartbeat, still in the suite; any red run un-parks it). Replaces `canary_retire_after_passes`. |
 | `canary_purge_after_days` | `30` | Retired canaries (DELETE API, exhausted probes) sit in `.retired/` this long before deletion — the undo window. |
-| `canary_max_suite` | `24` | Auto-admission stops at this suite size. |
 
 ---
 
