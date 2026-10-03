@@ -281,7 +281,7 @@ _run_agent_safe:                                  (manager.py:1260)
 
 ### 1.4 Reflect: a retry-loop INSIDE the turn
 
-When reflect returns `retry`, `_run_agent_retry()` (`manager.py:2008`) re-enters `SCOUTING → PROCESSING → FINALIZING` **within the same user turn**, re-feeding the combined retry directive into the scout — reflect's prose lessons plus, for an eval retry, per-feature judge feedback (`_build_retry_directive()`, `manager.py:44-65`). Bounded by `reflect_max_retries` (or `reflect_max_retries_worker` — tighter — for workers: checked inline in `_finalize_turn`, `manager.py:1561`). Eval retries have their own independent budget (`settings.eval_max_retries`) with the same mechanic. So a single user turn can cycle `FINALIZING → SCOUTING → PROCESSING → FINALIZING` up to `1 + reflect_retries + eval_retries` times before settling into `IDLE_READY`.
+When reflect returns `retry`, `_run_agent_retry()` (`manager.py:2008`) re-enters `SCOUTING → PROCESSING → FINALIZING` **within the same user turn**, re-feeding the combined retry directive into the scout — reflect's prose lessons plus, for an eval retry, per-feature judge feedback (`_build_retry_directive()`, `manager.py:44-65`). Bounded by `reflect_max_retries` (or `reflect_max_retries_worker` — tighter — for workers: checked inline in `_finalize_turn`, `manager.py:1561`). Eval retries have their own independent budget (`_EVAL_MAX_RETRIES` in `manager.py`) with the same mechanic; since 3.2 removed the feature-eval loop nothing requests one, and the plumbing is due to go. So a single user turn can cycle `FINALIZING → SCOUTING → PROCESSING → FINALIZING` up to `1 + reflect_retries + eval_retries` times before settling into `IDLE_READY`.
 
 ### 1.5 Reflect verdicts and how they manifest
 
@@ -421,7 +421,7 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 50); when the ca
 ### 2.3 Tool routing (`core/tools/registry.py`, `core/extensions/`)
 
 - ~35 **builtin tools** always registered (`file_read`, `file_write`, `bash`, `ask_user`, etc.); `call_model` is a model_mgmt extension, and `spawn_worker` / `get_worker_result` are orchestration extensions
-- **Extensions** — the modules listed in `BUNDLED_EXTENSIONS` (`core/extensions/__init__.py`): `web`, `orchestration`, `evaluation`, `scheduling`, `packages`, `model_mgmt`, `session_tools`, `planning` always register; `candor`, `rlm`, `telos` and `mcp` register conditionally on their own settings (`candor_enabled`, `rlm_enabled`, `telos_enabled`, `mcp_enabled`). Full inventory and gating: [extensions.md](extensions.md)
+- **Extensions** — the modules listed in `BUNDLED_EXTENSIONS` (`core/extensions/__init__.py`): `web`, `orchestration`, `evaluation`, `scheduling`, `packages`, `model_mgmt`, `session_tools` always register; `candor`, `rlm`, `telos` and `mcp` register conditionally on their own settings (`candor_enabled`, `rlm_enabled`, `telos_enabled`, `mcp_enabled`). Full inventory and gating: [extensions.md](extensions.md)
 - Agent sees only the schema slice for `active_tools` — scout-picked plus a monotonically-growing allowlist (`_resolve_tool_surface()`, `agent.py:1216`)
 - `discover_tools()` during the loop can expand `active_tools` mid-turn (`agent.py:2269-2270`)
 
@@ -616,7 +616,7 @@ Tools with `"worker"` in `denied_session_types`: every orchestration tool (`spaw
 ### 4.3 What a worker can use
 
 - All core tools (`file_read`, `file_write`, `bash`, `call_model`, `ask_user`, …) — including `ask_user`: the question is posted to the global question registry and routed to **whichever user is watching the parent's UI**. From the worker's perspective the mechanism is identical to a main session — turn terminates with `waiting_for_input=True`, user's answer arrives as a new `manager.prompt()` into the worker.
-- All enabled extension tools (browser, vcs, planning)
+- All enabled extension tools (browser, vcs)
 - Skills (scout auto-injects top-1)
 - Shared workspace (reads/writes visible to parent), but its deliverable is isolated in `.worker_{id[:12]}_summary.md`
 

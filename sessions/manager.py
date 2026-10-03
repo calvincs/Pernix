@@ -25,6 +25,11 @@ logger = logging.getLogger("pernix.sessions")
 # the current turn" still produces its own turn. Mid-turn injection has its
 # own dedicated endpoint (POST /api/chat/inject) and is unaffected.
 RAPID_FIRE_WINDOW_SECONDS = 3.0
+# Eval-retry budget per turn. The plumbing stays until follow-up C2 retires
+# it, but nothing has requested an eval retry since the feature-eval loop and
+# its eval_max_retries setting were removed (2026-10 prune).
+_EVAL_MAX_RETRIES = 2
+
 _COMBINED_PREFIX = "[Combined rapid-fire messages]"
 _COMBINED_ITEM_RE = re.compile(r"^(\d+)\.\s", re.MULTILINE)
 
@@ -205,7 +210,7 @@ def _build_retry_directive(session) -> str:
     session.turn.reflect_lessons, and the eval harness writes per-feature judge
     feedback to session.turn.eval_feedback. Eval's used to exist only inside an
     `eval.retry` SSE event, so an eval retry re-ran a byte-identical turn and
-    failed the same features again up to eval_max_retries times.
+    failed the same features again up to _EVAL_MAX_RETRIES times.
 
     Returns "" for a normal (non-retry) turn.
     """
@@ -2662,7 +2667,7 @@ class SessionManager:
                 in_finalizing = sv2._current_state(session) == sv2.SessionStateV2.FINALIZING
                 if (
                     _turn.eval_retry_requested
-                    and _turn.eval_count < settings.eval_max_retries
+                    and _turn.eval_count < _EVAL_MAX_RETRIES
                     and not session.pending_messages
                     and in_finalizing
                 ):

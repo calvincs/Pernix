@@ -327,37 +327,6 @@ graph could not adapt when a step surprised it, which is precisely what an agent
 is for. Decide the next step from what the last one actually returned."""
 
 
-# Conditional block — appended to the base prompt only when settings.eval_auto is True.
-# When auto-eval is OFF this is omitted entirely, so the model isn't biased toward
-# calling add_feature. Skip-first ordering: the most common over-trigger is treating
-# operational requests as tracked deliverables, so we lead with the rule that prevents that.
-_AUTO_EVAL_BLOCK = """ACCEPTANCE-CRITERIA FLOW (auto-eval is ON for this server).
-
-DO NOT use add_feature for operational requests. If the user asked you to:
-fetch, download, scrape, transcribe, summarize, translate, run, deploy,
-restart, install, look up, find, search, list, or show something — SKIP this
-flow entirely. Just deliver the result. Calling add_feature for these creates
-registry noise and triggers an unneeded auto-eval round that grades you on
-criteria you just made up.
-
-USE this flow ONLY when ALL three are true:
-- User asked you to BUILD or IMPLEMENT a non-trivial artifact
-  (code, document, report).
-- Success is subjective ("idiomatic", "clean", "handles edge cases gracefully").
-- User did NOT give concrete tests like "returns 'X' for input Y" — if they
-  did, just run the test inline with bash; that's faster and zero-cost.
-
-How to use:
-1. add_feature(title, description, criteria) BEFORE you start implementing.
-   Each line of `criteria` is one judgeable condition.
-2. Implement and iterate as usual.
-3. After your turn ends, an LLM judge scores each criterion automatically
-   against workspace files + your messages. Failed criteria may trigger a retry.
-
-NEVER call add_feature after the work is done. The flow is for setting
-expectations up-front, not for self-grading what you already produced."""
-
-
 _RLM_BLOCK = """RECURSIVE PROCESSING (rlm_process is available on this server).
 For a file or corpus far too large to read inline — anything where you'd loop
 file_read pagination or where truncation keeps hiding data you need — prefer one
@@ -389,14 +358,9 @@ user-facing output."""
 
 
 def _build_base_system_prompt() -> str:
-    """Assemble the base system prompt, including the auto-eval block only when
-    settings.eval_auto is True. Keeping the block conditional avoids biasing the
-    model toward add_feature on operational requests when the feature isn't even
-    active server-side.
-    """
+    """Assemble the base system prompt plus the blocks for features that are
+    switched on (RLM, the --dangerous approvals notice)."""
     parts = [BASE_SYSTEM_PROMPT]
-    if settings.eval_auto:
-        parts.append(_AUTO_EVAL_BLOCK)
     if settings.rlm_enabled:
         parts.append(_RLM_BLOCK)
     # --dangerous is process-lifetime, so this stays byte-stable across turns

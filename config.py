@@ -671,15 +671,6 @@ class Settings:
     telos_soup_archive_retention_days: int = 180
     telos_soup_context_entries: int = 10  # memory entries in the band sample
 
-    # --- Evaluation (extension) ---
-    eval_auto: bool = False
-    eval_threshold: float = 0.7
-    eval_max_retries: int = 2
-    eval_browser_verify: bool = False
-
-    # --- Planning ---
-    plan_review_timeout: int = 120
-
     # --- Snooze (idle-time self-optimization) ---
     snooze_enabled: bool = True
     snooze_interval_ticks: int = 10  # Check every N maintenance ticks (N * 60s)

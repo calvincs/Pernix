@@ -385,23 +385,11 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'Evaluation',
-        tab: 'agent',
-        description: 'Feature-level QA against acceptance criteria in the feature registry (data/registry.json). When auto-evaluate is enabled, runs after each task to score registered features. Browser screenshots provide visual verification evidence.',
-        fields: [
-            { key: 'eval_auto', label: 'Auto-Evaluate', type: 'bool' },
-            { key: 'eval_threshold', label: 'Pass Threshold (0–1 fraction)', type: 'number', step: 0.1 },
-            { key: 'eval_max_retries', label: 'Max Retries', type: 'number' },
-            { key: 'eval_browser_verify', label: 'Browser Screenshots', type: 'bool' },
-        ],
-    },
-    {
         title: 'Orchestration',
         tab: 'agent',
-        description: 'Controls for multi-worker task decomposition. Max workers limits parallel sub-agents. Stall threshold detects stuck workers. Plan review timeout is how long you have to approve a generated plan before it auto-proceeds.',
+        description: 'Controls for multi-worker task decomposition. Max workers limits parallel sub-agents.',
         fields: [
             { key: 'max_concurrent_workers', label: 'Max Workers', type: 'number' },
-            { key: 'plan_review_timeout', label: 'Plan Review Timeout (seconds)', type: 'number' },
         ],
     },
     {

@@ -107,35 +107,3 @@ async def test_a_normal_turn_carries_no_directive(monkeypatch, mgr_and_session):
     await mgr._run_scout_and_process(session, "a fresh question")
 
     assert seen == [""], "a stale retry directive leaked into a normal turn"
-
-
-async def test_eval_feedback_is_stored_on_the_session(monkeypatch, tmp_path):
-    """_maybe_evaluate used to emit the judge's feedback and drop it."""
-    import json
-
-    from db import models as db
-    from sessions.hooks import _maybe_evaluate
-    from sessions.state import AgentSession
-
-    monkeypatch.setattr("config.settings.eval_auto", True)
-    monkeypatch.setattr("config.settings.eval_max_retries", 2)
-
-    sid = db.create_session(title="Eval feedback")
-    session = db.get_session(sid)
-    session_obj = AgentSession(session_id=sid)
-
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "data").mkdir(exist_ok=True)
-    (tmp_path / "data" / "registry.json").write_text(
-        json.dumps([{"id": "f1", "title": "delete button", "passes": False, "session_id": sid}])
-    )
-
-    async def _fake_eval(feat, session_id):
-        return {"passed": False, "scores": {}, "feedback": "the delete button does nothing"}
-
-    monkeypatch.setattr("core.extensions.evaluation.evaluate_single_async", _fake_eval)
-
-    await _maybe_evaluate(sid, session, session_obj=session_obj)
-
-    assert session_obj.turn.eval_retry_requested
-    assert "delete button does nothing" in session_obj.turn.eval_feedback
