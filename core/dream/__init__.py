@@ -93,26 +93,16 @@ async def run_step(is_cancelled) -> dict:
     if did:
         db.set_snooze_state("dream_last_action", did)
 
-    # Promotion (plan 4d): validated hypotheses climb into the adaptive
-    # layer — gated by adaptive_enabled, bounded per step, stamped
-    # status='promoted' so each promotes exactly once.
-    if settings.adaptive_enabled and not is_cancelled():
+    # Promotion: validated contradiction/memory_stale findings write their
+    # memory correction; tool_pattern/lesson_ineffective are report-only.
+    # Bounded per step, stamped status='promoted' so each promotes once.
+    if not is_cancelled():
         from core.dream.promote import promote_validated
 
         try:
             stats["dream_promoted"] = await promote_validated()
         except Exception as e:
             logger.warning("dream: promotion failed: %s", e)
-
-        # Symmetric with promotion: minting without retiring wedges the
-        # per-kind cap, after which every promotion is silently rejected
-        # (core/dream/retire.py).
-        try:
-            from core.dream.retire import retire_stale_hints
-
-            stats["dream_retired"] = await retire_stale_hints()
-        except Exception as e:
-            logger.warning("dream: adaptive retirement failed: %s", e)
 
     if not is_cancelled():
         from core.dream.report import maybe_write_report
@@ -214,10 +204,11 @@ def _check_promotion_health() -> None:
     validation loop was perfectly healthy while 55 validated rows sat parked
     for three days, because inflow (~18/day) had outrun the veto-window
     drain (10/day) and the per-producer proposal cap. That state logged one
-    INFO line per cycle and alarmed nowhere. Waiting on review is normal;
-    waiting longer than the stall threshold means inflow and drain have
-    diverged and the queue will only grow — say so out loud, once a day,
-    from the same daily slot as the pending check.
+    INFO line per cycle and alarmed nowhere. Since 3.2 promotion settles
+    every row in the step that sees it (no review queue), so a row waiting
+    longer than the stall threshold means promotion is not running or keeps
+    failing — say so out loud, once a day, from the same daily slot as the
+    pending check.
     """
     from datetime import datetime, timezone
 
@@ -239,11 +230,10 @@ def _check_promotion_health() -> None:
             "Dream: validated findings are not reaching promotion",
             (
                 f"The oldest validated hypothesis is {age_days} days old and {len(validated)} "
-                "are waiting. Promotion is backpressured by the adaptive proposal queue "
-                "(adaptive_max_pending_per_producer) and the veto-window drain "
-                "(adaptive_max_auto_approvals_per_day) — a backlog this old means findings "
-                "are being minted faster than they are applied. Drain the review queue, or "
-                "reduce inflow, or raise the drain caps."
+                "are waiting. Promotion runs on every dream step and settles each row at once "
+                "(a correction written, or reported only), so a backlog this old means the "
+                "dream step itself is not running or promotion keeps failing — check the "
+                "server log for 'dream: promotion failed'."
             ),
             link={"kind": "tab", "tab": "dream"},
         )

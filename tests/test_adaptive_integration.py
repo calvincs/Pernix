@@ -91,92 +91,6 @@ def test_producer_prompt_suffix_gated_on_flag(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Dream promotion
-# ---------------------------------------------------------------------------
-
-
-async def _gate_identity(row):
-    """Actionability-gate stand-in for tests that exercise the promotion
-    plumbing, not the gate itself (the gate has its own tests in
-    test_dream.py). Emits lint-passing imperative content."""
-    return {
-        "actionable": True,
-        "title": str(row.get("statement") or "")[:60],
-        "content": f"When relevant: {str(row.get('statement') or '')[:200]}",
-    }
-
-
-def _bypass_gate(monkeypatch):
-    monkeypatch.setattr("core.dream.promote._actionability_gate", _gate_identity)
-
-
-async def test_dream_promotion_mapping(monkeypatch):
-    from core.dream.promote import promote_validated
-
-    _bypass_gate(monkeypatch)
-    h_tool = db.add_dream_hypothesis("tool_pattern", "http_get fails on js-heavy sites; use browse_web", "[]")
-    h_lesson = db.add_dream_hypothesis("lesson_ineffective", "lesson X never changes outcomes", "[]")
-    h_stale = db.add_dream_hypothesis("memory_stale", "entry about API v1 is outdated", "[]")
-    for hid in (h_tool, h_lesson, h_stale):
-        db.update_dream_hypothesis(hid, status="validated")
-
-    # h_stale cites no memory file, so there is nothing an approval could
-    # write. It resolves terminally without minting a proposal and is not
-    # counted as a promotion — only the two with real effectors are.
-    promoted = await promote_validated(limit=10)
-    assert promoted == 2
-
-    rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
-    assert set(rows) == {h_tool, h_lesson, h_stale}  # all three left the queue
-    # Dream global edits are proposal-gated (4b escalation wins over 4d
-    # "auto-eligible" phrasing) — the actionable ones land as proposals.
-    assert rows[h_tool]["promoted_ref"].startswith("proposal:")
-    assert rows[h_lesson]["promoted_ref"].startswith("proposal:")
-    assert rows[h_stale]["promoted_ref"] == "reported:no-effector"
-    assert db.adaptive_list_batches(status="pending") == []
-
-    # Two proposals, both with a payload someone can actually approve. The
-    # empty review-only variant is gone: 62 of 126 pending proposals on the
-    # live box were no-ops, and a queue that is half no-ops is a queue nobody
-    # finishes reading.
-    props = db.adaptive_list_proposals(status="pending")
-    assert len(props) == 2
-    assert all(json.loads(p["payload_json"]) for p in props)
-
-
-async def test_effectorless_finding_is_reported_not_queued(monkeypatch):
-    """A validated hypothesis with a citable file still becomes a proposal —
-    applied on the spot since 2026-08-21, so it is found under auto_applied."""
-    from core.dream.promote import promote_validated
-
-    monkeypatch.setattr(
-        "core.memory.ingest.apply_memory_correction",
-        lambda files, statement, source_ref="", kind="", approved_by="human": list(files),
-    )
-    monkeypatch.setattr("core.dream.journal.append_sync", lambda text: None)
-    ev = json.dumps([{"type": "memory", "file": "pernix.config", "epoch": 1, "hash": "abc"}])
-    hid = db.add_dream_hypothesis("contradiction", "two entries disagree about the port", ev)
-    db.update_dream_hypothesis(hid, status="validated")
-
-    assert await promote_validated(limit=10) == 1
-    props = db.adaptive_list_proposals(status="auto_applied")
-    assert len(props) == 1
-    payload = json.loads(props[0]["payload_json"])
-    assert payload[0]["action"] == "memory_correction"
-    assert payload[0]["files"] == ["pernix.config"]
-
-
-async def test_dream_promotion_gated_on_flag(monkeypatch):
-    monkeypatch.setattr("config.settings.adaptive_enabled", False)
-    from core.dream.promote import promote_validated
-
-    hid = db.add_dream_hypothesis("tool_pattern", "x", "[]")
-    db.update_dream_hypothesis(hid, status="validated")
-    assert await promote_validated() == 0
-    assert db.list_dream_hypotheses(status="validated", limit=5)  # untouched
-
-
-# ---------------------------------------------------------------------------
 # Consumption: scout
 # ---------------------------------------------------------------------------
 
@@ -557,41 +471,6 @@ async def test_adaptive_step_skips_sweep_and_notify_when_nothing_applied(monkeyp
     assert not any("auto-applied" in (n.get("title") or "") for n in db.list_notifications("log"))
 
 
-async def test_memory_correction_effector_writes_on_promotion(monkeypatch, tmp_path):
-    """A validated dream contradiction with cited memory files writes its
-    corrective entry when it is PROMOTED — no review queue in between. The
-    proposal row is still minted for the audit trail, resolved `auto_applied`
-    (audit P5 gave corrections an effector; 2026-08-21 removed the wait)."""
-    import json as _json
-
-    from core.dream.promote import promote_validated
-
-    written_calls = []
-
-    def _fake_correction(files, statement, source_ref="", kind="", approved_by="human"):
-        written_calls.append((tuple(files), kind, approved_by))
-        return list(files)
-
-    import core.memory.ingest as ingest_mod
-
-    monkeypatch.setattr(ingest_mod, "apply_memory_correction", _fake_correction)
-    monkeypatch.setattr("core.dream.journal.append_sync", lambda text: None)
-
-    evidence = _json.dumps([{"type": "memory", "file": "test.corrections", "epoch": 1}])
-    hid = db.add_dream_hypothesis("contradiction", "Entry A contradicts entry B about worker limits", evidence)
-    db.update_dream_hypothesis(hid, status="validated")
-
-    assert await promote_validated(limit=5) == 1
-    assert db.adaptive_list_proposals(status="pending") == []
-    prop = db.adaptive_list_proposals(status="auto_applied")[0]
-    payload = _json.loads(prop["payload_json"])
-    assert payload and payload[0]["action"] == "memory_correction"
-    assert payload[0]["files"] == ["test.corrections"]
-    assert written_calls == [(("test.corrections",), "contradiction", "dream")]
-    rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
-    assert rows[hid]["promoted_ref"] == f"proposal:{prop['id']}"
-
-
 # ---------------------------------------------------------------------------
 # Proposal queue bounds
 # ---------------------------------------------------------------------------
@@ -659,30 +538,6 @@ def test_one_producer_cannot_own_the_whole_review_queue():
     assert db.adaptive_add_proposal(
         "candor", json.dumps([{"n": 9}]), "[]", "c", max_pending=40, max_pending_per_producer=3
     )
-
-
-async def test_same_file_correction_is_not_proposed_twice(monkeypatch):
-    """One conflicted memory file produced four separate proposals live. With
-    corrections applying on promotion the dedup looks at what was applied
-    this week, not just at what is pending (which is now momentary)."""
-    from core.dream.promote import promote_validated
-
-    monkeypatch.setattr(
-        "core.memory.ingest.apply_memory_correction",
-        lambda files, statement, source_ref="", kind="", approved_by="human": list(files),
-    )
-    monkeypatch.setattr("core.dream.journal.append_sync", lambda text: None)
-    ev = json.dumps([{"type": "memory", "file": "pernix.versions", "epoch": 1, "hash": "a"}])
-    a = db.add_dream_hypothesis("contradiction", "two entries disagree about the version", ev)
-    b = db.add_dream_hypothesis("contradiction", "the recorded version numbers are inconsistent", ev)
-    for hid in (a, b):
-        db.update_dream_hypothesis(hid, status="validated")
-
-    assert await promote_validated(limit=10) == 1
-    assert len(db.adaptive_list_proposals(status="auto_applied")) == 1
-    assert db.adaptive_list_proposals(status="pending") == []
-    rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
-    assert rows[b]["promoted_ref"] == "reported:duplicate-evidence"
 
 
 # ---------------------------------------------------------------------------

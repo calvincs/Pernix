@@ -229,7 +229,7 @@ async def test_fallback_burn_interrupts_once_a_day_across_the_deploy(monkeypatch
 def test_dream_corrections_are_log_tier_and_keep_their_daily_marker():
     from core.dream.promote import _announce_applied_corrections
 
-    applied = [{"pid": 1, "kind": "contradiction", "written": ["dream"], "statement": "M1 is stale"}]
+    applied = [{"id": "abcdef123456", "kind": "contradiction", "written": ["dream"], "statement": "M1 is stale"}]
     _announce_applied_corrections(applied)
     _announce_applied_corrections(applied)
     rows = _rows("dream.corrections_applied")
