@@ -2405,7 +2405,7 @@ def adaptive_head_wrap(browser):
     body[data-touch]. The DOCKED desktop Explorer is the same 360px as the
     tablet one and sets neither attribute, so on a plain desktop browser the
     heartbeat chip and four buttons were squeezed into one unwrappable line
-    and overlapped. The Learning, Goals and Trust heads use the same class,
+    and overlapped. The Learning and Trust heads use the same class,
     so this measures every head the panel has. (L04)
     """
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
@@ -2417,7 +2417,7 @@ def adaptive_head_wrap(browser):
     time.sleep(0.9)
     pg.evaluate("() => document.getElementById('fp-group-tuning')?.click()")
     time.sleep(0.6)
-    for tab in ("canary", "adaptive", "telos"):
+    for tab in ("canary", "adaptive"):
         pg.evaluate(f"() => document.getElementById('fp-tab-{tab}')?.click()")
         time.sleep(1.0)
         m = _settle(lambda: (lambda r: r if r and r["heads"] else None)(pg.evaluate(ADAPTIVE_HEAD_JS)))
