@@ -3362,8 +3362,8 @@ def add_canary_run(
     outcome: str = "",
     error: str = "",
 ) -> int:
-    """Record a completed canary run. batch_id links post-batch sweeps to the
-    Phase 4 adaptive batch that triggered them (the tripwire joins on it).
+    """Record a completed canary run. batch_id tagged post-batch sweeps of the
+    adaptive layer (retired in 3.2); nothing passes one now.
     outcome separates timeout/error/noop from honest gate failures; rows
     written before v30 keep it NULL."""
     with connect_sessions() as conn:
@@ -4484,10 +4484,8 @@ def upsert_signal(
 
     Call once per observation (e.g. once per post-mortem that touches this
     subject). Pass delta_reinforcements=0 when adding outcome deltas to a
-    subject whose usage was already counted elsewhere — adaptive_entry
-    usage counts at scout submit-time, outcomes at synthesis time, and
-    double-counting the observation would inflate the denominator every
-    retirement decision divides by. Does not touch user_approved.
+    subject whose usage was already counted elsewhere — double-counting the
+    observation would inflate the denominator every ratio divides by. Does not touch user_approved.
     """
     now = _now()
     with connect_sessions() as conn:
@@ -4947,8 +4945,7 @@ def resolve_skill_proposal(proposal_id: str, status: str) -> bool:
 def count_auto_applied_skill_proposals_since(cutoff_iso: str) -> int:
     """How many proposals the veto-window sweep applied since `cutoff_iso`.
 
-    Backs the ``skill_proposal_max_auto_applies_per_day`` budget — same
-    counting pattern as adaptive_count_auto_approved_since.
+    Backs the ``skill_proposal_max_auto_applies_per_day`` budget.
     """
     with connect_sessions() as conn:
         row = conn.execute(
