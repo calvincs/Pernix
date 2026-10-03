@@ -138,3 +138,4 @@ Watch over two weeks, comparing against the pre-deploy baselines:
 - Decide whether dream should keep generating tool_pattern / lesson_ineffective
   findings now that they are report-only.
 - Drop skill-proposal generation entirely if nobody applies one by hand in 30 days.
+- Watch the scout's escalations to the paid `fallback_model`. In 1 of the 5 scout runs right after the deploy, the local model did not submit a plan in its single round, twice in a row. That happened on the youtube canary, whose prompt says "load the skill". Before the deploy the rate was 5 in 612. If it stays above about 5%, add one submit-only follow-up round before escalating.
