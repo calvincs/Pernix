@@ -937,7 +937,7 @@ def get_sessions_in_legacy_processing_only() -> list[dict]:
 
 
 def delete_session(session_id: str) -> None:
-    """Delete session and cascade (messages, artifacts, questions)."""
+    """Delete session and cascade (messages, questions)."""
     # Delete workers first (recursive), then parent — all in one transaction
     with connect_sessions() as conn:
         worker_ids = [
@@ -2195,7 +2195,7 @@ def add_compaction(
 
 
 def clear_messages_only(session_id: str) -> None:
-    """Clear all messages but keep session and artifacts."""
+    """Clear all messages but keep the session."""
     with connect_sessions() as conn:
         try:
             conn.execute(
@@ -5409,7 +5409,6 @@ def get_db_stats() -> dict:
         for table in [
             "sessions",
             "messages",
-            "artifacts",
             "token_usage",
             "questions",
             "notifications",
