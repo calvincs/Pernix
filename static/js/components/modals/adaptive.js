@@ -6,22 +6,9 @@
 import { el, text, clear } from '../../render.js';
 import { icon } from '../../icons.js';
 import { del, get, post } from '../../api.js';
-import { makeDisclosure, resultLine, tabGlossary } from './telos.js';
-
-// Every action here ends in a refresh() that rebuilds the whole tab, so an
-// inline line written before it would be wiped a frame later. Park the message
-// and render it at the top of the next pass instead of firing an alert(). (S11)
-let _pendingNotice = null;
-
-export function setActionNotice(message, isError = false) {
-    _pendingNotice = message ? { message, isError } : null;
-}
-
-export function takeActionNotice() {
-    const notice = _pendingNotice;
-    _pendingNotice = null;
-    return notice ? resultLine(notice.message, notice.isError) : null;
-}
+import {
+    actionBtn, makeDisclosure, resultLine, setActionNotice, tabGlossary, takeActionNotice,
+} from './tab-kit.js';
 
 function relTime(isoStr) {
     if (!isoStr) return '';
@@ -42,20 +29,6 @@ function section(title) {
 
 function badge(label, cls = '') {
     return el('span', { class: `adaptive-badge ${cls}` }, [text(label)]);
-}
-
-export async function actionBtn(label, fn, refresh) {
-    const btn = el('button', { class: 'adaptive-btn' }, [text(label)]);
-    btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        try {
-            await fn();
-        } catch (e) {
-            setActionNotice(`Action failed: ${e.message || e}`, true);
-        }
-        await refresh();
-    });
-    return btn;
 }
 
 /**

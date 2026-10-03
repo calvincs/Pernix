@@ -67,6 +67,7 @@ const SHELL_ASSETS = [
     '/static/js/components/modals/spaces.js',
     '/static/js/components/modals/adaptive.js',
     '/static/js/components/modals/canary.js',
+    '/static/js/components/modals/tab-kit.js',
     '/static/js/components/modals/telos.js',
     '/static/js/components/modals/trust.js',
     '/static/js/components/modals/sheet.js',

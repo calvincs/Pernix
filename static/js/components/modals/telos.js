@@ -6,6 +6,7 @@
 import { el, text, clear } from '../../render.js';
 import { icon } from '../../icons.js';
 import { get, post } from '../../api.js';
+import { makeDisclosure, resultLine, tabGlossary } from './tab-kit.js';
 
 function relTime(isoStr) {
     if (!isoStr) return '';
@@ -26,49 +27,6 @@ function badge(label, cls = '') {
 
 function sectionTitle(label) {
     return el('div', { class: 'adaptive-section-title' }, [text(label)]);
-}
-
-/**
- * One plain-words line under a tab header, in the shape file-panel.js's
- * _buildTabDesc gives every other Explorer tab. Telos, Canary and Adaptive
- * opened straight into badges and vocabulary ("acedia signature", "EIG floor",
- * "tripwire") with nothing anywhere saying what the tab is FOR. Shared from
- * here because all three need the same treatment. (S11)
- */
-export function tabGlossary(line) {
-    return el('div', { class: 'fp-tab-desc' }, [
-        el('div', { class: 'fp-tab-desc-brief' }, [el('span', {}, [text(line)])]),
-    ]);
-}
-
-/**
- * Turn a <div> that toggles a detail block into a real disclosure control:
- * a tab stop, an announced role, and Enter/Space. Every expandable row on
- * these tabs was mouse-only. (A1)
- */
-export function makeDisclosure(headerEl, isExpanded, toggle) {
-    headerEl.setAttribute('role', 'button');
-    headerEl.setAttribute('tabindex', '0');
-    const sync = () => headerEl.setAttribute('aria-expanded', String(!!isExpanded()));
-    const activate = () => { toggle(); sync(); };
-    headerEl.addEventListener('click', activate);
-    headerEl.addEventListener('keydown', (e) => {
-        if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
-        e.preventDefault();
-        activate();
-    });
-    sync();
-    return headerEl;
-}
-
-// Inline result line, same shape as the MCP add form's — alert() steals focus,
-// cannot be read next to the thing it is about, and is unreachable to anything
-// that renders the tab in the background.
-export function resultLine(message, isError = false) {
-    return el('div', {
-        class: `adaptive-result${isError ? ' err' : ''}`,
-        role: isError ? 'alert' : 'status',
-    }, [text(message)]);
 }
 
 function countLine(obj) {
