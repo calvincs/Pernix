@@ -128,9 +128,6 @@ class TurnState:
     # a retry can reuse a prior failure when watch_paths are unchanged. Typed
     # Any to keep sessions/ from importing core.gates.
     gate_history: Any = None
-    # Skill-proposal ids injected as trial hints this turn; the post-verdict
-    # success bump reads them back.
-    injected_trial_proposals: list = field(default_factory=list)
 
     # --- Late edits to this turn's user row ---
     # Bumped by the manager's rapid-fire combiner every time it rewrites the
