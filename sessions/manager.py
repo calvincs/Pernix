@@ -4001,10 +4001,10 @@ class SessionManager:
         answer from two different rules.
 
         strict=True ignores goal-continuation transparency: only canary
-        sessions stay invisible. Mutating snooze work (adaptive applies,
-        memory-store surgery) uses this so it never runs while a goal turn
-        is mid-flight — a mid-turn prompt/memory mutation changes the very
-        turn the tripwire would then attribute it to.
+        sessions stay invisible. Mutating snooze work (memory-store surgery,
+        skill-file applies) uses this so it never runs while a goal turn is
+        mid-flight — a mid-turn memory mutation changes the very turn that
+        is reading it.
 
         transparent=False drops both exemptions: nothing is invisible. Both
         exemptions exist so snooze does not deadlock against its own sweeps,

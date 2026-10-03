@@ -9,9 +9,8 @@ Proposals are written by reflect and refine when a skill visibly under-performs
      applies pending proposals older than
      ``skill_proposal_auto_apply_after_hours`` after machine validation,
      with a timestamped backup under data/skill_backups/ (status
-     'auto_applied'). Same contract as the adaptive layer's
-     auto_approve_stale_proposals: a human can reject anything inside the
-     window; after it, the system applies its own validated learning and
+     'auto_applied'). A veto window, not an approval gate: a human can
+     reject anything inside the window; after it, the system applies its own validated learning and
      rollback is a function call away (``restore_skill_backup``, POST
      /api/skills/proposals/{id}/rollback, or automatically on a verify-canary
      failure when ``skill_proposal_auto_rollback`` is on).
@@ -250,7 +249,7 @@ def restore_skill_backup(proposal_id: str, actor: str = "user") -> dict:
     """Undo one applied skill proposal by restoring its pre-apply backup.
 
     The sixth principle of the hardening plan is that every channel has an
-    undo. Adaptive batches had one; skill auto-apply had a veto window, a
+    undo. Skill auto-apply had a veto window, a
     timestamped backup, and a README sentence telling a human to copy the
     file back by hand — which is not an undo, it is a hope.
 
@@ -500,8 +499,7 @@ def _validate_for_auto_apply(proposal: dict) -> str | None:
 def auto_apply_ripe_proposals() -> dict:
     """Apply pending skill proposals whose veto window has elapsed.
 
-    The proposals table held the same structural contradiction the adaptive
-    layer fixed with auto_approve_stale_proposals: refine emits proposals
+    The proposals table held a structural contradiction: refine emits proposals
     with a confidence floor, application waited on a scarce human click —
     and on the live box that click never came (zero proposals ever reached
     the table, and had one landed it would have parked forever). The gate
@@ -523,7 +521,7 @@ def auto_apply_ripe_proposals() -> dict:
         return out
 
     # Idle-only: never mutate a skill out from under a session that might
-    # be reading it mid-task (same guard as adaptive's sweep).
+    # be reading it mid-task.
     try:
         from sessions.manager import get_manager
 

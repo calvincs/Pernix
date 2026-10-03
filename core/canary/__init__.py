@@ -2,7 +2,6 @@
 
 Active measurement for self-improvement: canned tasks + deterministic gates,
 run headlessly through the FULL pipeline (scout → agent → gates → reflect).
-The Phase 4 tripwire's primary signal.
 
 Canary sessions are session_type="canary" and isolated by an enumerated
 predicate list (FTS exclusion, distill/refine exclusion,

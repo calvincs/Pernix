@@ -76,7 +76,7 @@ class CanaryDef:
     tags: list[str] = field(default_factory=list)
     # Change surfaces this canary tests, as `<domain>:<name>` strings —
     # `skill:stateful-env-reverse-engineering`, `kind:prompt_note`. Coverage
-    # triggers (a skill edit, an adaptive batch) select canaries by these.
+    # triggers (a skill edit) select canaries by these.
     covers: list[str] = field(default_factory=list)
     flaky: bool = False
     # Parked = long-green and off the heartbeat rotation. Still visible,
