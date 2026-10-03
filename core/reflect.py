@@ -40,7 +40,6 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
 - what_failed: If retry — tools/approaches that failed or wasted time (avoid). Empty string if pass.
 - strategy: If retry — concrete instruction for the retry attempt. Must propose a DIFFERENT approach if the same tools failed repeatedly. Empty string if pass.
 - retry_without_tools: OPTIONAL, only meaningful with verdict "retry" — array of tool names (e.g. ["spawn_worker"]) that the agent misused this attempt and must NOT be allowed to call on the retry. Use when the failure was caused by reaching for a tool against the plan (e.g. delegating to workers when told to work inline). The harness enforces this mechanically — the listed tools are disabled for the retry attempt — so name a tool only when its absence would force the correct approach. Omit or empty array otherwise.
-- cited_policies: OPTIONAL — when the evidence includes ACTIVE ADAPTIVE POLICIES, array of the [id] values (max 5) whose guidance demonstrably shaped this turn or was demonstrably violated in a way that caused the outcome. Omit (or empty array) when no policy visibly mattered — that is the honest default and the common case; never cite a policy just because it exists.
 - missing: If escalate — what specific information or clarification is needed from the user. Empty string otherwise.
 - turn_digest: REQUIRED when verdict is "retry" or "escalate"; optional on "pass" (you may omit the key entirely). When emitted, structure exactly as:
     {
@@ -196,11 +195,6 @@ class ReflectResult:
     # each spawning workers against explicit instructions); this is enforced by
     # the executor and the active-tool filter instead.
     retry_without_tools: list = field(default_factory=list)
-
-    # Adaptive entries (by id) whose guidance demonstrably shaped or blocked
-    # this turn — the per-entry usage signal's reflect-side source. Empty is
-    # the honest default.
-    cited_policies: list = field(default_factory=list)
 
     # Experience read — the intangibles of the interaction (sentiment,
     # friction, per-turn user observations). Emitted on EVERY verdict: pass
@@ -764,7 +758,6 @@ def _build_compact_evidence(
     turn_user_msg_id: int | None = None,
     grounding_out: dict | None = None,
     next_user_message: str = "",
-    turn_key: str = "",
 ) -> str:
     """Build the evidence blob for reflect.
 
@@ -866,31 +859,6 @@ def _build_compact_evidence(
             approach_lines.append(f"TOOL RATIONALE: {rationale}")
         if approach_lines:
             parts.append("\n\n".join(approach_lines))
-
-    # Adaptive policies THIS TURN RENDERED, by id — so the grade's
-    # cited_policies field has something real to cite. Ids and titles only:
-    # the full content is in the agent's prompt, and reflect only needs to say
-    # WHICH policies demonstrably shaped or blocked the outcome. This is the
-    # per-entry usage signal's second source (scout's used_hints is the first).
-    #
-    # The list is the compiler's own selection, not the store's contents: with
-    # trial arms (W6) a trial entry is absent from half the turns, and offering
-    # a grader the id of a rule the agent never saw invites a citation for
-    # prompt text that was not there — an attributed outcome with no cause.
-    if settings.adaptive_enabled:
-        try:
-            from core.adaptive.render import select_prompt_entries
-
-            selected = select_prompt_entries(session_id, turn_key)
-            pol = selected["notes"] + selected["policies"]
-            if pol:
-                parts.append(
-                    "ACTIVE ADAPTIVE POLICIES (cite ids in cited_policies only when one "
-                    "demonstrably shaped or blocked this outcome):\n"
-                    + "\n".join(f"- [{e['id']}] {e['title']}" for e in pol[:30])
-                )
-        except Exception:
-            pass  # evidence enrichment, never a reason to skip the grade
 
     # Tool execution summary with last few errors per tool. Labeled with its
     # scope: tool_summary accumulates across ALL attempts of the turn (see
@@ -1017,7 +985,6 @@ def _build_evidence(
     grounding_out: dict | None = None,
     turn_msg_id_range: tuple[int | None, int | None] | None = None,
     next_user_message: str = "",
-    turn_key: str = "",
 ) -> tuple[str, str]:
     """Build evidence for reflect verification.
 
@@ -1042,10 +1009,6 @@ def _build_evidence(
     has been appended since.
 
     `next_user_message` is the user's reply to this turn, when there is one.
-
-    `turn_key` is the graded turn's trial-arm coin (W6) — it decides which
-    adaptive entries the evidence may name, because it decided which ones the
-    agent was shown.
 
     Returns (user_request, evidence_summary).
     """
@@ -1094,7 +1057,6 @@ def _build_evidence(
         turn_user_msg_id=turn_user_msg_id,
         grounding_out=grounding_out,
         next_user_message=next_user_message,
-        turn_key=turn_key,
     )
     return user_request, evidence
 
@@ -1335,10 +1297,6 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
     raw_excl = data.get("retry_without_tools")
     if result.verdict == "retry" and isinstance(raw_excl, list):
         result.retry_without_tools = [str(t)[:80] for t in raw_excl if isinstance(t, str) and t.strip()][:5]
-
-    raw_cited = data.get("cited_policies")
-    if isinstance(raw_cited, list):
-        result.cited_policies = [str(p).strip("[] ")[:64] for p in raw_cited if isinstance(p, str) and p.strip()][:5]
 
     raw_exp = data.get("experience")
     if settings.reflect_experience and isinstance(raw_exp, dict) and raw_exp:
@@ -1614,7 +1572,6 @@ def _write_post_mortem(
     turn_user_msg_id: int | None = None,
     outcome_source: str = "llm",
     next_msg_correction: bool | None = None,
-    turn_key: str = "",
 ) -> None:
     """Persist a post-mortem artifact for this reflect invocation (Phase 2c).
 
@@ -1634,11 +1591,6 @@ def _write_post_mortem(
     value, "user", is written later by core/feedback.py when a thumb lands on
     the turn. next_msg_correction is the deterministic reading of that reply,
     recorded whatever the grader concluded.
-
-    turn_key is the turn's trial-arm coin (W6). It turns this row into the
-    experiment's data point: `rendered_entries` and `held_out_entries` say
-    which trial entries were in this turn's prompts and which were not, and
-    the sweep reads nothing else to decide whether an entry helped.
     """
     try:
         payload = {
@@ -1758,12 +1710,7 @@ def _write_post_mortem(
                 ],
                 "from_cache": bool(getattr(scout_report, "from_cache", False)),
                 "from_fallback": bool(getattr(scout_report, "from_fallback", False)),
-                # Usage counted at scout submit-time; carried here so
-                # synthesis can attribute this turn's outcome to the hints.
-                "used_hints": list(getattr(scout_report, "used_hints", []) or []),
             }
-        if result.cited_policies:
-            payload["cited_policies"] = list(result.cited_policies)
         if next_msg_correction is not None:
             payload["next_msg_correction"] = bool(next_msg_correction)
         # Turn anchor: the only handle that ties this grade to the message the
@@ -1772,22 +1719,6 @@ def _write_post_mortem(
         # own user message.
         if turn_user_msg_id is not None:
             payload["turn_user_msg_id"] = int(turn_user_msg_id)
-        # Trial arms (W6): the treatment record. Only TRIAL entries appear —
-        # an active entry renders on every turn, so it has no control half and
-        # this row could say nothing about it. Both keys are omitted entirely
-        # when no entry is on trial, so a store with trial mode off writes the
-        # payload it always did.
-        if settings.adaptive_enabled and turn_key:
-            try:
-                from core.adaptive.render import turn_arms
-
-                arms = turn_arms(session_id, turn_key)
-                if arms["rendered"] or arms["held_out"]:
-                    payload["rendered_entries"] = arms["rendered"]
-                    payload["held_out_entries"] = arms["held_out"]
-            except Exception as te:
-                logger.debug("trial-arm record failed for %s: %s", session_id, te)
-
         pm_id = db.add_post_mortem(
             session_id=session_id,
             attempt=attempt,
@@ -1866,7 +1797,6 @@ async def reflect_on_session(
     tool_summary_attempts: list | None = None,
     turn_msg_id_range: tuple[int | None, int | None] | None = None,
     next_user_message: str = "",
-    turn_key: str = "",
 ) -> ReflectResult:
     """Analyze a completed session turn and decide if the task was fulfilled.
 
@@ -1891,11 +1821,6 @@ async def reflect_on_session(
         next_user_message: The user's reply to this turn, when one arrived
             before the grade ran. Handed to the verifier as evidence and
             reduced to a deterministic correction flag on the post-mortem.
-        turn_key: The graded turn's trial-arm coin (W6), "<session>:<turn_id>".
-            Required from the deferred path, where the live session has since
-            moved on to a later turn; the sync path can leave it empty and let
-            it be read off the session. It decides both which adaptive entries
-            the evidence may name and what the treatment record says.
 
     Returns:
         ReflectResult with verdict and optional lessons
@@ -1904,14 +1829,6 @@ async def reflect_on_session(
     # below records the same pair — including the parse-failure soft pass.
     outcome_source = "next_turn" if next_user_message else "llm"
     correction = next_msg_correction(next_user_message) if next_user_message else None
-    if not turn_key:
-        # Sync grading runs inside the turn it is grading (a reflect retry
-        # does not advance the turn id), so the live session still holds the
-        # right key. A deferred grade must pass its snapshot's key instead.
-        from core.adaptive.trial import turn_key_for_session
-
-        turn_key = turn_key_for_session(session_id)
-
     # Off-loop: evidence assembly loads the full transcript from the DB.
     grounding: dict = {}
     user_request, evidence = await asyncio.to_thread(
@@ -1925,7 +1842,6 @@ async def reflect_on_session(
         prior_termination_reasons=prior_termination_reasons,
         tool_summary_attempts=tool_summary_attempts,
         grounding_out=grounding,
-        turn_key=turn_key,
         turn_msg_id_range=turn_msg_id_range,
         next_user_message=next_user_message,
     )
@@ -1943,7 +1859,6 @@ async def reflect_on_session(
             turn_user_msg_id=turn_user_msg_id,
             outcome_source=outcome_source,
             next_msg_correction=correction,
-            turn_key=turn_key,
         )
         return r
 
@@ -2227,7 +2142,6 @@ async def reflect_on_session(
                 turn_user_msg_id=turn_user_msg_id,
                 outcome_source=outcome_source,
                 next_msg_correction=correction,
-                turn_key=turn_key,
             )
             await _save_user_observations(session_id, result)
             return result
@@ -2279,7 +2193,6 @@ async def reflect_on_session(
             turn_user_msg_id=turn_user_msg_id,
             outcome_source=outcome_source,
             next_msg_correction=correction,
-            turn_key=turn_key,
         )
         return r
 
@@ -2298,6 +2211,5 @@ async def reflect_on_session(
             turn_user_msg_id=turn_user_msg_id,
             outcome_source=outcome_source,
             next_msg_correction=correction,
-            turn_key=turn_key,
         )
         return r
