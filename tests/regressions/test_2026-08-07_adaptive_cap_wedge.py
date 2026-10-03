@@ -19,8 +19,6 @@ red, no test fails, the loop just stops producing.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from config import settings
