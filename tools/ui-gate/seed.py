@@ -680,12 +680,12 @@ for i in range(3):
     )
 db.add_notification(
     "",
-    "Adaptive edits applied",
-    "2 prompt edits applied after the veto window.",
+    "Dream: 2 memory correction(s) applied",
+    "Validated dream findings wrote their corrective entries.",
     "low",
-    category="adaptive.edits_applied",
+    category="dream.corrections_applied",
     tier="log",
-    link={"kind": "tab", "tab": "learning"},
+    link={"kind": "tab", "tab": "dream"},
 )
 gone = db.add_notification(
     "",
@@ -700,7 +700,7 @@ _yday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 with connect_sessions() as conn:
     conn.execute(
         "UPDATE notifications SET created_at = ? WHERE title IN (?, ?)",
-        (_yday, "Adaptive edits applied", "MCP server boxpriv unreachable"),
+        (_yday, "Dream: 2 memory correction(s) applied", "MCP server boxpriv unreachable"),
     )
 
 print(json.dumps({"main": main, "long": long_sid, "parent": parent_sid, "scale": scale_id, "timeline": tl_sid}))

@@ -1,7 +1,6 @@
 // Pernix — Canary tab (Explorer): suite table, pass rates, run triggers,
 // recent runs, and full lifecycle control — create, edit, park/unpark,
-// retire, probes. Closes the loop from the Adaptive tab's tripwire flags —
-// a flagged batch cites canary regressions; this is where you read them.
+// retire, probes.
 
 import { el, text, clear } from '../../render.js';
 import { icon } from '../../icons.js';
@@ -307,5 +306,5 @@ export async function renderCanaryTab(container) {
         row.appendChild(detail);
         container.appendChild(row);
     }
-    if (!runs.length) container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No runs yet — self-checks fire on change (an adaptive batch, a skill edit, a deploy) plus a small nightly heartbeat.')]));
+    if (!runs.length) container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No runs yet — self-checks fire on change (a skill edit, a deploy, a model swap) plus a small nightly heartbeat.')]));
 }

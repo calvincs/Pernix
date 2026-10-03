@@ -15,7 +15,6 @@ import {
     buildActiveTab, buildScheduledTab, buildHistoryTab,
     setJobsCallbacks, clearElapsedTimers,
 } from './modals/jobs.js';
-import { renderAdaptiveTab } from './modals/adaptive.js';
 import { renderCanaryTab } from './modals/canary.js';
 import { renderTrustTab } from './modals/trust.js';
 
@@ -246,10 +245,9 @@ export const EXPLORER_GROUPS = [
     {
         key: 'tuning', label: 'Self-tuning', icon: 'refresh',
         tabs: [
-            { key: 'adaptive', label: 'Learning', term: 'Adaptive' },
             { key: 'canary', label: 'Self-checks', term: 'Canary' },
-            // Last, and deliberately so: it reads across the other two
-            // rather than governing a subsystem of its own.
+            // Last, and deliberately so: it reads across the suite and the
+            // grader rather than governing a subsystem of its own.
             { key: 'trust', label: 'Trust' },
         ],
     },
@@ -631,7 +629,6 @@ function buildPanelDOM() {
     const jobsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'jobs', id: 'fp-jobs' });
     const toolsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'tools', id: 'fp-tools' });
     const mcpContent = el('div', { class: 'fp-tab-content', 'data-tab': 'mcp', id: 'fp-mcp' });
-    const adaptiveContent = el('div', { class: 'fp-tab-content', 'data-tab': 'adaptive', id: 'fp-adaptive' });
     const canaryContent = el('div', { class: 'fp-tab-content', 'data-tab': 'canary', id: 'fp-canary' });
     const trustContent = el('div', { class: 'fp-tab-content', 'data-tab': 'trust', id: 'fp-trust' });
 
@@ -644,7 +641,6 @@ function buildPanelDOM() {
     _panel.appendChild(toolsContent);
     _panel.appendChild(mcpContent);
     _panel.appendChild(jobsContent);
-    _panel.appendChild(adaptiveContent);
     _panel.appendChild(canaryContent);
     _panel.appendChild(trustContent);
 
@@ -801,7 +797,7 @@ function renderTabs() {
                 'aria-controls': `fp-${t.key}`,
                 tabindex: selected ? '0' : '-1',
                 // The internal term stays one hover away: the docs, the
-                // settings and the agent's logs all still say "Adaptive".
+                // settings and the agent's logs all still say "Canary".
                 title: t.term ? `${t.label} (${t.term})` : t.label,
             }, [text(t.label)]);
             btn.addEventListener('click', () => _selectTab(t.key));
@@ -842,7 +838,6 @@ async function loadTabData() {
     else if (_state.tab === 'tools') await loadTools();
     else if (_state.tab === 'mcp') await loadMcp();
     else if (_state.tab === 'jobs') await loadJobs();
-    else if (_state.tab === 'adaptive') await renderAdaptiveTab(document.getElementById('fp-adaptive'));
     else if (_state.tab === 'canary') await renderCanaryTab(document.getElementById('fp-canary'));
     else if (_state.tab === 'trust') await renderTrustTab(document.getElementById('fp-trust'));
 }

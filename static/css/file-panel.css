@@ -1361,10 +1361,11 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-snooze-activity-icon { color: var(--accent); }
 
 /* ---------------------------------------------------------------------------
-   Adaptive tab (plan 4f) — shared by the Canary and Trust tabs, which reuse
-   this vocabulary rather than defining their own.
+   Self-tuning tabs (Canary and Trust) — one shared .adaptive-* vocabulary.
+   The class names outlived the Adaptive tab that introduced them (retired in
+   3.2); renaming them would churn every rule below for nothing.
 --------------------------------------------------------------------------- */
-#fp-adaptive, #fp-canary, #fp-trust { overflow-y: auto; padding: 10px 14px; }
+#fp-canary, #fp-trust { overflow-y: auto; padding: 10px 14px; }
 /* Six controls in a 360px column had nowhere to go: flex shrank every button
    until its label was unreadable, and the last one ran off the edge. Let the
    row wrap instead, and stop the shrink that made the crushing possible — a
@@ -1375,8 +1376,8 @@ body.fp-resizing #main { pointer-events: none; }
    is 360px on a phone and a tablet. But the DOCKED Explorer is the same 360px
    on a plain desktop browser, where neither attribute is set, so the
    Self-checks head overlapped its own buttons there — the one tier the rule
-   was never applied to. It is unconditional now; the Learning and
-   Trust heads share the class and get it too. (E2, L04) */
+   was never applied to. It is unconditional now; the Trust head shares the
+   class and gets it too. (E2, L04) */
 .adaptive-head {
     display: flex;
     flex-wrap: wrap;
@@ -1400,7 +1401,6 @@ body[data-touch] .adaptive-btn {
     font-weight: 500; margin: 14px 0 6px; font-size: 0.95em;
     border-bottom: 1px solid var(--border); padding-bottom: 3px;
 }
-.adaptive-kind-head { color: var(--text-dim); font-size: 0.85em; margin: 8px 0 4px; font-family: var(--mono); }
 .adaptive-badge {
     display: inline-block; padding: 1px 7px; border-radius: 9px;
     font-size: 0.75em; font-family: var(--mono);
@@ -1414,69 +1414,9 @@ body[data-touch] .adaptive-btn {
     border: 1px solid var(--border); border-radius: var(--radius);
     padding: 8px 10px; margin: 6px 0; font-size: 0.9em;
 }
-.adaptive-card.suspect { border-color: color-mix(in srgb, var(--warning) 60%, var(--border)); }
 .adaptive-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
 .adaptive-card-actions { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
-/* Proposal cards explain themselves — the three plain-English lines the
-   server builds (core/adaptive/explain.py) sit between the head row and the
-   collapsed raw row. Sentences, not row data: --text (not --text-dim) and a
-   reading line-height, because this is the part meant to be READ. */
-.adaptive-explain {
-    margin-top: 5px;
-    line-height: 1.45;
-    color: var(--text);
-    overflow-wrap: anywhere;
-}
-/* An inline lead-in rather than a label column: the Explorer is a
-   drag-resizable panel (200..520px) and full-screen on the compact tier, so
-   any fixed first column is wrong at one of those widths. Inline wraps at
-   every width with no breakpoint. */
-.adaptive-explain-label {
-    color: var(--text-dim);
-    font-size: 0.85em;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    margin-right: 6px;
-}
-/* The fate pill reuses the badge palette (ok / warn / off); these only stop it
-   reading as one more metadata chip among the producer and kind badges. */
-.adaptive-badge.adaptive-fate { margin-left: auto; margin-right: 0; font-family: inherit; font-weight: 600; }
-.adaptive-badge.adaptive-fate-held { border: 1px dashed var(--line-faint); }
-/* "Details" — the row the explanation was built from, one click down. */
-.adaptive-details-head {
-    margin-top: 6px;
-    color: var(--text-dim);
-    font-size: 0.85em;
-    cursor: pointer;
-    user-select: none;
-    width: max-content;
-}
-.adaptive-details-head::before { content: '\25B8 '; }
-.adaptive-details-head[aria-expanded="true"]::before { content: '\25BE '; }
-.adaptive-details-head:hover, .adaptive-details-head:focus-visible { color: var(--text); }
-.adaptive-details-body {
-    margin-top: 2px;
-    padding-left: 8px;
-    border-left: 2px solid var(--line-faint);
-}
-/* Entry rows — the read-only rows on the Adaptive tab. Same card treatment
-   as .adaptive-card; kept as its own name because entries are informational
-   and carry no action row. */
-.adaptive-entry {
-    border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 8px 10px; margin: 6px 0; font-size: 0.9em;
-}
-.adaptive-entry-title {
-    display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px;
-    color: var(--text); overflow-wrap: anywhere;
-}
-.adaptive-entry-meta {
-    color: var(--text-dim); font-size: 0.85em; margin-top: 4px;
-    font-family: var(--mono); overflow-wrap: anywhere;
-}
-.adaptive-entry-content, .adaptive-edit-line { color: var(--text-dim); margin-top: 4px; white-space: pre-wrap; }
-.adaptive-flag-reason { color: var(--warning); margin-top: 4px; font-size: 0.85em; }
+.adaptive-entry-content { color: var(--text-dim); margin-top: 4px; white-space: pre-wrap; }
 .adaptive-empty { color: var(--text-dim); font-style: italic; margin: 4px 0; }
 /* Inline result line — what alert() used to do, where the user is looking. */
 .adaptive-result {
@@ -1531,7 +1471,7 @@ body[data-touch] .adaptive-btn {
    One measurement per row: the name on the left, the number hard right where
    the eye can run down a column of them, and the sample size in a quiet line
    underneath. Everything else on this tab is a shared .adaptive-* class, so
-   the Trust tab cannot drift away from the three it sits beside. */
+   the Trust tab cannot drift away from the Self-checks tab beside it. */
 .trust-stat {
     padding: 5px 0;
     border-bottom: 1px dashed var(--border);

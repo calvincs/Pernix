@@ -551,7 +551,7 @@ The panel has two tabs (`role="tablist"`, arrow keys move between them):
 
 A row's `link` becomes an Open button: a session opens through the same
 `selectSession` the session chip uses; a tab opens its owner —
-`openFilePanel({tab})` for `learning` (→ `adaptive`), `canary`, `skills`,
+`openFilePanel({tab})` for `learning` (→ the Self-tuning group; rows from before 3.2), `canary`, `skills`,
 `jobs`, `mcp` and `dream` (→ `memory`), `openSettings()` for `settings`.
 
 `notifications.js` raises an OS notification for a `dialog.notification`
