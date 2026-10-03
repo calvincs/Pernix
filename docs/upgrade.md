@@ -115,6 +115,18 @@ Running newer Pernix against an older DB is fine — that's just a normal upgrad
 
 These are the upgrade points where something the user might have set up needs attention. Each is dated.
 
+### What's gone in 3.2
+
+The October 2026 surface prune removes features that saw little or no use. Nothing here needs a migration, and no table or column is dropped.
+
+- **Toolmaker.** `create_tool`, `update_tool`, `list_custom_tools` and `restore_tool_packages` are removed. Leftover agent-written tool files (`core/tools/builtin/custom_*.py`, gitignored, so a pull leaves them in place) are **not loaded**: the server logs `legacy custom tool <name> ignored` and skips each one. Delete them when convenient. `install_package` still exists.
+- **Skillmaker.** The six skill-authoring tools are removed. Skills are files: edit them in Explorer → Capabilities → Skills, or let the agent write `data/skills/<name>/SKILL.md` with `bash`. Your existing skills load as before.
+- **Planning and feature evaluation.** `add_feature`, `mark_feature_passed`, `list_features` and `evaluate` are removed, along with the `eval_auto` hook. `data/registry.json` is no longer read or written; delete it if you like (`--rebuild` still cleans it up).
+- **Heartbeats.** The heartbeat tools, the `/api/sessions/{id}/heartbeat` endpoints and `heartbeats_enabled` are removed. Heartbeat entries in `data/cron_jobs.json` are dropped and the file rewritten on the first start; your cron jobs are kept.
+- **Stale settings are ignored.** `eval_auto`, `eval_threshold`, `eval_max_retries`, `eval_browser_verify`, `plan_review_timeout` and `heartbeats_enabled` may remain in `data/settings.json`; `Settings.load()` ignores unknown keys, and the next save drops them.
+- **Your own `RULES.md`.** The shipped `data/agent/RULES.md` no longer mentions `create_tool` or `restore_tool_packages`, but a deployment with an edited copy may still tell the agent to use them. Remove those lines; the agent gets a "not found" hint if it tries.
+- **`/api/health`** no longer reports `database.artifacts`.
+
 ### 2026-09-03 — v3.1.0
 
 Migrations **v30–v35** ship with this release and run automatically: v30 adds `canary_runs.outcome`/`error` (separates timeout/error/noop from real gate failures); v31 adds `sessions.model_override` + `sessions.worker_kind` (a worker's pinned model and typed kind now survive a restart or idle reap); v32 converts the `refined:{sid}` snooze watermark from an ISO timestamp to a message-id high-water mark (refine can revisit a session that grew after its first pass instead of grading it once and never again — nothing re-processes on deploy); v33 adds the `spaces` table + `sessions.space_id`; v34 adds `sessions.archived_at`; v35 adds `space_suggestions`. Nothing to do for any of them.
