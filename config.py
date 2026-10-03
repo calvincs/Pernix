@@ -216,6 +216,11 @@ class Settings:
     # --- Scout ---
     scout_enabled: bool = True
     scout_timeout: int = 90
+    # LLM rounds the scout may spend before the turn starts (1..6). 1 = the
+    # preloaded context plus one submit_report call — the turn waits on scout,
+    # and each extra round cost ~6 s and re-sent the 15-19k-token prefix on the
+    # reference box. Raise it to give scout its search tools back.
+    scout_max_rounds: int = 1
     # Per-item char cap on memory search results injected into scout's user
     # content. Smaller = less context pressure on long-running sessions.
     scout_preload_memory_char_limit: int = 600

@@ -117,13 +117,19 @@ def _log_scout_error(error: Exception, session_id: str, attempt: int, max_attemp
 # Scout system prompt (multi-turn, tool-calling)
 # ---------------------------------------------------------------------------
 
-SCOUT_SYSTEM_PROMPT = """You are a Scout Agent. Your job is to prepare context for a main agent that will handle the user's request. You do NOT handle the request yourself.
+# The prompt is assembled per run: the multi-round tool block (search tools,
+# PROCEDURE, round budget) is only sent when scout_max_rounds > 1. With one
+# round scout is offered nothing but submit_report, so describing search tools
+# it cannot call would only invite prose.
+_SCOUT_PROMPT_HEAD = """You are a Scout Agent. Your job is to prepare context for a main agent that will handle the user's request. You do NOT handle the request yourself.
 
 Your initial context already includes baseline memory search results, available tools, available skills, and cross-session findings. Review these carefully before deciding if you need more. When baseline memory or cross-session findings substantively cover the user's request, your approach_guidance must synthesize from those findings first — treat external search (search_web/browse_web) as supplementation, not the default opening move.
 
 When [MODEL ROUTING INTEL] is present (observed verdict rates by model and task category): it is an exception report — a model absent from it has no known problem. Steer recommended_model away from listed (model, category) pairs when a viable alternative exists; never report a model's absence as a concern.
 
-You also have tools to search deeper if the baseline is insufficient:
+"""
+
+_SCOUT_PROMPT_MULTI_ROUND = """You also have tools to search deeper if the baseline is insufficient:
 - search_memory: Run additional memory queries with different keywords or modes. If a preloaded snippet is truncated and looks relevant, call search_memory with keywords from that entry and file=<file_name> to retrieve the complete content from that file.
 - search_sessions: Search other sessions with different queries
 - search_tools: Discover additional tools by capability
@@ -137,11 +143,17 @@ PROCEDURE:
 3. If you need deeper context (e.g., a skill looks promising but you want to read its instructions, or you want to search memory with different keywords), use your tools first.
 4. Call submit_report exactly once to deliver your findings.
 
-IMPORTANT: You have a maximum of 6 tool rounds. You MUST call submit_report by round 5 at the latest — round 6 disables tools and is reserved for emergency text output. Do not exhaust all rounds searching — gather what you need quickly, then submit. If in doubt, submit with what you have rather than searching more.
+IMPORTANT: You have a maximum of {rounds} tool rounds. You MUST call submit_report by round {submit_by} at the latest — round {rounds} offers only submit_report and is reserved for the final submit. Do not exhaust all rounds searching — gather what you need quickly, then submit. If in doubt, submit with what you have rather than searching more.
 
 You MUST call submit_report to deliver your findings. If you cannot use tools, output a raw JSON report instead (same fields as submit_report).
 
-REPORT FIELD GUIDANCE:
+"""
+
+_SCOUT_PROMPT_ONE_ROUND = """All context is preloaded; call submit_report now. If you cannot call tools, output the JSON report instead (same fields as submit_report).
+
+"""
+
+_SCOUT_PROMPT_TAIL = """REPORT FIELD GUIDANCE:
 - memory_context: Relevant knowledge from your memory searches. Quote with attribution. Max 500 tokens. Report FACTS YOU FOUND — never conclusions about what is missing. Do NOT write "no X is configured" or "SESSIONS.md shows X: not set". An unfilled field in SOUL/RULES/SESSIONS is deployment config left blank, not evidence the fact is unknown, and asserting otherwise makes the main agent refuse tasks it could have answered from the very facts you just quoted. If memory answers the request, state the answer plainly and let the agent use it.
 - cross_session_context: Relevant findings from session searches. Quote with session attribution. Max 500 tokens. Empty string if nothing relevant.
 - recommended_tools: Array of tool names the main agent will need (5-15 tools). Only include extension tools — builtin tools are always available.
@@ -173,6 +185,20 @@ RULES:
 - SESSION HISTORY QUERIES: For "what did we do today/yesterday/recently" — recommend list_recent_sessions (chronological, timestamp-ordered). search_sessions is FTS5 keyword search over message CONTENT; use it to find sessions where a topic was discussed, never to find sessions by date. Pair list_recent_sessions + read_session_summary for deep dives into specific sessions.
 - TIME ZONES: The injected CURRENT DATE/TIME shows both UTC and local time. All harness timestamps (sessions, messages, cron runs) are stored in UTC (+00:00). "Today" and "yesterday" mean local time, not UTC — use the local time for date math. Never assume a date boundary from UTC alone.
 - Do NOT use <think> or reasoning tags. /no_think"""
+
+
+def _scout_base_prompt(max_rounds: int) -> str:
+    """The static scout prompt for a run of `max_rounds` LLM rounds."""
+    if max_rounds <= 1:
+        middle = _SCOUT_PROMPT_ONE_ROUND
+    else:
+        middle = _SCOUT_PROMPT_MULTI_ROUND.format(rounds=max_rounds, submit_by=max_rounds - 1)
+    return _SCOUT_PROMPT_HEAD + middle + _SCOUT_PROMPT_TAIL
+
+
+# The prompt at the default (one round). Kept as a module constant for the
+# rule-text tests; the loop calls _scout_system_prompt().
+SCOUT_SYSTEM_PROMPT = _scout_base_prompt(1)
 
 # Injected into the RULES block only when settings.rlm_enabled (the tool only
 # exists then). Kept out of the static prompt so disabled servers never bias
@@ -230,8 +256,10 @@ _SCOUT_JOBS_RULE = (
 )
 
 
-def _scout_system_prompt() -> str:
-    """SCOUT_SYSTEM_PROMPT plus conditional rules, keeping /no_think last."""
+def _scout_system_prompt(max_rounds: int | None = None) -> str:
+    """The scout prompt for `max_rounds` (default: the setting) plus
+    conditional rules, keeping /no_think last."""
+    base = _scout_base_prompt(_scout_max_rounds() if max_rounds is None else max_rounds)
     rules = []
     if settings.rlm_enabled:
         rules.append(_SCOUT_RLM_RULE)
@@ -242,11 +270,11 @@ def _scout_system_prompt() -> str:
     if settings.jobs_enabled:
         rules.append(_SCOUT_JOBS_RULE)
     if not rules:
-        return SCOUT_SYSTEM_PROMPT
+        return base
     block = "\n".join(rules)
-    head, _, tail = SCOUT_SYSTEM_PROMPT.rpartition("\n- Do NOT use <think>")
+    head, _, tail = base.rpartition("\n- Do NOT use <think>")
     if not head:  # tail marker drifted — fail open with the static prompt
-        return SCOUT_SYSTEM_PROMPT + "\n" + block
+        return base + "\n" + block
     return f"{head}\n{block}\n- Do NOT use <think>{tail}"
 
 
@@ -935,10 +963,24 @@ async def build_model_catalog_block() -> str | None:
 # pointing at load_skill.
 SKILL_INJECT_MAX_CHARS = 5000
 
-# Max tool rounds for the scout's internal loop.
-# IMPORTANT: keep the round counts in SCOUT_SYSTEM_PROMPT (line ~104) in sync
-# with this constant — the prompt is hardcoded and will drift if this changes.
-SCOUT_MAX_ROUNDS = 6
+# Ceiling on the scout's internal LLM rounds. The working value is
+# settings.scout_max_rounds (default 1, bounded 1..6): on the reference box
+# each extra round cost ~6 s and re-sent 15-19k prompt tokens while the turn
+# waited, and a one-round scout (preloaded context, submit_report only) ran
+# at p50 8.9 s against 29.7 s for the multi-round normal turn. The prompt
+# states the budget from the same number, so it cannot drift.
+SCOUT_MAX_ROUNDS_CAP = 6
+
+
+def _scout_max_rounds() -> int:
+    """settings.scout_max_rounds clamped to 1..SCOUT_MAX_ROUNDS_CAP."""
+    try:
+        n = int(settings.scout_max_rounds)
+    except (TypeError, ValueError, AttributeError):
+        n = 1
+    return min(max(1, n), SCOUT_MAX_ROUNDS_CAP)
+
+
 # Max self-check revisions scout can request on a single run.
 # Extra slot lets scout fix multiple unrelated issues sequentially
 # (e.g. a contradictory signal AND an unknown model in the same submit).
@@ -1653,8 +1695,11 @@ async def _run_scout_llm(
     if not client.has_capacity(model):
         _step("waiting", "Waiting for LLM capacity")
 
+    # One number drives both the loop and the prompt's stated budget. Read
+    # once per run: a settings change mid-run must not desync them.
+    max_rounds = _scout_max_rounds()
     messages = [
-        {"role": "system", "content": _scout_system_prompt()},
+        {"role": "system", "content": _scout_system_prompt(max_rounds)},
         {"role": "user", "content": user_content},
     ]
 
@@ -1666,9 +1711,11 @@ async def _run_scout_llm(
     revisions_used = 0
     rounds_used = 0  # LLM rounds actually spent (observability — scout.done)
 
-    for round_num in range(SCOUT_MAX_ROUNDS):
+    for round_num in range(max_rounds):
         rounds_used = round_num + 1
-        is_last_round = round_num == SCOUT_MAX_ROUNDS - 1
+        # With max_rounds == 1 the first round IS the last round: scout is
+        # offered submit_report only and answers from the preloaded context.
+        is_last_round = round_num == max_rounds - 1
         # On the last round, drop the search tools so scout can't keep digging —
         # but keep submit_report. Removing every tool made the final round
         # unwinnable: the round before it tells scout it MUST submit, and a
@@ -1678,7 +1725,7 @@ async def _run_scout_llm(
         tools = scout_tools_for(brief) if not is_last_round else _SCOUT_SUBMIT_ONLY
 
         # On penultimate round, inject a reminder to submit next round
-        if round_num == SCOUT_MAX_ROUNDS - 2 and report is None:
+        if round_num == max_rounds - 2 and report is None:
             messages.append(
                 {
                     "role": "user",
@@ -1795,7 +1842,7 @@ async def _run_scout_llm(
                 # failures every revision was triggered by a name the sanitizer
                 # would have dropped, and none ever produced a second submit.
                 blocking = _unfixable_issues(candidate)
-                rounds_remaining = SCOUT_MAX_ROUNDS - round_num - 1
+                rounds_remaining = max_rounds - round_num - 1
                 if blocking and revisions_used < _MAX_REVISIONS and rounds_remaining >= 1:
                     _step("revising", f"Scout self-check flagged {len(blocking)} blocking issue(s)")
                     revisions_used += 1
@@ -1839,7 +1886,7 @@ async def _run_scout_llm(
     # reinvents capabilities it already has. The deterministic fallback keeps
     # that context, so a degraded scout turn stays workable.
     if report is None:
-        logger.warning("Scout did not submit report after %d rounds, using deterministic fallback", SCOUT_MAX_ROUNDS)
+        logger.warning("Scout did not submit report after %d rounds, using deterministic fallback", max_rounds)
         report = _build_fallback_report(message, brief)
     elif _is_degenerate_report(report):
         logger.warning("Scout returned an empty report — replacing with deterministic fallback")
