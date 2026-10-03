@@ -1,16 +1,19 @@
 """Pernix — Apply a skill-improvement proposal to its target SKILL.md.
 
 Proposals are written by reflect and refine when a skill visibly under-performs
-(see core/refine.py). They are suggestions: only an explicit user action
-applies one — POST /api/skills/proposals/{id}/apply, or the Apply button on the
-Skills tab (status 'applied'). Every apply takes a timestamped backup under
-data/skill_backups/, and rollback is a function call away
-(``restore_skill_backup``, POST /api/skills/proposals/{id}/rollback).
+(see core/refine.py). Two paths apply one:
+
+  1. Explicit user action — POST /api/skills/proposals/{id}/apply, or the
+     Apply button on the Skills tab (status 'applied').
+  2. Auto-apply (on by default, ``skill_proposal_auto_apply``) —
+     ``auto_apply_ripe_proposals`` (snooze Activity 13b) applies pending
+     proposals older than ``skill_proposal_auto_apply_after_hours`` that pass
+     ``_validate_for_auto_apply``, with a timestamped backup under
+     data/skill_backups/ (status 'auto_applied'). Rollback is manual:
+     ``restore_skill_backup`` or POST /api/skills/proposals/{id}/rollback.
 
 A pending proposal nobody decides on within 30 days is archived by snooze
-(``archive_stale_skill_proposals``, Activity 13b). Rows with status
-'auto_applied' are history from the retired veto-window sweep (3.1); they
-stay valid for listing and rollback.
+(``archive_stale_skill_proposals``, Activity 13b'').
 
 Lived under core/workflows/ until the workflow engine was removed; proposals
 target SKILL.md files and never had anything to do with workflows beyond
@@ -29,6 +32,111 @@ from config import settings
 from db import models as db
 
 logger = logging.getLogger("pernix.skills.proposals")
+
+# Machine-validation bound: a paste-ready SKILL.md addition is a paragraph
+# or a short section, not a rewrite. Anything bigger than this needs human
+# eyes regardless of age.
+AUTO_APPLY_MAX_CHANGE_CHARS = 1500
+
+# The 3.1 sweep applied 52 proposals in a month on the reference box and did
+# damage the checks below now refuse (2026-10 surface prune review):
+# youtube-whisper took 20 edits in two weeks and doubled; refine pasted
+# instructions meant for a human editor ("Add a note at the top of Usage:
+# ...") verbatim; a near-copy of an existing heading was appended as a new
+# section; and 9 of 12 edited skills grew past the 5,000-char injection cap,
+# so the added text never reached the prompt. A refused proposal is not
+# lost: it waits in the Skills tab, and archives after 30 days.
+AUTO_APPLY_MAX_PER_SKILL_30D = 3
+SKILL_INJECT_MAX_CHARS = 5000  # mirrors core.scout.runner.SKILL_INJECT_MAX_CHARS
+_HEADING_SIMILARITY = 0.6
+
+# Text addressed to an editor rather than to the agent reading the skill:
+# an edit verb followed, on the same line, by the thing to edit.
+_EDITOR_INSTRUCTION_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:please\s+)?"
+    r"(?:add|insert|append|update|change|replace|remove|include|put|move|rewrite|expand|mention|document|create)\b"
+    r"[^\n]{0,120}?\b(?:section|subsection|note|rule|line|step|heading|paragraph|gate|bullet|example|warning)s?\b",
+    re.IGNORECASE,
+)
+_EDITOR_PLACEMENT_RE = re.compile(
+    r"\b(?:at the (?:top|end|start|bottom) of|under the [^\n]{1,40}? (?:section|heading)|"
+    r"to the [^\n]{1,40}? (?:section|heading))\b",
+    re.IGNORECASE,
+)
+_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
+
+
+def _reads_as_editor_instruction(change: str) -> bool:
+    first = next((ln for ln in change.splitlines() if ln.strip()), "")
+    return bool(_EDITOR_INSTRUCTION_RE.search(first) or _EDITOR_PLACEMENT_RE.search(change))
+
+
+_QUOTES = "\"'“”‘’"
+
+
+def unwrap_editor_instruction(change: str) -> str:
+    """Return the skill text inside an instruction addressed to an editor.
+
+    Refine used to write proposals as notes to a human ("Add a note under
+    Usage: 'If python is missing, use .venv/bin/python.'"); the 3.1 sweep
+    pasted those verbatim. Two shapes carry real text and are unwrapped:
+    a first line that is only the instruction, followed by the text; and an
+    instruction, a colon, then the text on the same line (outer quotes
+    dropped). Anything else is returned unchanged — the caller decides.
+    """
+    text = change.strip()
+    lines = text.splitlines()
+    first_idx = next((i for i, ln in enumerate(lines) if ln.strip()), None)
+    if first_idx is None or not _EDITOR_INSTRUCTION_RE.search(lines[first_idx]):
+        return text
+    first = lines[first_idx].strip()
+    rest = "\n".join(lines[first_idx + 1 :]).strip()
+    if first.endswith(":") and rest:
+        return rest
+    head, sep, tail = first.partition(": ")
+    if sep and len(tail.strip()) >= 20:
+        inner = tail.strip()
+        if len(inner) >= 2 and inner[0] in _QUOTES and inner[-1] in _QUOTES:
+            inner = inner[1:-1].strip()
+        return (inner + ("\n" + rest if rest else "")).strip()
+    return text
+
+
+def _headings(body: str) -> list[str]:
+    out = []
+    for line in body.splitlines():
+        s = line.lstrip()
+        if s.startswith("#"):
+            out.append(s.lstrip("#").strip())
+    return out
+
+
+def _near_duplicate_heading(body: str, section: str) -> str | None:
+    """An existing heading the proposal's section nearly copies, when the
+    section itself is not there (apply would append a second, near-identical
+    heading at the end of the file)."""
+    import difflib
+
+    want = " ".join(section.lower().split())
+    if not want:
+        return None
+    existing = _headings(body)
+    if any(" ".join(h.lower().split()) == want for h in existing):
+        return None
+    for h in existing:
+        norm = " ".join(h.lower().split())
+        if not norm:
+            continue
+        if norm.startswith(want) or want.startswith(norm):
+            return h
+        if difflib.SequenceMatcher(None, norm, want).ratio() >= _HEADING_SIMILARITY:
+            return h
+    return None
+
+
+def _body_chars(text: str) -> int:
+    return len(_FRONTMATTER_RE.sub("", text, count=1))
+
 
 # Backup filenames are SKILL.md.<UTC %Y%m%d-%H%M%S>. Rollback picks the
 # newest backup taken at or before the apply, with a little slack: the copy
@@ -349,7 +457,7 @@ def restore_skill_backup(proposal_id: str, actor: str = "user") -> dict:
     return result
 
 
-def apply_proposal(proposal_id: str, status_label: str = "applied") -> ApplyResult:
+def apply_proposal(proposal_id: str, status_label: str = "applied", unwrap: bool = False) -> ApplyResult:
     """Apply a proposal to its target SKILL.md.
 
     Steps:
@@ -359,8 +467,7 @@ def apply_proposal(proposal_id: str, status_label: str = "applied") -> ApplyResu
          referenced section (or append as a new section if missing).
       4. Write the updated SKILL.md back to disk.
       5. Mark the proposal with `status_label` ('applied' for the human
-         Apply button; 'auto_applied' rows are history from the retired
-         veto-window sweep).
+         Apply button, 'auto_applied' for the veto-window sweep).
 
     Raises ProposalApplyError on missing proposal, unknown skill, or I/O error.
     Never auto-retries anything — the caller re-invokes explicitly.
@@ -395,6 +502,10 @@ def apply_proposal(proposal_id: str, status_label: str = "applied") -> ApplyResu
     body = skill_md.read_text(encoding="utf-8")
     section = (proposal.get("section") or "Notes").strip() or "Notes"
     change = (proposal.get("proposed_change") or "").strip()
+    if unwrap:
+        # Auto-apply writes only the skill text, never the note to an editor
+        # around it (see unwrap_editor_instruction).
+        change = unwrap_editor_instruction(change)
     if not change:
         raise ProposalApplyError(f"Proposal '{proposal_id}' has empty proposed_change")
 
@@ -464,3 +575,161 @@ def archive_stale_skill_proposals(days: int = STALE_PROPOSAL_DAYS) -> list[str]:
     if archived:
         logger.info("Skill proposals: archived %d pending past %d days", len(archived), days)
     return archived
+
+
+def _validate_for_auto_apply(proposal: dict) -> str | None:
+    """Machine checks a proposal must pass before the veto-window sweep may
+    apply it. Returns None when valid, else a short skip/expire reason.
+
+    Reasons prefixed 'expire:' mean the proposal can never become valid
+    (target skill gone) — the sweep archives it. Everything else leaves the
+    row pending for a human or a later sweep.
+    """
+    skill_name = (proposal.get("skill_name") or "").strip()
+    if not skill_name:
+        return "expire:no skill_name"
+
+    change = (proposal.get("proposed_change") or "").strip()
+    if not change:
+        return "expire:empty proposed_change"
+    if len(change) > AUTO_APPLY_MAX_CHANGE_CHARS:
+        return f"skip:change exceeds {AUTO_APPLY_MAX_CHANGE_CHARS} chars (needs human review)"
+    if "\x00" in change:
+        return "expire:binary content"
+
+    # Refine floors confidence at 0.6 before persisting; enforce the same
+    # bar here so nothing below it ever applies unattended, whatever wrote
+    # the row.
+    try:
+        if float(proposal.get("confidence") or 0.0) < 0.6:
+            return "skip:confidence below 0.6 (needs human review)"
+    except (TypeError, ValueError):
+        return "skip:unparseable confidence"
+
+    from core.skills.registry import get_skill_registry
+
+    reg = get_skill_registry()
+    skill = reg.get(skill_name) if hasattr(reg, "get") else None
+    if skill is None:
+        return "expire:skill not in registry"
+    try:
+        if reg.is_disabled(skill_name):
+            return "skip:skill is disabled"
+    except Exception:
+        pass
+    skill_md = skill.path / "SKILL.md"
+    if not skill_md.exists():
+        return "expire:SKILL.md missing"
+
+    change = unwrap_editor_instruction(change)
+    if _reads_as_editor_instruction(change):
+        return "skip:reads as an instruction to an editor, not skill text (needs human review)"
+
+    try:
+        body = skill_md.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"skip:SKILL.md unreadable ({e})"
+    section = (proposal.get("section") or "").strip()
+    twin = _near_duplicate_heading(body, section)
+    if twin is not None:
+        return f"skip:section '{section}' nearly duplicates existing heading '{twin}' (needs human review)"
+    new_body, _ = _insert_under_section(body, section, change)
+    before, after = _body_chars(body), _body_chars(new_body)
+    if before <= SKILL_INJECT_MAX_CHARS < after:
+        return (
+            f"skip:would push the skill past the {SKILL_INJECT_MAX_CHARS}-char prompt limit "
+            f"({before} → {after}) (needs human review)"
+        )
+
+    month_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    if db.count_auto_applied_skill_proposals_since(month_ago, skill_name=skill_name) >= AUTO_APPLY_MAX_PER_SKILL_30D:
+        return f"skip:{AUTO_APPLY_MAX_PER_SKILL_30D} auto-applies to this skill in 30 days (needs human review)"
+    return None
+
+
+def auto_apply_ripe_proposals() -> dict:
+    """Apply pending skill proposals that are past the window and pass the
+    checks in ``_validate_for_auto_apply``.
+
+    On by default (``skill_proposal_auto_apply``) so the owner does not have
+    to click through proposals; a human can still reject anything in the
+    Skills tab inside ``skill_proposal_auto_apply_after_hours``. Every apply
+    is backed up under data/skill_backups/, day-capped and idle-only. A
+    proposal that fails a check waits for a human instead.
+
+    Returns {"applied": [...], "archived": [...], "skipped": n,
+    "deferred": n, "summaries": [...]}.
+    """
+    out: dict = {"applied": [], "archived": [], "skipped": 0, "deferred": 0, "summaries": []}
+    if not settings.skill_proposal_auto_apply:
+        return out
+    window_hours = max(0, settings.skill_proposal_auto_apply_after_hours)
+
+    pending = db.list_skill_proposals(status="pending", limit=500)
+    if not pending:
+        return out
+
+    # Idle-only: never mutate a skill out from under a session that might
+    # be reading it mid-task.
+    try:
+        from sessions.manager import get_manager
+
+        if get_manager().has_active_work():
+            out["deferred"] = len(pending)
+            return out
+    except Exception:
+        pass
+
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(hours=window_hours)).isoformat()
+    ripe = sorted(
+        (p for p in pending if (p.get("created_at") or "") < cutoff),
+        key=lambda p: p.get("created_at") or "",
+    )
+    if not ripe:
+        return out
+
+    used = db.count_auto_applied_skill_proposals_since((now - timedelta(hours=24)).isoformat())
+    budget = max(0, settings.skill_proposal_max_auto_applies_per_day - used)
+    if budget <= 0:
+        out["deferred"] = len(ripe)
+        logger.info("Skill auto-apply deferred: daily cap reached (%d)", used)
+        return out
+
+    for prop in ripe:
+        if budget <= 0:
+            break
+        pid = str(prop.get("id"))
+        reason = _validate_for_auto_apply(prop)
+        if reason is not None:
+            if reason.startswith("expire:"):
+                db.resolve_skill_proposal(pid, "archived")
+                out["archived"].append(pid)
+                logger.info("Skill auto-apply archived %s: %s", pid, reason)
+            else:
+                out["skipped"] += 1
+                logger.info("Skill auto-apply skipped %s: %s", pid, reason)
+            continue
+        try:
+            result = apply_proposal(pid, status_label="auto_applied", unwrap=True)
+            out["applied"].append(pid)
+            out["summaries"].append(
+                f"{result.skill_name} § {result.section}: "
+                f"{(prop.get('problem') or '')[:120]} "
+                f"(+{result.bytes_after - result.bytes_before}B, confidence "
+                f"{float(prop.get('confidence') or 0):.2f})"
+            )
+            budget -= 1
+        except ProposalApplyError as e:
+            out["skipped"] += 1
+            logger.warning("Skill auto-apply failed for %s: %s", pid, e)
+
+    out["deferred"] = max(0, len(ripe) - len(out["applied"]) - len(out["archived"]) - out["skipped"])
+    if out["applied"]:
+        logger.info(
+            "Skill proposals: auto-applied %d past the %dh veto window (%s)",
+            len(out["applied"]),
+            window_hours,
+            ", ".join(out["applied"]),
+        )
+    return out

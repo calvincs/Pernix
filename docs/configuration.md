@@ -246,7 +246,15 @@ Golden-task canaries: canned tasks with deterministic gates, run headlessly thro
 
 ## Skill Self-Healing
 
-When a skill fails and the session running it finds a workaround, refine can propose folding that fix back into the skill's `SKILL.md`. Proposals are suggestions with no settings: review and apply them from the Explorer's Capabilities → Skills tab (each apply takes a timestamped backup under `data/skill_backups/<skill>/`, and rollback restores it). Pending proposals older than 30 days are archived. The 3.1 settings `skill_proposal_auto_apply_after_hours`, `skill_proposal_max_auto_applies_per_day` and `skill_proposal_auto_rollback` were removed in 3.2; stale keys in `data/settings.json` are ignored.
+When a skill fails and the session running it finds a workaround, refine can propose folding that fix back into the skill's `SKILL.md`. By default those proposals apply themselves after a wait, when they pass the checks: the change is at most 1,500 characters and its confidence at least 0.6; it reads as skill text (a note addressed to an editor, such as "Add a note under Usage: …", is unwrapped to the text inside, and refused when nothing usable is inside); its section does not nearly copy an existing heading; it does not push a skill that fits the 5,000-character prompt limit past it; and the skill has had fewer than 3 auto-applies in 30 days. Each apply takes a timestamped backup under `data/skill_backups/<skill>/`, and Roll back in the Explorer's Capabilities → Skills tab restores it. A refused proposal waits there and is archived after 30 days.
+
+| Setting | Default | Description |
+|---|---|---|
+| `skill_proposal_auto_apply` | `true` | Apply proposals that pass the checks on their own. Off: every proposal waits for Apply or Reject. |
+| `skill_proposal_auto_apply_after_hours` | `24` | How long a proposal waits before auto-apply may take it (0–168). You can reject it in the Skills tab meanwhile. |
+| `skill_proposal_max_auto_applies_per_day` | `5` | Daily cap across all skills (1–50). |
+
+`skill_proposal_auto_rollback` was removed in 3.2; a stale key in `data/settings.json` is ignored.
 
 ---
 

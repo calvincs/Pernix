@@ -245,6 +245,8 @@ _SETTING_BOUNDS = {
     "browser_timeout": (5, 120),
     "scout_timeout": (5, 300),
     "scout_max_rounds": (1, 6),
+    "skill_proposal_auto_apply_after_hours": (0, 168),
+    "skill_proposal_max_auto_applies_per_day": (1, 50),
     "compaction_threshold": (0.1, 0.95),
     "context_critical_threshold": (0.5, 0.99),
     "max_pending_messages": (1, 100),

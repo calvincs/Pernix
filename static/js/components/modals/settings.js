@@ -399,6 +399,22 @@ const SECTIONS = [
         ],
     },
     {
+        title: 'Skill Self-healing',
+        tab: 'autonomy',
+        description: 'When a skill trips up and the session finds a workaround, refine proposes adding that fix to the skill\'s SKILL.md. With auto-apply on, a proposal applies itself after the wait below if it passes the checks: short, written as skill text (not as a note to an editor), no near-copy of an existing heading, no push past the 5,000-character prompt limit, and at most 3 per skill per month. Every apply keeps a backup under data/skill_backups/, and Roll back in Capabilities → Skills undoes it. A proposal that fails a check waits for you there.',
+        fields: [
+            {
+                key: 'skill_proposal_auto_apply',
+                label: 'Auto-apply Skill Proposals',
+                type: 'bool',
+                risk: 'autonomy',
+                hint: 'Off: every proposal waits for you to click Apply or Reject.',
+            },
+            { key: 'skill_proposal_auto_apply_after_hours', label: 'Wait Before Applying (hours)', type: 'number', min: 0, max: 168 },
+            { key: 'skill_proposal_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number', min: 1, max: 50 },
+        ],
+    },
+    {
         title: 'Canary Suite',
         tab: 'autonomy',
         description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline. Change-driven: canaries run after a deploy or a model change, or when you press Run — never on a schedule. Canary sessions are isolated and tool-allowlisted: computation and reads only.',

@@ -4882,8 +4882,9 @@ def resolve_skill_proposal(proposal_id: str, status: str) -> bool:
     """Mark a proposal as approved, rejected, applied, auto_applied, or
     archived. Returns True if row existed.
 
-    'applied' = a human clicked Apply. 'auto_applied' stays valid for history:
-    rows the retired veto-window sweep (3.1) applied carry it.
+    'applied' = a human clicked Apply; 'auto_applied' = the veto-window
+    sweep applied it (core/skills/proposals.py:auto_apply_ripe_proposals).
+    Distinct statuses so the daily auto-apply cap can count its own work.
     """
     if status not in ("approved", "rejected", "applied", "auto_applied", "archived"):
         raise ValueError(f"Invalid proposal status: {status!r}")
@@ -4893,6 +4894,24 @@ def resolve_skill_proposal(proposal_id: str, status: str) -> bool:
             (status, _now(), proposal_id),
         )
         return cur.rowcount > 0
+
+
+def count_auto_applied_skill_proposals_since(cutoff_iso: str, skill_name: str | None = None) -> int:
+    """How many proposals the auto-apply sweep applied since `cutoff_iso`,
+    optionally for one skill.
+
+    Backs the ``skill_proposal_max_auto_applies_per_day`` budget and the
+    per-skill monthly cap.
+    """
+    sql = """SELECT COUNT(*) FROM skill_improvement_proposals
+             WHERE status = 'auto_applied' AND resolved_at >= ?"""
+    args: list = [cutoff_iso]
+    if skill_name is not None:
+        sql += " AND skill_name = ?"
+        args.append(skill_name)
+    with connect_sessions() as conn:
+        row = conn.execute(sql, args).fetchone()
+        return int(row[0]) if row else 0
 
 
 def get_db_stats() -> dict:

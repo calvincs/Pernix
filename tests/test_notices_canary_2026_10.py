@@ -45,10 +45,9 @@ def test_retired_canary_categories_are_gone_from_the_registry():
         "canary.stale",
         "canary.auto_admitted",
         "canary.contaminated",
-        # skill self-healing became suggestions only (3.2): no verify-block
-        # sync, no automatic rollback, no auto-apply.
+        # skill self-healing lost verify-block sync and automatic rollback
+        # (3.2); checked auto-apply stays, so skills.proposals_auto_applied does.
         "skills.verify_unsafe",
         "skills.auto_rolled_back",
-        "skills.proposals_auto_applied",
     ):
         assert gone not in CATEGORIES, gone

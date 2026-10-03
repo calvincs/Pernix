@@ -6,8 +6,8 @@ Covers the 2026-08-31 fixes (session 83dc931a8596 post-mortem):
   2. Re-armable refine watermarks (max message id, awaiting_user excluded).
   3. Failure-arc evidence extraction + machine signal in the refine prompt.
   4. Proposal dedupe across re-refines.
-  5. Proposals are suggestions (manual apply with backup; no auto-apply;
-     stale ones archive after 30 days; refine writes paste-ready text).
+  5. Auto-apply (on by default) with machine checks, backups and a day cap;
+     manual apply; stale ones archive after 30 days.
   6. Skill content-change sweep → memory_stale dream hypotheses.
   7. Migration v32 watermark conversion.
 """
@@ -356,7 +356,7 @@ async def test_refine_dedupes_repeat_proposal(mock_llm_client, monkeypatch, tmp_
 
 
 # ---------------------------------------------------------------------------
-# 5. Proposals are suggestions: manual apply only
+# 5. Veto-window auto-apply
 # ---------------------------------------------------------------------------
 
 
@@ -381,40 +381,291 @@ def _pending_proposal(skill_name, change="Add: on GPU OOM use --device cpu.", co
     return pid
 
 
-def test_manual_apply_writes_change_with_backup(tmp_path, monkeypatch):
-    from core.skills.proposals import apply_proposal
+@pytest.fixture
+def quiet_manager(monkeypatch):
+    monkeypatch.setattr(
+        "sessions.manager.get_manager",
+        lambda: SimpleNamespace(has_active_work=lambda strict=False: False),
+    )
+
+
+def test_auto_apply_applies_ripe_proposal_with_backup(tmp_path, monkeypatch, quiet_manager):
+    from core.skills.proposals import auto_apply_ripe_proposals
     from db import models as db
 
     skill = _make_skill_dir(tmp_path, "heal-me")
     _patch_registry(monkeypatch, FakeSkillRegistry({"heal-me": skill}))
     monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
 
     pid = _pending_proposal("heal-me", age_hours=48)
-    apply_proposal(pid)
+    out = auto_apply_ripe_proposals()
 
+    assert out["applied"] == [pid]
     body = (skill.path / "SKILL.md").read_text(encoding="utf-8")
     assert "--device cpu" in body
-    assert db.get_skill_proposal(pid)["status"] == "applied"
+    assert db.get_skill_proposal(pid)["status"] == "auto_applied"
     backups = list((tmp_path / "skill_backups" / "heal-me").glob("SKILL.md.*"))
     assert len(backups) == 1
     assert "--device cpu" not in backups[0].read_text(encoding="utf-8")
 
 
-def test_nothing_applies_a_proposal_on_its_own():
-    """The 3.1 veto-window sweep is gone: no auto-apply entry point, no
-    snooze rung, no settings for it (2026-10 surface prune)."""
+def test_auto_apply_respects_veto_window(tmp_path, monkeypatch, quiet_manager):
+    from core.skills.proposals import auto_apply_ripe_proposals
+    from db import models as db
+
+    skill = _make_skill_dir(tmp_path, "too-fresh")
+    _patch_registry(monkeypatch, FakeSkillRegistry({"too-fresh": skill}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
+
+    pid = _pending_proposal("too-fresh", age_hours=0)  # inside the window
+    out = auto_apply_ripe_proposals()
+
+    assert out["applied"] == []
+    assert db.get_skill_proposal(pid)["status"] == "pending"
+
+
+def test_auto_apply_off_leaves_proposals_for_a_human(tmp_path, monkeypatch, quiet_manager):
+    from core.skills.proposals import auto_apply_ripe_proposals
+    from db import models as db
+
+    skill = _make_skill_dir(tmp_path, "gated-off")
+    _patch_registry(monkeypatch, FakeSkillRegistry({"gated-off": skill}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr("config.settings.skill_proposal_auto_apply", False)
+
+    pid = _pending_proposal("gated-off", age_hours=48)
+    out = auto_apply_ripe_proposals()
+
+    assert out["applied"] == []
+    assert db.get_skill_proposal(pid)["status"] == "pending"
+
+
+def test_auto_apply_archives_proposal_for_missing_skill(tmp_path, monkeypatch, quiet_manager):
+    from core.skills.proposals import auto_apply_ripe_proposals
+    from db import models as db
+
+    _patch_registry(monkeypatch, FakeSkillRegistry({}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
+
+    pid = _pending_proposal("deleted-skill", age_hours=48)
+    out = auto_apply_ripe_proposals()
+
+    assert pid in out["archived"]
+    assert db.get_skill_proposal(pid)["status"] == "archived"
+
+
+def test_auto_apply_skips_disabled_skill(tmp_path, monkeypatch, quiet_manager):
+    from core.skills.proposals import auto_apply_ripe_proposals
+    from db import models as db
+
+    skill = _make_skill_dir(tmp_path, "off-skill")
+    _patch_registry(monkeypatch, FakeSkillRegistry({"off-skill": skill}, disabled={"off-skill"}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
+
+    pid = _pending_proposal("off-skill", age_hours=48)
+    out = auto_apply_ripe_proposals()
+
+    assert out["applied"] == []
+    assert out["skipped"] == 1
+    assert db.get_skill_proposal(pid)["status"] == "pending"
+
+
+def test_auto_apply_honors_day_cap(tmp_path, monkeypatch, quiet_manager):
+    from core.skills.proposals import auto_apply_ripe_proposals
+    from db import models as db
+
+    skills = {}
+    for i in range(3):
+        s = _make_skill_dir(tmp_path, f"cap-skill-{i}")
+        skills[s.name] = s
+    _patch_registry(monkeypatch, FakeSkillRegistry(skills))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
+    monkeypatch.setattr("config.settings.skill_proposal_max_auto_applies_per_day", 2)
+
+    pids = [
+        _pending_proposal(f"cap-skill-{i}", change=f"Case {i}: pass `--retries {i}`.", age_hours=48) for i in range(3)
+    ]
+    out = auto_apply_ripe_proposals()
+
+    assert len(out["applied"]) == 2
+    statuses = [db.get_skill_proposal(p)["status"] for p in pids]
+    assert statuses.count("auto_applied") == 2
+    assert statuses.count("pending") == 1
+
+
+def test_auto_apply_defers_when_sessions_active(tmp_path, monkeypatch):
+    from core.skills.proposals import auto_apply_ripe_proposals
+    from db import models as db
+
+    skill = _make_skill_dir(tmp_path, "busy-box")
+    _patch_registry(monkeypatch, FakeSkillRegistry({"busy-box": skill}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
+    monkeypatch.setattr(
+        "sessions.manager.get_manager",
+        lambda: SimpleNamespace(has_active_work=lambda strict=False: True),
+    )
+
+    pid = _pending_proposal("busy-box", age_hours=48)
+    out = auto_apply_ripe_proposals()
+
+    assert out["applied"] == []
+    assert out["deferred"] >= 1
+    assert db.get_skill_proposal(pid)["status"] == "pending"
+
+
+def test_auto_apply_is_on_by_default():
     import dataclasses
-    import inspect
 
-    import core.skills.proposals as proposals
     from config import Settings
-    from core.snooze import SnoozeRunner
 
-    assert not hasattr(proposals, "auto_apply_ripe_proposals")
-    assert "auto_apply" not in inspect.getsource(SnoozeRunner)
-    fields = {f.name for f in dataclasses.fields(Settings)}
-    assert "skill_proposal_auto_apply_after_hours" not in fields
-    assert "skill_proposal_max_auto_applies_per_day" not in fields
+    defaults = {f.name: f.default for f in dataclasses.fields(Settings)}
+    assert defaults["skill_proposal_auto_apply"] is True
+    assert defaults["skill_proposal_auto_apply_after_hours"] == 24
+
+
+def _guard_reason(tmp_path, monkeypatch, name, change, body=None, section="Common Failures"):
+    from core.skills.proposals import _validate_for_auto_apply
+    from db import models as db
+
+    skill = _make_skill_dir(tmp_path, name, **({"body": body} if body is not None else {}))
+    _patch_registry(monkeypatch, FakeSkillRegistry({name: skill}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    pid = _pending_proposal(name, change=change)
+    if section != "Common Failures":
+        from db.database import connect_sessions
+
+        with connect_sessions() as conn:
+            conn.execute("UPDATE skill_improvement_proposals SET section = ? WHERE id = ?", (section, pid))
+    return _validate_for_auto_apply(db.get_skill_proposal(pid))
+
+
+def test_guard_passes_plain_skill_text(tmp_path, monkeypatch):
+    assert _guard_reason(tmp_path, monkeypatch, "plain", "On GPU OOM, rerun with `--device cpu`.") is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "Add a caption-first subsection that checks for captions before Whisper.",
+        "Add a new Step 4 between Step 3 and Step 5, and renumber the rest.",
+        "Insert a rule under the Common Failures section",
+    ],
+)
+def test_guard_refuses_instructions_to_an_editor(tmp_path, monkeypatch, change):
+    """The box's 3.1 auto-applies pasted these verbatim into SKILL.md."""
+    reason = _guard_reason(tmp_path, monkeypatch, "editor-note", change)
+    assert reason and reason.startswith("skip:") and "instruction" in reason
+
+
+@pytest.mark.parametrize(
+    "raw,want",
+    [
+        (
+            "Add a note under 'Usage': 'If `python` is not found, use `.venv/bin/python`.'",
+            "If `python` is not found, use `.venv/bin/python`.",
+        ),
+        (
+            'Add a subsection under Usage called "Batch Editing":\nEdit long transcripts in chunks of 200 lines.',
+            "Edit long transcripts in chunks of 200 lines.",
+        ),
+        ("On GPU OOM, rerun with `--device cpu`.", "On GPU OOM, rerun with `--device cpu`."),
+    ],
+)
+def test_unwrap_keeps_only_the_skill_text(raw, want):
+    from core.skills.proposals import unwrap_editor_instruction
+
+    assert unwrap_editor_instruction(raw) == want
+
+
+def test_auto_apply_writes_the_unwrapped_text(tmp_path, monkeypatch, quiet_manager):
+    from core.skills.proposals import auto_apply_ripe_proposals
+
+    skill = _make_skill_dir(tmp_path, "wrapped")
+    _patch_registry(monkeypatch, FakeSkillRegistry({"wrapped": skill}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    _pending_proposal("wrapped", change="Add a note under 'Common Failures': 'On a 403, fetch captions instead.'")
+    out = auto_apply_ripe_proposals()
+    assert len(out["applied"]) == 1
+    body = (skill.path / "SKILL.md").read_text(encoding="utf-8")
+    assert "On a 403, fetch captions instead." in body
+    assert "Add a note" not in body
+
+
+def test_monthly_cap_does_not_ask_for_review(tmp_path, monkeypatch, quiet_manager):
+    from core.skills.proposals import AUTO_APPLY_MAX_PER_SKILL_30D, auto_apply_ripe_proposals
+    from core.skills.review import count_review_pending
+
+    skill = _make_skill_dir(tmp_path, "capped")
+    _patch_registry(monkeypatch, FakeSkillRegistry({"capped": skill}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr("config.settings.skill_proposal_max_auto_applies_per_day", 50)
+    for i in range(AUTO_APPLY_MAX_PER_SKILL_30D + 1):
+        _pending_proposal("capped", change=f"Case {i}: pass `--retries {i}`.")
+    auto_apply_ripe_proposals()
+    assert count_review_pending() == 0
+
+
+def test_guard_refuses_a_near_duplicate_heading(tmp_path, monkeypatch):
+    """thinking/SKILL.md got a second 'PHASE 3: DECIDE — ...' heading appended."""
+    body = "## PHASE 3: DECIDE — Verify and commit\nCheck it.\n"
+    reason = _guard_reason(
+        tmp_path,
+        monkeypatch,
+        "twin",
+        "Re-read the decision against the original goal before acting.",
+        body=body,
+        section="PHASE 3: DECIDE — Verify, de-bias, and commit",
+    )
+    assert reason and "nearly duplicates" in reason
+
+
+def test_guard_allows_a_new_unrelated_section(tmp_path, monkeypatch):
+    reason = _guard_reason(
+        tmp_path, monkeypatch, "new-sec", "Use the cached index when offline.", section="Offline Mode"
+    )
+    assert reason is None
+
+
+def test_guard_refuses_pushing_past_the_prompt_limit(tmp_path, monkeypatch):
+    body = "## Common Failures\n" + ("x" * 4975) + "\n"
+    reason = _guard_reason(tmp_path, monkeypatch, "near-cap", "On timeout, retry once with a longer limit.", body=body)
+    assert reason and "prompt limit" in reason
+
+
+def test_guard_caps_auto_applies_per_skill_per_month(tmp_path, monkeypatch, quiet_manager):
+    from core.skills.proposals import AUTO_APPLY_MAX_PER_SKILL_30D, auto_apply_ripe_proposals
+    from db import models as db
+
+    skill = _make_skill_dir(tmp_path, "busy-skill")
+    _patch_registry(monkeypatch, FakeSkillRegistry({"busy-skill": skill}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr("config.settings.skill_proposal_max_auto_applies_per_day", 50)
+    pids = [
+        _pending_proposal("busy-skill", change=f"Case {i}: retry with `--slow {i}`.")
+        for i in range(AUTO_APPLY_MAX_PER_SKILL_30D + 1)
+    ]
+    out = auto_apply_ripe_proposals()
+    assert len(out["applied"]) == AUTO_APPLY_MAX_PER_SKILL_30D
+    assert db.get_skill_proposal(pids[-1])["status"] == "pending"
+
+
+def test_refused_proposal_counts_for_review(tmp_path, monkeypatch):
+    from core.skills.review import count_review_pending
+
+    skill = _make_skill_dir(tmp_path, "needs-eyes")
+    _patch_registry(monkeypatch, FakeSkillRegistry({"needs-eyes": skill}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    _pending_proposal("needs-eyes", change="On GPU OOM, rerun with `--device cpu`.")
+    _pending_proposal("needs-eyes", change="Add a caption-first subsection before transcription.")
+    assert count_review_pending() == 1
+    monkeypatch.setattr("config.settings.skill_proposal_auto_apply", False)
+    assert count_review_pending() == 2
 
 
 def test_archive_stale_proposals_archives_only_old_pending_rows():

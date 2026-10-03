@@ -870,12 +870,13 @@ Returns the skill's metadata, rendered `instructions`, the raw `raw_content` of 
 
 ### Skill Improvement Proposals
 
-Written by reflect and refine when a skill visibly under-performs. Proposals
-are suggestions: one reaches `SKILL.md` only when you apply it (`/apply`, or
-Apply in the skill editor), which writes a timestamped backup under
-`data/skill_backups/<skill>/` first. A pending proposal older than 30 days is
-archived by snooze (status `archived`). `auto_applied` rows are history from
-the 3.1 veto-window sweep, removed in 3.2; they can still be rolled back.
+Written by reflect and refine when a skill visibly under-performs. With
+`skill_proposal_auto_apply` on (default), snooze applies a pending proposal
+that passes the machine checks after `skill_proposal_auto_apply_after_hours`
+(status `auto_applied`); otherwise it waits for `/apply` (status `applied`).
+Either way a timestamped backup lands under `data/skill_backups/<skill>/`
+first, and `/rollback` restores it. A pending proposal older than 30 days is
+archived by snooze (status `archived`).
 
 ```
 GET    /api/skills/proposals                 List proposals (default status=pending)
