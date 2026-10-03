@@ -29,6 +29,15 @@ from core.canary.parser import load_canary, scan_canaries
 from core.canary.propose import isolation_violation, materialize_canary, queue_canary_proposals
 from db import models as db
 
+
+def _proposal_rows() -> int:
+    """Rows in the retired adaptive proposal queue (the table outlived it)."""
+    from db.database import connect_sessions
+
+    with connect_sessions() as conn:
+        return conn.execute("SELECT COUNT(*) FROM adaptive_proposals").fetchone()[0]
+
+
 _SPEC = {
     "name": "clean-task",
     "prompt": "Create out.txt containing DONE.",
@@ -124,7 +133,7 @@ def test_the_rejection_is_logged_not_queued():
     it is now logged and dropped."""
     bad = dict(_SPEC, name="workspace-organizer", prompt="Organise ./data/workspace by evidence type.")
     assert queue_canary_proposals([bad], "skill-change", session_id="s-1") == 0
-    assert db.adaptive_list_proposals(status=None, limit=20) == []
+    assert _proposal_rows() == 0
     assert load_canary("workspace-organizer", base=_base()) is None
 
 
