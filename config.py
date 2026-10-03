@@ -24,7 +24,6 @@ _NO_PERSIST = {
     "memory_dir",
     "skills_dir",
     "candor_store_dir",
-    "telos_dir",
 }
 
 # Fields that are runtime-only — set via CLI flags, never read from settings.json
@@ -65,7 +64,7 @@ class Settings:
     #                      call (compaction summaries, reflect verdicts,
     #                      eval). Anything the primary must trust runs here.
     #   background_model — BACKGROUND: the fast/offline tier — scout, titles,
-    #                      distill/ingest, snooze activities, dream, telos,
+    #                      distill/ingest, snooze activities, dream,
     #                      RLM sub-calls. Empty = llm_model.
     #   fallback_model   — BACKUP: used when a Primary or Background call
     #                      fails (stream failover, provider failover, scout
@@ -635,41 +634,6 @@ class Settings:
     dream_journal_retention_days: int = 14  # journal sessions kept (1/day)
     dream_rlm_probe: bool = False  # deep cross-file probes via RLM (needs rlm_enabled)
     dream_rlm_probe_interval_days: int = 7  # min days between probes
-
-    # --- TELOS (teleological layer add-on, off by default) ---
-    # Non-convergent drive with correction machinery over the task loop:
-    # anomaly->question->hypothesis fast loop (snooze Activity 16), daily
-    # ordo/binding slow loops via cron, weekly hevel/reconcile/entropy.
-    # State is markdown+YAML under telos_dir plus an append-only JSONL trace
-    # ledger. Fully inert when off: no dirs created, no reads, no writes.
-    # All call sites gate on telos_enabled at runtime (hot toggle), except
-    # tool registration which follows the Candor pattern (restart).
-    telos_enabled: bool = False
-    telos_dir: str = "data/telos"
-    # The root objective: a question with no satisfaction predicate —
-    # unsatisfiable by construction (spec §4.1). Re-expression is an
-    # operator edit here, never an agent write.
-    telos_root_text: str = "What is actually going on here, and what is it for?"
-    telos_schedule: str = "0 4 * * *"  # daily slow-loop cron (UTC)
-    telos_serendipity_budget: float = 0.15  # non-goal question share (§3.2)
-    telos_eig_floor: float = 0.15  # testability-gate admission floor (§3.4)
-    telos_hypotheses_per_question: int = 3  # SOUP output cap per generation
-    telos_max_gated_backlog: int = 12  # above it, every step evaluates
-    telos_max_eval_tokens: int = 20_000  # gate's cost_est ceiling
-    telos_question_max_attempts: int = 3  # generation passes before abandonment
-    # One anomaly line of inquiry per source (tool:X, reflect:retry, ...) per
-    # window — stops the same flaky tool minting a near-identical question
-    # every day (14/18 abandoned questions were that class). 0 disables.
-    telos_anomaly_remint_cooldown_days: int = 7
-    # Age axis on the speculation pool: past this many days an unexamined
-    # pooled hypothesis is archived 'expired' (moved to soup/archive/, never
-    # deleted). 0 = keep it in the pool forever.
-    telos_soup_retention_days: int = 30
-    # The archive's own hard-delete horizon — the only place a hypothesis
-    # file is ever unlinked. Long by design: the archive is the calibration
-    # review's forensic record. 0 = keep forever.
-    telos_soup_archive_retention_days: int = 180
-    telos_soup_context_entries: int = 10  # memory entries in the band sample
 
     # --- Evaluation (extension) ---
     eval_auto: bool = False

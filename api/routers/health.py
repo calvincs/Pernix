@@ -303,17 +303,6 @@ _SETTING_BOUNDS = {
     "adaptive_trial_min_arm": (5, 10_000),
     "adaptive_trial_ttl_days": (1, 365),
     "notification_retention_days": (0, 365),
-    "telos_serendipity_budget": (0.05, 0.5),
-    "telos_eig_floor": (0.0, 1.0),
-    "telos_hypotheses_per_question": (1, 10),
-    "telos_max_gated_backlog": (1, 100),
-    "telos_max_eval_tokens": (1000, 200_000),
-    "telos_question_max_attempts": (1, 10),
-    "telos_soup_context_entries": (4, 40),
-    # 0 disables each horizon (keep forever) — retention here archives and
-    # only the archive's own horizon deletes, so long values are cheap.
-    "telos_soup_retention_days": (0, 3650),
-    "telos_soup_archive_retention_days": (0, 3650),
     "mcp_call_timeout": (5, 3600),
     "mcp_connect_timeout": (5, 300),
     "mcp_idle_seconds": (0, 86_400),  # 0 = never suspend
@@ -355,7 +344,6 @@ _SETTING_UNITS = {
     "max_tokens": "tokens",
     "ollama_num_ctx_cap": "tokens",
     "compaction_keep_tokens": "tokens",
-    "telos_max_eval_tokens": "tokens",
     "max_fetch_size": "bytes",
     "max_file_write_size": "bytes",
     "max_edit_read_size": "bytes",

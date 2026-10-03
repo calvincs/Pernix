@@ -24,7 +24,6 @@ _EXPECTED_NO_PERSIST = {
     "memory_dir",
     "skills_dir",
     "candor_store_dir",
-    "telos_dir",
 }
 
 

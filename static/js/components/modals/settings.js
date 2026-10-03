@@ -46,7 +46,7 @@ const LOCKED_NOTE = 'Edit-locked. The settings API rejects changes to this field
 // Which keys those are is already declared, per field, as the `restart` string
 // that renders the badge beside the control. A second hand-maintained list
 // drifted from the badges the moment one was added: every RESTART_TOOLS field
-// (web_search_enabled, candor_enabled, rlm_enabled, telos_enabled, …) wore a
+// (web_search_enabled, candor_enabled, rlm_enabled, …) wore a
 // "restart" badge and then saved with a plain "Saved". Derive it instead. (S5)
 const RESTART_EXTRA_KEYS = new Set([
     // List-valued editors with no field entry of their own. The Allowed
@@ -235,14 +235,14 @@ const SECTIONS = [
     {
         title: 'Background Work (Snooze)',
         tab: 'autonomy',
-        description: 'The master switch for everything the agent does while you are idle: memory maintenance and distillation, dreaming, telos loops, canary sweeps, adaptive edits and embedding sweeps all run inside a snooze cycle. Turning Background Work off stops all of it and is the one control that reliably ends idle-time LLM spend, whatever the individual feature toggles say. Cooldown is how long the machine must be quiet before a cycle may start; the tick interval paces how often the scheduler even looks. The cycle time limit is a hang backstop, not a scheduler — a cycle normally ends when its activity ladder finishes or you start typing; raise it for slow local models.',
+        description: 'The master switch for everything the agent does while you are idle: memory maintenance and distillation, dreaming, canary sweeps, adaptive edits and embedding sweeps all run inside a snooze cycle. Turning Background Work off stops all of it and is the one control that reliably ends idle-time LLM spend, whatever the individual feature toggles say. Cooldown is how long the machine must be quiet before a cycle may start; the tick interval paces how often the scheduler even looks. The cycle time limit is a hang backstop, not a scheduler — a cycle normally ends when its activity ladder finishes or you start typing; raise it for slow local models.',
         fields: [
             {
                 key: 'snooze_enabled',
                 label: 'Background Work Enabled',
                 type: 'bool',
                 risk: 'autonomy',
-                hint: 'Off = no idle-time LLM spend at all: memory maintenance, dream, telos, canary, adaptive and embedding sweeps are all skipped.',
+                hint: 'Off = no idle-time LLM spend at all: memory maintenance, dream, canary, adaptive and embedding sweeps are all skipped.',
             },
             { key: 'snooze_cooldown_minutes', label: 'Idle Cooldown (min)', type: 'number', min: 0 },
             {
@@ -556,19 +556,6 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'Goals (Telos)',
-        tab: 'autonomy',
-        term: 'Internal name: Telos \u2014 the teleological layer. Settings keys are telos_*.',
-        description: 'The operational question loop (carved down in v3.1): turn anomalies the rest of the system cannot explain mint questions, the SOUP generates falsifiable hypotheses at idle, supported claims can become scout routing hints, and a weekly entropy control keeps exploration from going stale. State lives in data/telos/ as markdown. Enabling the agent tools needs a restart; everything else applies immediately.',
-        fields: [
-            { key: 'telos_enabled', label: 'Telos Enabled', type: 'bool', restart: RESTART_TOOLS },
-            { key: 'telos_schedule', label: 'Slow-loop Schedule (cron)', type: 'text' },
-            { key: 'telos_serendipity_budget', label: 'Serendipity Budget (0–1 fraction)', type: 'number', step: 0.05 },
-            { key: 'telos_eig_floor', label: 'Gate EIG Floor (0–1 fraction)', type: 'number', step: 0.05 },
-            { key: 'telos_hypotheses_per_question', label: 'Hypotheses / Question', type: 'number' },
-        ],
-    },
-    {
         // `name` is how buildStorageTab finds this one again: it is the only
         // declarative section on the tab that has to land in a particular
         // place (directly under the sessions ledger whose Archived row it
@@ -670,7 +657,7 @@ const MODEL_SELECT_FIELDS = [
     // Three chat-model roles (2026-08 consolidation), any provider:
     // Primary = agent turns + quality-critical calls (compaction/reflect/eval);
     // Background = fast/offline tier (scout, titles, distill, snooze, dream,
-    // telos, RLM sub-calls); Backup = used when Primary or Background fail.
+    // RLM sub-calls); Backup = used when Primary or Background fail.
     { key: 'llm_model', label: 'Primary Model', type: 'model-select' },
     { key: 'background_model', label: 'Background Model (scout/titles/idle work; empty = Primary)', type: 'model-select', allowEmpty: true },
     { key: 'fallback_model', label: 'Backup Model (used when Primary or Background fail)', type: 'model-select', allowEmpty: true },
@@ -3732,7 +3719,7 @@ function _buildSettingsSection(section, settings) {
     // would tie the layout to a label the next rename breaks.
     return el('div', { class: 'settings-section', ...(section.name ? { 'data-section': section.name } : {}) }, [
         // `term` carries the internal name of a section the UI renamed for
-        // humans, so searching for "Telos" or "Candor" still lands. (N9)
+        // humans, so searching for "Canary" or "Adaptive" still lands. (N9)
         el('h3', section.term ? { title: section.term } : {}, heading),
         ...(section.description ? [buildSectionDesc(section.description)] : []),
         ...fields,
