@@ -247,7 +247,6 @@ _SETTING_BOUNDS = {
     "notify_webhook_timeout": (1, 60),
     "port": (1024, 65535),
     "post_mortem_retention_days": (7, 3650),
-    "candor_max_obs_per_turn": (10, 10_000),
     "rlm_max_iterations": (3, 1000),  # raised 100->1000 with max_tool_rounds (same request)
     "rlm_max_depth": (1, 3),
     "rlm_max_subcalls": (5, 500),

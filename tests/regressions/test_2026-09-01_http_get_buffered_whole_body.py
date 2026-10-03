@@ -62,8 +62,6 @@ def _client_returning(resp):
 @pytest.fixture
 def offline(monkeypatch):
     monkeypatch.setattr(web, "_validate_url", lambda url, allow_loopback=False: url)
-    monkeypatch.setattr(settings, "candor_enabled", False)
-    monkeypatch.setattr(settings, "fetch_routing_enabled", False)
 
 
 def test_streaming_stops_reading_once_past_the_cap(offline, monkeypatch):
