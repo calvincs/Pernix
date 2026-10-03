@@ -55,14 +55,12 @@ Beyond the localhost-only default. Read these before exposing Pernix to anything
 - [internals/state-machine.md](internals/state-machine.md) — formal session state machine with file:line citations
 - [internals/web-client.md](internals/web-client.md) — the web UI's three device tiers: the two stylesheets, their gates, and the JS that mirrors them
 - [mobile-device-checklist.md](mobile-device-checklist.md) — the phone/tablet checks that need real hardware (the automated gate covers the rest)
-- [internals/extensions.md](internals/extensions.md) — the thirteen extension modules and their gates
+- [internals/extensions.md](internals/extensions.md) — the eleven extension modules and their gates
 - [internals/reflect-and-snooze.md](internals/reflect-and-snooze.md) — quality-gate retry and idle-time consolidation
 - [internals/rlm.md](internals/rlm.md) — recursive long-input processing (sandboxed REPL + sub-LLM broker)
-- [internals/candor.md](internals/candor.md) — calibrated operational memory: earned tool reliability from recorded outcomes
 - [internals/dream.md](internals/dream.md) — idle-time introspection: hypotheses about itself, falsified against the record
 - [internals/autonomy.md](internals/autonomy.md) — long-running autonomy: gates, goals, heartbeats, and the persistent session kernel
 - [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md) — the self-improvement loop: golden-task canaries and the governed adaptive policy store
-- [internals/telos.md](internals/telos.md) — the operational question loop: turn-time anomalies become falsifiable hypotheses (questions, SOUP), evaluated against recorded evidence; the v3.0 goal-DAG (ordo, binding, hevel) was carved out in v3.1 as a no-op
 
 ## I want to contribute
 

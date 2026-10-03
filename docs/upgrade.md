@@ -115,6 +115,13 @@ Running newer Pernix against an older DB is fine — that's just a normal upgrad
 
 These are the upgrade points where something the user might have set up needs attention. Each is dated.
 
+### What's gone in 3.2
+
+3.2 retires self-improvement systems that ran every day on the reference box without a measurable benefit (the evidence and decisions are in [dev/surface-prune-plan-2026-10.md](dev/surface-prune-plan-2026-10.md)). No migration runs for any of these and no table or row is dropped.
+
+- **Telos** (the operational question loop) is gone: the `telos_status` and `telos_ask` tools, `/api/telos/*`, the Explorer's Self-tuning → Goals tab, the Settings section, snooze Activity 16, the daily slow-loop job, the post-task hook and the `[TELOS]` line in the agent's current-state block. Every `telos_*` setting is removed; an old `data/settings.json` that still carries them loads fine (unknown keys are ignored). `data/telos/` is no longer read or written; move it aside or delete it. Old adaptive entries with `source: telos` stay in the store and age out normally.
+- **Candor** (calibrated operational memory) is gone: the `predict_reliability`, `why_reliability` and `reliability_questions` tools, scout's `[OPERATIONAL INTEL]` brief, turn-end and memory-store emission, snooze Activity 12b and its adaptive routing-hint producer, dream's Candor evidence and `tool_pattern` hypotheses (a pending one expires with `method: candor_retired`), and the vendored wheel (`vendor/` is gone; `pip install -r requirements.txt` no longer installs `candor`). `http_get` no longer refuses domains with a poor logged fetch rate, and its `force` argument is gone (an old call that passes it still works; the argument is dropped). Settings removed: `candor_enabled`, `candor_scout_brief`, `candor_max_obs_per_turn`, `candor_store_dir`, `fetch_routing_enabled`, `fetch_routing_min_obs`, `fetch_routing_threshold`. `data/candor/` is no longer read or written; move it aside or delete it. Per-tool success and failure logging is unchanged: tool-message metadata, `post_mortems.tool_summary` and the scout's tool signals never went through Candor.
+
 ### 2026-09-03 — v3.1.0
 
 Migrations **v30–v35** ship with this release and run automatically: v30 adds `canary_runs.outcome`/`error` (separates timeout/error/noop from real gate failures); v31 adds `sessions.model_override` + `sessions.worker_kind` (a worker's pinned model and typed kind now survive a restart or idle reap); v32 converts the `refined:{sid}` snooze watermark from an ISO timestamp to a message-id high-water mark (refine can revisit a session that grew after its first pass instead of grading it once and never again — nothing re-processes on deploy); v33 adds the `spaces` table + `sessions.space_id`; v34 adds `sessions.archived_at`; v35 adds `space_suggestions`. Nothing to do for any of them.
@@ -202,7 +209,7 @@ The Explorer's Capabilities → Skills tab already points at the new paths; only
 | Role | Setting | Covers |
 |---|---|---|
 | Primary | `llm_model` | agent turns + compaction, reflect, eval, RLM root |
-| Background | `background_model` | scout, titles, distill, snooze, dream, telos, RLM sub-calls |
+| Background | `background_model` | scout, titles, distill, snooze, dream, RLM sub-calls |
 | Backup | `fallback_model` | any Primary or Background call that fails |
 
 **What to do:** if you had a distinct `scout_model`, copy it to `background_model` before or after upgrading. Everything else folds into `llm_model` and needs no action. Stale keys left in `data/settings.json` are ignored rather than erroring, so an un-migrated file still boots — it just runs scout on your Primary model until you set `background_model`. Nothing in the UI references the removed keys any more.

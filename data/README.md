@@ -16,7 +16,6 @@ data/
     {skill-name}/      #   Each skill has SKILL.md + optional scripts/, references/
     .disabled.json     #   Disabled skill names
   memories/            # Memory store (FTS5 index + markdown files)
-  candor/              # Candor operational-memory store (when candor_enabled)
   certs/               # TLS certs for network mode — NOT wiped on rebuild
   sessions.db          # SQLite: sessions, messages, token usage
   settings.json        # User settings (persists across rebuilds)
