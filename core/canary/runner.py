@@ -385,10 +385,12 @@ async def run_sweep(
     trigger: str = "manual",
     batch_id: str | None = None,
     names: list[str] | None = None,
+    report: bool = False,
 ) -> list[CanaryRunResult]:
     """Run a selection of the suite sequentially: the caller's explicit
     `names`, or every canary when none are given. `trigger` is only the
-    label recorded on each run row.
+    label recorded on each run row. `report` (full sweeps: deploy, model
+    swap, Run all) posts one notice for the whole sweep when it finishes.
     """
     if not settings.canary_enabled:
         logger.info("Canary sweep skipped: canary_enabled is off")
@@ -406,4 +408,53 @@ async def run_sweep(
 
     passed = sum(1 for r in results if r.passed)
     logger.info("Canary sweep complete: %d/%d passed (trigger=%s)", passed, len(results), trigger)
+    if report:
+        report_sweep(results, trigger)
     return results
+
+
+def report_sweep(results: list[CanaryRunResult], trigger: str) -> None:
+    """One notice per full sweep. Never raises.
+
+    A canary that gate-failed — the agent ran and the work was wrong — is a
+    quiet bell item (canary.sweep_failed, coalesced on one subject so
+    repeated red sweeps fold into it). Anything else is an activity-log line
+    (canary.sweep_result), and a sweep where every canary passed closes the
+    open bell item. Timeouts, harness errors and contaminated runs never
+    ring the bell: they say nothing about whether the agent got worse.
+    """
+    if not results:
+        return
+    from core import notices
+
+    passed = sum(1 for r in results if r.passed)
+    failed = sorted(r.task for r in results if r.outcome == "gate_fail")
+    other = sorted(f"{r.task} ({r.outcome})" for r in results if not r.passed and r.outcome != "gate_fail")
+    link = {"kind": "tab", "tab": "canary"}
+    detail = ""
+    if failed:
+        detail += f" Failed: {', '.join(failed)}."
+    if other:
+        detail += f" Did not finish: {', '.join(other)}."
+    try:
+        if failed:
+            notices.notify(
+                "canary.sweep_failed",
+                f"Canary sweep: {len(failed)} of {len(results)} failed ({trigger})",
+                f"{passed} of {len(results)} canaries passed after the {trigger} sweep.{detail} "
+                "The Canary tab has each run's gate output.",
+                subject="suite",
+                link=link,
+            )
+            return
+        notices.notify(
+            "canary.sweep_result",
+            f"Canary sweep: {passed} of {len(results)} passed ({trigger})",
+            f"No canary gate-failed in the {trigger} sweep.{detail}",
+            subject="suite",
+            link=link,
+        )
+        if passed == len(results):
+            notices.resolve("canary.sweep_failed", "suite")
+    except Exception as e:  # a notice must never fail a sweep
+        logger.warning("Canary sweep report failed: %s", e)

@@ -821,6 +821,7 @@ async def _execute_canary_sweep_job(meta: dict):
                 trigger=meta.get("trigger", "manual"),
                 batch_id=meta.get("batch_id"),
                 names=meta.get("names"),
+                report=bool(meta.get("report")),
             )
         except Exception as e:
             logger.error("Canary sweep failed: %s", e)
@@ -843,9 +844,20 @@ def enqueue_manual_canary(name: str) -> bool:
     return True
 
 
+# The trigger label each full-sweep reason records on its canary_runs rows.
+# "Run all" is a human pressing a button, so it reads as manual. Rows written
+# before 3.2 carry 'full', 'scheduled' or 'post_batch' and stay readable.
+_FULL_SWEEP_TRIGGERS = {"deploy": "deploy", "model-swap": "model-swap", "run-all": "manual"}
+
+
 def enqueue_full_sweep(reason: str, delay_s: int = 0) -> bool:
     """A the-world-changed sweep (model swap, deploy, 'Run all'): every
-    canary, must_run so nothing in flight eats it."""
+    canary, must_run so nothing in flight eats it.
+
+    One job id per reason with replace_existing, so a re-queue before the
+    job fires replaces it: three restarts inside the deploy delay are one
+    sweep, not three. The sweep reports one notice when it finishes
+    (core.canary.runner.report_sweep)."""
     if not settings.canary_enabled:
         return False
     scheduler = _get_scheduler()
@@ -865,10 +877,11 @@ def enqueue_full_sweep(reason: str, delay_s: int = 0) -> bool:
             "meta": {
                 "kind": "canary",
                 "transient": True,
-                "trigger": "full",
+                "trigger": _FULL_SWEEP_TRIGGERS.get(reason, reason),
                 "must_run": True,
                 "job_id": job_id,
                 "reason": reason,
+                "report": True,
             }
         },
     )

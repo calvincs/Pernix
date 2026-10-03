@@ -2221,7 +2221,7 @@ const NOTIFY_AREA_LABELS = {
     external: ['External messages', 'Messages from outside services and integrations'],
     sessions: ['Sessions', 'A turn that needs you, timed out, ran out of budget or errored'],
     jobs: ['Scheduled jobs', 'Job failures, test runs, and jobs left uncertain by a restart'],
-    canary: ['Canary suite', 'Test results and upkeep'],
+    canary: ['Canary suite', 'Sweep results after a deploy, a model change or Run all'],
     skills: ['Skills', 'Unsafe verifications, rollbacks and auto-applied proposals'],
     review: ['Waiting for review', 'The one "N skill proposals wait for your decision" item'],
     dream: ['Dreaming', 'Corrections applied and stalled queues'],

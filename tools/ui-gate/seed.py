@@ -670,11 +670,11 @@ db.add_notification(
 for i in range(3):
     db.add_notification(
         "",
-        "Canary probe parked",
-        f"file-create parked after {i + 1} failed run(s).",
-        category="canary.parked",
+        "Canary sweep: 1 of 4 failed (deploy)",
+        f"3 of 4 canaries passed after deploy sweep #{i + 1}. Failed: link-digest.",
+        category="canary.sweep_failed",
         tier="bell",
-        subject="file-create",
+        subject="suite",
         coalesce=True,
         link={"kind": "tab", "tab": "canary"},
     )

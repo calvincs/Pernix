@@ -236,7 +236,7 @@ Golden-task canaries: canned tasks with deterministic gates, run headlessly thro
 
 | Setting | Default | Description |
 |---|---|---|
-| `canary_enabled` | `false` | Master switch for the suite: sweeps, the `canary_run` / `canary_status` tools, and the API. |
+| `canary_enabled` | `false` | Master switch for the suite: sweeps (after a deploy, after a model swap, or on Run), the read-only `canary_status` tool, and the run endpoint. |
 | `canaries_dir` | `data/canaries` | Directory scanned for `<name>/CANARY.md` task definitions. |
 | `canary_retention_days` | `30` | Age after which Snooze prunes `canary_runs` rows and their sessions. |
 | `canary_purge_after_days` | `30` | Retired canaries (`DELETE /api/canary/{name}`) sit in `.retired/` this long before snooze retention deletes them — the undo window. |
