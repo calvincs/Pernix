@@ -11,10 +11,11 @@ record activity without ever recording a verdict:
    against outcomes that could never arrive.
 3. `ask_user` in an unattended session returned an "Error:" string for a
    by-design non-answer, so the executor set was_error, tool_summary booked a
-   failure and candor emitted tool_ok(ask_user)=false.
-4. Off that ledger the candor producer minted a live routing hint telling
+   failure and Candor (since retired) emitted tool_ok(ask_user)=false.
+4. Off that ledger the Candor producer minted a live routing hint telling
    every scout to "prefer an alternative" to asking the user (8 uses, 7
-   failures on the box).
+   failures on the box). Candor and its producer were retired in 2026-10;
+   the tests for points 3-4 that remain pin the executor and synthesis side.
 """
 
 import json
@@ -22,7 +23,6 @@ from types import SimpleNamespace
 
 from core import synthesis
 from core.agent import record_tool_outcome
-from core.extensions.candor.emit import build_turn_observations
 from core.scout.runner import _count_hint_usage
 from core.tools.executor import (
     UNAVAILABLE_PREFIX,
@@ -195,39 +195,6 @@ def test_record_tool_outcome_counts_unavailable_apart_from_failures():
     assert (stats["calls"], stats["failures"], stats["unavailable"]) == (3, 1, 2)
     assert stats["errors"] == ["Error: boom"]  # the non-answers never enter the previews
     assert turn.tool_summary_attempts[0]["ask_user"]["unavailable"] == 2
-
-
-def test_candor_records_no_tool_ok_failure_for_unavailable():
-    obs, emitted = build_turn_observations(
-        tool_summary={"ask_user": {"calls": 2, "failures": 0, "unavailable": 2}},
-        already_emitted={},
-        termination_reason=None,
-        reflect_verdict=None,
-        failure_cause=None,
-        model="m",
-        session_kind="cron",
-        is_retry=False,
-        ts_ms=0,
-    )
-    # Neither a false nor a true: the tool never ran, so nothing is observed.
-    assert [o for o in obs if o["pred"] == "tool_ok"] == []
-    assert emitted["ask_user"]["calls"] == 0
-
-
-def test_candor_still_sees_real_failures_alongside_unavailable_calls():
-    obs, _ = build_turn_observations(
-        tool_summary={"ask_user": {"calls": 3, "failures": 1, "unavailable": 2}},
-        already_emitted={},
-        termination_reason=None,
-        reflect_verdict=None,
-        failure_cause=None,
-        model="m",
-        session_kind="cron",
-        is_retry=False,
-        ts_ms=0,
-    )
-    outcomes = [o["outcome"] for o in obs if o["pred"] == "tool_ok" and o["args"] == ["ask_user"]]
-    assert outcomes == [False]
 
 
 def test_unavailable_calls_are_not_a_tool_signal_failure():

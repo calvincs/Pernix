@@ -121,7 +121,6 @@ HARNESS_DATA_DIRS = frozenset(
         "agent",
         "cache",
         "workflows",
-        "candor",
     }
 )
 

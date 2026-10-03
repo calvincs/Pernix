@@ -1439,8 +1439,8 @@ def _sanitize_experience(raw: dict) -> dict:
     """Enforce the experience schema regardless of what the model emitted.
 
     Booleans absent or non-boolean are dropped (not coerced to False — an
-    unanswered question is not a "no", and Candor frequency observations must
-    only count real reads). Friction labels are normalized to snake_case so
+    unanswered question is not a "no", and downstream counts must only
+    count real reads). Friction labels are normalized to snake_case so
     the same failure mode can't split into a dozen categorical values on
     casing alone.
     """
@@ -1819,8 +1819,7 @@ async def _save_user_observations(session_id: str, result: ReflectResult) -> Non
 
     Reflect reads every full transcript anyway; this makes it a sensor for
     the user model instead of only a verdict machine. Writes go through the
-    normal store path — add_entry's dedup gate absorbs repeats, and user.*
-    writes flow into Candor's user_fact attestations via the store hook.
+    normal store path — add_entry's dedup gate absorbs repeats.
     Never raises; a memory problem must not affect the verdict.
     """
     observations = (result.experience or {}).get("user_observations") or []

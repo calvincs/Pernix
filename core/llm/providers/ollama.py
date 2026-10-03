@@ -625,7 +625,7 @@ def _to_native_format(messages: list[dict]) -> list[dict]:
         # beginning" before the model is ever reached, so every turn fails
         # and burns the retry ladder. The compile deliberately emits later
         # system messages — the compaction summary, trim notices, and the
-        # volatile clock/resource/telos tail, which sits last precisely to
+        # volatile clock/resource tail, which sits last precisely to
         # keep the prompt prefix cacheable. Carry them as user-role text,
         # exactly as normalize_for_openrouter() already does for the strict
         # OpenAI providers; their content is bracket-marked ("[CURRENT

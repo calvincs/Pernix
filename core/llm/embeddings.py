@@ -233,7 +233,7 @@ def _note_failure(err: Exception) -> None:
             body=(
                 f"Every embedding call to {_native_base()}/api/embed (model {settings.embedding_model}) "
                 f"has failed since {_failing_since_wall}; latest error: {_describe(err)[:300]}. Memory recall, "
-                "dedup and dream/candor semantic search run on keyword matching only until it recovers. "
+                "dedup and dream semantic search run on keyword matching only until it recovers. "
                 "Check the embedding server; a model that was evicted needs one request that waits out "
                 "the cold load. This notice repeats at most once a day; a successful embed clears it."
             ),

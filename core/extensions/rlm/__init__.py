@@ -8,7 +8,7 @@ parent. Core adapted from https://github.com/alexzhang13/rlm (MIT License,
 Copyright (c) 2025 Alex Zhang) — extracted and rewritten for Pernix, not a
 dependency. See docs/internals/rlm.md.
 
-Gating follows the Candor pattern: register() is a hard off-switch at startup
+Gating: register() is a hard off-switch at startup
 (restart to add/remove the tool); the tool function re-checks rlm_enabled at
 call time so a hot toggle-off degrades to a clear error, never a run.
 """

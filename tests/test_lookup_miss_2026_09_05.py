@@ -21,7 +21,6 @@ import pytest
 
 from core import synthesis
 from core.agent import record_tool_outcome
-from core.extensions.candor.emit import build_turn_observations
 from core.tools.executor import MISS_MARKER, MISS_PREFIX, ToolExecutionResult, _execute_single, is_miss
 from core.tools.registry import ToolRegistry
 from db import models as db
@@ -72,24 +71,6 @@ def test_record_tool_outcome_counts_misses_apart_from_failures():
     assert e["misses"] == 1
     assert e["miss_errors"] and "not found" in e["miss_errors"][0]
     assert e["errors"] == ["Error: disk on fire"]
-
-
-def test_candor_emit_nets_misses_out_of_the_denominator():
-    obs, emitted = build_turn_observations(
-        tool_summary={"read_skill_resource": {"calls": 6, "failures": 0, "misses": 4}},
-        already_emitted={},
-        termination_reason=None,
-        reflect_verdict=None,
-        failure_cause=None,
-        model="m",
-        session_kind="normal",
-        is_retry=False,
-        ts_ms=0,
-    )
-    per = [o for o in obs if o["pred"] == "tool_ok" and o["args"] == ["read_skill_resource"]]
-    assert len(per) == 2, "six calls minus four misses is two observations"
-    assert all(o["outcome"] is True for o in per), "and none of them is a failure"
-    assert emitted["read_skill_resource"]["calls"] == 2
 
 
 def _pm(tool_summary: dict) -> dict:

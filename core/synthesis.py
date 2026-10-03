@@ -294,7 +294,7 @@ def attribute(pm_row: dict) -> list[Attribution]:
 
 
 # --- Model routing brief (H2, plan §12.4) --------------------------------
-# Exception-report shape borrowed from candor/intel.py: only degraded pairs
+# Exception-report shape: only degraded pairs
 # render; a (model, category) absent from the brief has no known problem.
 
 _ROUTE_MIN_OBSERVATIONS = 5

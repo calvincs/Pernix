@@ -2658,14 +2658,13 @@ def record_tool_outcome(turn, result) -> None:
     declining the call (job allow-list, retry exclusion, disabled tool,
     approval gate; see core.tools.executor.is_policy_refusal) — is counted as
     `refusals` with its own `refusal_errors` previews and never as a failure:
-    candor's tool_ok, telos' anomaly scan, synthesis and the reflect summary
-    all read `failures` as "the tool is unreliable", which a refusal is not.
+    synthesis and the reflect summary both read `failures` as "the tool is unreliable", which a refusal is not.
     The stuck detector still sees refusals (a model that keeps calling a
     forbidden tool IS stuck) — that is handled by the caller.
 
     By-design unavailability (core.tools.executor.is_unavailable — ask_user in
     an unattended session) is counted as `unavailable` for the same reason and
-    is additionally netted out of the denominator by candor and synthesis: a
+    is additionally netted out of the denominator by synthesis: a
     refusal at least means the model tried something it should not have, while
     an unavailable tool simply cannot apply here and says so.
     """
@@ -2790,8 +2789,7 @@ async def _record_round_results(
         tc = item["tc"]
         # The tool name and the miss/unavailable flags ride along so a recent
         # window of results can be read back per tool without joining the
-        # assistant's tool_calls (the candor hint producer corroborates its
-        # ledger against the last two weeks of these rows).
+        # assistant's tool_calls (db.recent_tool_outcomes).
         from core.tools.executor import is_command_failure as _is_cmd_fail
         from core.tools.executor import is_miss as _is_miss
         from core.tools.executor import is_unavailable as _is_unavail
@@ -2884,8 +2882,8 @@ async def _record_round_results(
             was_error=result.was_error,
         )
 
-        # Cumulative + per-attempt tool execution summary for reflect,
-        # candor, telos and synthesis.
+        # Cumulative + per-attempt tool execution summary for reflect and
+        # synthesis.
         record_tool_outcome(session.turn, result)
 
         # Dynamic tool expansion via discover_tools
