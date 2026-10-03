@@ -262,13 +262,15 @@ def test_remember_supersede_routes_to_update(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_federated_sections_surface_adaptive_hits(_adaptive_on):
+def test_federated_sections_skip_retired_adaptive_entries():
+    """The adaptive layer is retired (3.2): its rows stay as history but are
+    no longer a federated store, so a matching entry must not surface."""
     from core.tools.builtin.memory_tools import _federated_sections
 
     _adaptive_entry("yt-hint", "routing_hint", "refine", "Prefer youtube captions before whisper transcription.")
     out = _federated_sections("youtube captions workflow")
-    assert "[adaptive/routing_hint · refine]" in out
-    assert "RELATED IN OTHER STORES" in out
+    assert "[adaptive/" not in out
+    assert "yt-hint" not in out
     # No hits → empty string, not a header over nothing.
     assert _federated_sections("zqxwv nonexistent") == ""
 

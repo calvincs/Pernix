@@ -433,16 +433,16 @@ def _build_server_context() -> str:
             f"can open or examine it in a browser at: {base_url}/workspace/myproject/app.html",
             "Substitute the actual relative path for any artifact you want to verify or share.",
             "",
-            "SELF-INSPECTION — questions about Pernix's own state (notifications, adaptive",
-            "proposals and batches, cron runs, dream, canaries, other sessions):",
+            "SELF-INSPECTION — questions about Pernix's own state (notifications, reflect",
+            "verdicts, cron runs, dream, canaries, other sessions):",
             "- START at SYSTEM-MAP.md in the workspace: the machine-generated map of the DB",
             "  schema, data layout, API routes, and context blocks. Read it BEFORE guessing a",
             "  table name, path, or endpoint — it is regenerated every boot and cannot drift.",
             f"- The store is the SQLite file {db_path} (python3 sqlite3 from bash or repl) and this API.",
             f"- GET {base_url}/openapi.json lists every route with its query params and their DEFAULTS.",
             "  Read it before guessing an endpoint. A list route that defaults to one status hides the",
-            f"  rest: e.g. {base_url}/api/adaptive/proposals?status=all or ?id=<n> for a resolved proposal.",
-            f"- The code that produced the behaviour is under {code_root} (e.g. core/adaptive/engine.py,",
+            f"  rest: e.g. {base_url}/api/notifications?view=log for every row, not just what the bell shows.",
+            f"- The code that produced the behaviour is under {code_root} (e.g. core/reflect.py,",
             "  core/snooze.py). Read the function before asserting WHY something happened.",
             "- When a lookup fails, write 'not retrieved — would need <call>'. Never rebuild an id→content",
             "  mapping from timestamps or proximity; reflect flags table rows no tool result supports.",
@@ -610,24 +610,6 @@ def _build_space_block(session_id: str) -> str:
         )
     except Exception as e:
         logger.debug("space block unavailable for %s: %s", session_id[:12], e)
-        return ""
-
-
-def _build_adaptive_block(session_id: str) -> str:
-    """Adaptive-layer prompt_notes + policies (plan 4e). Empty string while
-    the layer is off or holds nothing — never shifts bytes on first deploy.
-
-    The turn key is resolved here and handed down: trial entries (W6) render
-    on a deterministic half of the turns, and the scout prompt must be given
-    the SAME key so both prompts of one turn agree on the same half.
-    """
-    try:
-        from core.adaptive.render import build_adaptive_block
-        from core.adaptive.trial import turn_key_for_session
-
-        return build_adaptive_block(session_id, turn_key_for_session(session_id))
-    except Exception as e:
-        logger.warning("Adaptive block unavailable: %s", e)
         return ""
 
 
@@ -872,15 +854,6 @@ def _format_turn_ledger(snap: dict, anchor: str, sess: dict) -> str:
         lines.append(
             f"- Unanswered question you asked earlier: \"{' '.join(str(q.get('question', '')).split())[:100]}\""
         )
-    for p in snap.get("agent_proposals", []):
-        lines.append(f"- Your adaptive proposal #{p['id']} is still pending review")
-
-    changes = snap.get("adaptive_changes", [])
-    if changes:
-        parts = [f"{c['entry_id']} {c['action']} ({c.get('actor') or '?'})" for c in changes[:4]]
-        more = f" (+{len(changes) - 4} more)" if len(changes) > 4 else ""
-        lines.append(f"- Adaptive changes since your last turn: {', '.join(parts)}{more}")
-
     fails = snap.get("canary_fails", [])
     if fails:
         names = sorted({str(f.get("task") or "?") for f in fails})
@@ -1075,16 +1048,6 @@ def compile_context(
     directives_block = _build_agent_directives_block(session_id)
     if directives_block:
         system_parts.append(directives_block)
-
-    # Adaptive layer block (plan 4e): machine-curated prompt_notes/policies
-    # between directives and the skills catalog. Stable between applies
-    # (applies happen only in idle windows, so no mid-turn prefix bust, I8);
-    # omitted entirely while empty or disabled — flag-off output is
-    # byte-identical. routing_hints deliberately absent here: they render
-    # into the scout prompt only (I5).
-    adaptive_block = _build_adaptive_block(session_id)
-    if adaptive_block:
-        system_parts.append(adaptive_block)
 
     # Static skill catalog — cache-stable across turns; placed before the
     # per-turn scout report so prompt cache hits the same prefix every turn.
