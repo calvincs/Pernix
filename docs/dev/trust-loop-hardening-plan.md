@@ -1,5 +1,7 @@
 # Trust-loop hardening plan (2026-09-04)
 
+> **Partly RETIRED 2026-10.** The adaptive-layer workstreams here (receipts, trial arms, the tripwire drift test, entry attribution) were removed with the adaptive layer in 3.2; the grader hold-out, thumbs and contamination work remain. See [../upgrade.md](../upgrade.md).
+
 Branch: next-3.2-testing. Baseline audit: hkb `pernix.audit.learning-loop-2026-09`.
 
 ## The problem in one line

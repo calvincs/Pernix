@@ -20,7 +20,7 @@ Open the bell. It has two tabs:
 
 **Dismiss never deletes.** A dismissed item leaves *Needs you* and stays in *Activity* until the retention window ends (`notification_retention_days`, default 30). Open interrupt items are never pruned.
 
-Some items close themselves when their cause goes away — the embeddings outage when the server answers again, an MCP alert when the connection is back, a parked canary when it is un-parked, a tripwire flag when the batch is cleared. They leave the bell and stay in *Activity* marked resolved.
+Some items close themselves when their cause goes away — the embeddings outage when the server answers again, an MCP alert when the connection is back, a parked canary when it is un-parked. They leave the bell and stay in *Activity* marked resolved.
 
 **One rollup instead of many.** Skill proposals that wait for *your* decision (changes that fail the safety check, or every pending one when auto-apply is off) are summed into a single item — "N skill proposals wait for your decision" — that opens the Skills tab and clears at zero.
 

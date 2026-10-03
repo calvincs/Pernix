@@ -44,7 +44,7 @@ The first tagged release since v2.9.0, and the biggest. The quick tour of what's
 
 **Semantic memory retrieval.** Set `embedding_model` and memory search becomes hybrid BM25 + vector with `[[wiki-link]]` expansion at recall. A local CPU embedding fallback keeps recall alive when the remote embedding model goes down.
 
-**The self-improvement stack.** The golden-task **canary suite** measures whether the agent is actually getting better or worse; the governed **adaptive layer** applies low-risk policy edits with a veto window, full history, and one-click rollback; **Telos** adds a non-convergent drive with correction machinery. See [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md) (Telos was retired in 3.2.)
+**The self-improvement stack.** The golden-task **canary suite** measures whether the agent is actually getting better or worse; the governed **adaptive layer** applies low-risk policy edits with a veto window, full history, and one-click rollback; **Telos** adds a non-convergent drive with correction machinery. See [internals/canary.md](internals/canary.md). (Telos and the adaptive layer were retired in 3.2.)
 
 **RLM grows up.** Every `rlm_process` run now gets a live, read-only trace session nested in the sidebar; a run whose result was orphaned by a turn teardown is surfaced on the next turn instead of vanishing; cancels report as cancels, not failures.
 

@@ -171,7 +171,7 @@ Consumers, and how each reads it:
 | `_finalize_worker`'s stamp | the same header, from the same builder — so the file and the reader agree |
 | `_build_resume_message` | `pass but UNVERIFIED (verification=…)`, and the worker joins the ⚠ inspect list |
 | `get_worker_transcript` | `verification=` beside `verdict=`, outside the clipped `reasoning` |
-| retry control flow (`hooks._maybe_reflect`), trial arms, tripwire, synthesis, metrics, feedback, scout's post-mortem read, dream validation | unchanged: they act on the retry disposition, which is what `verdict` still means. `verification` is advisory to them and deliberately does not gate a retry — the floor exists precisely so ambiguity does not force one. |
+| retry control flow (`hooks._maybe_reflect`), synthesis, metrics, feedback, scout's post-mortem read, dream validation | unchanged: they act on the retry disposition, which is what `verdict` still means. `verification` is advisory to them and deliberately does not gate a retry — the floor exists precisely so ambiguity does not force one. |
 
 ### Failure classification
 
