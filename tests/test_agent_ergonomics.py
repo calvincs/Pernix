@@ -1,7 +1,8 @@
 """Tests for the agent-ergonomics batch (docs/dev/agent-ergonomics-plan.md):
-retro-lint sweep, turn-boundary ledger, provenance rendering, repair-tool
-pairing, remember(supersede=), federated deep_recall sections, retention
-distill-before-delete, agent_state digest, SYSTEM-MAP generation."""
+turn-boundary ledger, repair-tool pairing, remember(supersede=), federated
+deep_recall sections, retention distill-before-delete, agent_state digest,
+SYSTEM-MAP generation. (The retro-lint sweep and provenance rendering went
+with the adaptive layer in 3.2.)"""
 
 from __future__ import annotations
 
@@ -18,119 +19,16 @@ def _iso(days_ago: float = 0.0) -> str:
 
 
 def _adaptive_entry(entry_id: str, kind: str, source: str, content: str) -> None:
+    """A leftover adaptive_entries row (the table outlived the layer in 3.2)."""
+    from db.database import connect_sessions
+
     stamp = _iso(10)
-    db.adaptive_put_entry(
-        {
-            "id": entry_id,
-            "kind": kind,
-            "scope": "global",
-            "title": entry_id,
-            "content": content,
-            "risk": "low",
-            "version": 1,
-            "status": "active",
-            "source": source,
-            "created_at": stamp,
-            "updated_at": stamp,
-        }
-    )
-
-
-# ---------------------------------------------------------------------------
-# Retro-lint sweep (Tier 3.1)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def _adaptive_on(monkeypatch):
-    monkeypatch.setattr("config.settings.adaptive_enabled", True)
-
-
-def test_lint_sweep_retires_narrative_machine_entries(_adaptive_on):
-    from core.adaptive.retire import _LINT_SWEEP_KEY, retire_lint_failures
-
-    _adaptive_entry(
-        "narrative-dream",
-        "policy",
-        "dream",
-        "The protocol for handling duplicates remains ineffective, as P4 shows continued friction.",
-    )
-    _adaptive_entry("good-refine", "policy", "refine", "Verify the cwd with ls before any file move.")
-    out = retire_lint_failures()
-    assert out["retired"] == ["narrative-dream"]
-    assert "narrative" in out["reasons"]["narrative-dream"]
-    rows = {e["id"]: e for e in db.adaptive_list_entries(kind="policy", status=None)}
-    assert rows["narrative-dream"]["status"] == "deleted"  # journaled soft-delete
-    assert rows["good-refine"]["status"] == "active"
-    assert db.get_snooze_state(_LINT_SWEEP_KEY)  # watermark stamped
-    # The journal names the real actor + reason — not "human delete" (the
-    # provenance bug the agent found live-validating the first sweep).
-    ev = [e for e in db.adaptive_list_events(entry_id="narrative-dream") if e["action"] == "delete"][0]
-    assert "lint_sweep delete" in (ev.get("evidence_json") or "")
-    assert "human delete" not in (ev.get("evidence_json") or "")
-    assert "narrative" in (ev.get("evidence_json") or "")
-
-
-def test_lint_v2_catches_the_live_survivor_shapes():
-    """The five narrative policies the first live sweep missed (2026-08-31),
-    quoted from the box's store — each must fail the broadened lint."""
-    from core.adaptive.lint import lint_edit
-
-    survivors = [
-        "Multiple memory entries prescribe 'informing the user' of the limitation, yet "
-        "post-mortems record persistent failures to adhere to it.",
-        "Stored lessons regarding fallback to Gemini when Qwen-VL stalls are ineffective "
-        "because the system lacks evidence of actually switching models.",
-        "The lesson M3 instructs respecting a max active worker limit of 2, but P1 and the "
-        "newer memory M10 indicate the system successfully operated above it.",
-        "The lesson M7 instructing the agent to strictly use provided JSON manifests "
-        "was violated in the recorded run.",
-        "The stored lessons on manual workflow recovery (M1, M9, M11) may be ineffective "
-        "if the bug that they address has been resolved.",
-    ]
-    for content in survivors:
-        assert lint_edit({"action": "create", "kind": "policy", "content": content}), content
-    # Legitimate instructions still pass — including candor's model citizen.
-    good = [
-        "Verify the cwd with ls before any file move.",
-        "Calibrated reliability for forget is 7% over 26 observations — prefer an "
-        "alternative or verify its output; see why_reliability('tool_ok', 'forget').",
-        "When a task defines an explicit deliverable list, emit every named deliverable " "before finishing.",
-    ]
-    for content in good:
-        assert lint_edit({"action": "create", "kind": "policy", "content": content}) is None, content
-
-
-def test_lint_sweep_exempts_user_entries_and_is_idempotent(_adaptive_on):
-    from core.adaptive.lint import LINT_VERSION
-    from core.adaptive.retire import _LINT_SWEEP_KEY, retire_lint_failures
-
-    _adaptive_entry("calvins-observation", "policy", "user", "Despite everything, this keeps failing repeatedly.")
-    assert retire_lint_failures()["retired"] == []  # human authority is unlinted
-    # Watermarked: a second pass is a no-op even if a bad entry appears.
-    _adaptive_entry("late-narrative", "policy", "dream", "This appears to be ineffective in practice.")
-    assert retire_lint_failures()["retired"] == []
-    # A lint version bump re-arms the sweep.
-    db.set_snooze_state(_LINT_SWEEP_KEY, str(LINT_VERSION - 1))
-    assert retire_lint_failures()["retired"] == ["late-narrative"]
-
-
-# ---------------------------------------------------------------------------
-# Provenance rendering (Tier 3.2)
-# ---------------------------------------------------------------------------
-
-
-def test_adaptive_block_renders_producer(_adaptive_on):
-    from core.adaptive.render import build_adaptive_block, build_routing_hints_block
-
-    _adaptive_entry("pol-x", "policy", "dream", "Always verify writes by reading the file back.")
-    _adaptive_entry("note-y", "prompt_note", "refine", "Prefer captions over transcription for videos.")
-    _adaptive_entry("hint-z", "routing_hint", "telos", "Use rlm_process when the budget allows it.")
-    block = build_adaptive_block()
-    assert "[pol-x] (dream)" in block or "(dream" in block.split("pol-x")[1][:40]
-    assert "(refine)" in block
-    hints = build_routing_hints_block()
-    assert "(telos)" in hints
+    with connect_sessions() as conn:
+        conn.execute(
+            "INSERT INTO adaptive_entries (id, kind, scope, title, content, risk, version, status, source, "
+            "created_at, updated_at) VALUES (?, ?, 'global', ?, ?, 'low', 1, 'active', ?, ?, ?)",
+            (entry_id, kind, entry_id, content, source, stamp, stamp),
+        )
 
 
 # ---------------------------------------------------------------------------

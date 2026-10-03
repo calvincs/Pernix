@@ -54,6 +54,31 @@ async def test_unknown_key_rejected_and_nothing_applied():
     assert settings.notify_tiers_enabled is True
 
 
+async def test_overrides_for_a_retired_area_are_dropped_not_rejected():
+    """The adaptive layer (and its notice area) went away in 3.2. A cached
+    client may still post its old override; that must not 400 the save."""
+    async with _client() as client:
+        resp = await client.post(
+            "/api/settings",
+            json={
+                "notify_tier_overrides": {
+                    "canary": "drop",
+                    "adaptive": "log",
+                    "adaptive.tripwire_suspect": "interrupt",
+                }
+            },
+        )
+    assert resp.status_code == 200
+    assert settings.notify_tier_overrides == {"canary": "drop"}
+
+
+def test_the_adaptive_area_is_retired_and_has_no_categories():
+    from core.notices import CATEGORIES, RETIRED_AREAS, area_of
+
+    assert "adaptive" in RETIRED_AREAS
+    assert not [c for c in CATEGORIES if area_of(c) in RETIRED_AREAS]
+
+
 @pytest.mark.parametrize("bad", ["loud", "INTERRUPT", 3, ["bell"]])
 async def test_bad_tier_rejected(bad):
     async with _client() as client:
@@ -94,7 +119,7 @@ async def test_settings_get_exposes_areas_from_registry():
         assert key in data
     areas = data["notify_areas"]
     assert set(areas) == {area_of(c) for c in CATEGORIES}
-    assert len(areas) == 11
+    assert len(areas) == 10  # adaptive retired in 3.2
     for area, info in areas.items():
         cats = [c for c in CATEGORIES if area_of(c) == area]
         assert info["categories"] == cats

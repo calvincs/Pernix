@@ -29,7 +29,9 @@ Rules the callers rely on:
   same channels its old call site used.
 
 `link` is a small dict the client turns into an "open" button:
-  {"kind": "session", "id": <session_id>}   or   {"kind": "tab", "tab": "learning"|"canary"|"skills"|"dream"|"jobs"|"mcp"|"settings"|"spaces"}
+  {"kind": "session", "id": <session_id>}   or   {"kind": "tab", "tab": "canary"|"skills"|"dream"|"jobs"|"mcp"|"settings"|"spaces"}
+("learning" — the retired adaptive layer's tab — still appears on rows written
+before 3.2; the client opens the Self-tuning group for it.)
 """
 
 from __future__ import annotations
@@ -100,20 +102,9 @@ CATEGORIES: dict[str, Category] = {
     "skills.auto_rolled_back": Category("bell", legacy_urgency="high"),
     "skills.rolled_back": Category("log"),
     "skills.proposals_auto_applied": Category("log"),
-    # --- adaptive layer (the Learning tab is the surface) -------------------
-    "adaptive.queue_full": Category("log", dedup_daily=True),
-    "adaptive.cap_reached": Category("log", dedup_daily=True),
-    "adaptive.proposal_held": Category("log"),
-    "adaptive.tripwire_suspect": Category("bell", coalesce=True, legacy_urgency="high"),
-    "adaptive.tripwire_rolled_back": Category("bell", legacy_urgency="high"),
-    "adaptive.auto_approved": Category("log"),
-    "adaptive.edits_applied": Category("log"),
-    "adaptive.value_sweep": Category("log", dedup_daily=True),
-    "adaptive.lint_sweep": Category("log", dedup_daily=True),
-    "adaptive.trial_sweep": Category("log", dedup_daily=True),
-    "adaptive.cleanup": Category("log"),
-    # One computed row: "N proposals wait for your decision". Replaces a bell
-    # item per proposal; resolved when the count reaches zero.
+    # One computed row: "N skill proposals wait for your decision"
+    # (core/skills/review.py). Replaces a bell item per proposal; resolved
+    # when the count reaches zero.
     "review.pending": Category("bell", coalesce=True),
     # --- dream ---------------------------------------------------------------
     "dream.corrections_applied": Category("log", dedup_daily=True),
@@ -132,6 +123,12 @@ CATEGORIES: dict[str, Category] = {
     "system.memory_oversized": Category("bell"),
     "system.push_rejected": Category("bell"),
 }
+
+# Areas whose producers were removed. Their categories are gone from the
+# registry, but a cached client (or an old settings.json) may still post an
+# override for them; the settings endpoint drops those silently instead of
+# answering 400. "adaptive": the adaptive layer, retired in 3.2.
+RETIRED_AREAS = frozenset({"adaptive"})
 
 _UNKNOWN = Category("bell")
 _warned_unknown: set[str] = set()
