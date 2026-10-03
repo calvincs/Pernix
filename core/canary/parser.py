@@ -15,6 +15,8 @@ Format (mirrors SKILL.md, reusing the same frontmatter helper):
     tags: [coding, debug]
     covers: [skill:foo]  # change surfaces this canary tests (informational)
     flaky: false         # flaky canaries inform, never count as failures
+    serve: [article.html]  # seed files served over HTTP instead of written
+    tools: [http_get]    # extra read-only web tools (see DECLARABLE_TOOLS)
     last_reviewed: 2026-08-06
     ---
     Free-form notes for humans reviewing this canary.
@@ -35,6 +37,19 @@ Detection is the sibling ``generate.py`` OR the frontmatter flag
 button) revalidate the new text in a bare temp directory where the sibling
 file does not exist — without the flag every generated canary would fail
 that rewrite with a parse error.
+
+SERVED FIXTURES. ``serve:`` names seed files (from ``files:`` or from
+``generate()``) that the runner publishes under
+``<workspace_dir>/.canary-serve/<run-token>/`` for the length of the run
+instead of writing them into the task workspace. ``{{SERVE_BASE}}`` in the
+prompt and in gate commands becomes the URL of that directory on Pernix's
+own server, so a canary can test fetching a page without the internet.
+
+SCOPED TOOLS. ``tools:`` adds tools to the run's allowlist, but only from
+DECLARABLE_TOOLS — read-only web reads. ``search_web`` is not one of them
+(an external, metered call whose results change daily). Nothing machine-
+written emits this key: the create API's structured spec and the skill
+verify-sync render fixed key sets.
 
 LEGACY KEYS. ``parked``, ``max_runs``, ``expires`` and ``cadence`` belonged
 to the suite auto-maintenance retired in 3.2. They still parse, so old files
@@ -61,6 +76,10 @@ GENERATOR_FILENAME = "generate.py"
 # something a proposal may re-describe. A holdout is the suite's honest
 # ground: a task the system cannot have trained itself against.
 HOLDOUT_TAG = "holdout"
+# The only tools a CANARY.md may add to the run's allowlist with `tools:`.
+DECLARABLE_TOOLS = frozenset({"http_get", "browse_web"})
+# Placeholder the runner swaps for the served-fixture URL.
+SERVE_PLACEHOLDER = "{{SERVE_BASE}}"
 
 
 class CanaryParseError(Exception):
@@ -100,6 +119,11 @@ class CanaryDef:
     # not runnable).
     generated: bool = False
     generator_path: Path | None = None
+    # Served fixtures: names (keys of `files`) published over HTTP for the
+    # run instead of written into the workspace.
+    serve: list[str] = field(default_factory=list)
+    # Extra allowlisted tools, a subset of DECLARABLE_TOOLS.
+    tools: list[str] = field(default_factory=list)
 
     @property
     def holdout(self) -> bool:
@@ -175,6 +199,15 @@ def parse_canary_md(path: Path) -> CanaryDef:
     except (TypeError, ValueError):
         raise CanaryParseError(f"{path}: 'max_runs' must be an integer (0 = no limit)") from None
 
+    serve = _str_list(fm.get("serve"), path, "serve")
+    for rel in serve:
+        if Path(rel).is_absolute() or ".." in Path(rel).parts:
+            raise CanaryParseError(f"{path}: serve entry '{rel}' must be a relative file name")
+    tools = _str_list(fm.get("tools"), path, "tools")
+    undeclarable = sorted(set(tools) - DECLARABLE_TOOLS)
+    if undeclarable:
+        raise CanaryParseError(f"{path}: tools {undeclarable} cannot be declared; allowed: {sorted(DECLARABLE_TOOLS)}")
+
     expires = str(fm.get("expires") or "").strip()
     if expires:
         try:
@@ -201,7 +234,19 @@ def parse_canary_md(path: Path) -> CanaryDef:
         files={str(k): str(v) for k, v in files.items()},
         generated=generated,
         generator_path=generator_path if generator_path.is_file() else None,
+        serve=serve,
+        tools=tools,
     )
+
+
+def _str_list(raw, path: Path, key: str) -> list[str]:
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, str):
+        raw = [t.strip() for t in raw.split(",") if t.strip()]
+    if not isinstance(raw, list):
+        raise CanaryParseError(f"{path}: '{key}' must be a list")
+    return [str(t) for t in raw]
 
 
 def scan_canaries(base: Path | None = None) -> list[CanaryDef]:

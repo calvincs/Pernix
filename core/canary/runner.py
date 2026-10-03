@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from config import settings
-from core.canary.parser import CanaryDef, load_canary, scan_canaries
+from core.canary.parser import DECLARABLE_TOOLS, SERVE_PLACEHOLDER, CanaryDef, load_canary, scan_canaries
 
 logger = logging.getLogger("pernix.canary")
 
@@ -144,6 +144,55 @@ class CanaryRunResult:
         }
 
 
+def serve_root() -> Path:
+    """Where served fixtures live: a subdirectory of the live workspace,
+    because GET /workspace/{path} is the route that serves files."""
+    from core.canary.contamination import SERVE_DIRNAME
+
+    return Path(settings.workspace_dir).resolve() / SERVE_DIRNAME
+
+
+def serve_base_url(token: str) -> str:
+    """The URL of one run's served-fixture directory on Pernix's own server.
+
+    https exactly when the server terminates TLS itself (network mode);
+    http_get then verifies against Pernix's own certificate for this one
+    host:port (core.extensions.web._own_tls_verify) — never verify=False.
+    """
+    scheme = "https" if settings.network_enabled else "http"
+    return f"{scheme}://localhost:{settings.port}/workspace/{serve_root().name}/{token}"
+
+
+def _publish_served(canary: CanaryDef) -> tuple[CanaryDef, Path]:
+    """Move the canary's `serve:` files out of its workspace seed into a
+    fresh served directory, and point {{SERVE_BASE}} at it.
+
+    Returns the rewritten canary and the directory the caller must delete.
+    """
+    from dataclasses import replace
+    from secrets import token_hex
+
+    missing = [rel for rel in canary.serve if rel not in (canary.files or {})]
+    if missing:
+        raise ValueError(f"serve: {', '.join(missing)} not among the canary's files")
+    token = token_hex(8)
+    target = serve_root() / token
+    target.mkdir(parents=True, exist_ok=False)
+    for rel in canary.serve:
+        dest = target / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(canary.files[rel], encoding="utf-8")
+    base = serve_base_url(token)
+    files = {k: v for k, v in canary.files.items() if k not in set(canary.serve)}
+    gates = [{**g, "command": g["command"].replace(SERVE_PLACEHOLDER, base)} for g in canary.gates]
+    return replace(canary, prompt=canary.prompt.replace(SERVE_PLACEHOLDER, base), files=files, gates=gates), target
+
+
+def _run_allowlist(canary: CanaryDef) -> frozenset:
+    """The sandbox plus whatever read-only web tools the canary declared."""
+    return CANARY_TOOL_ALLOWLIST | (frozenset(canary.tools) & DECLARABLE_TOOLS)
+
+
 def _seed_workspace(canary: CanaryDef, ws: Path) -> None:
     for rel, content in (canary.files or {}).items():
         target = ws / rel
@@ -243,6 +292,7 @@ async def run_canary(
     # can still be reading the temp workspace.
     turn_started = False
     turn_ended = False
+    served: Path | None = None
     try:
         # Generated fixture (W5): a fresh seed per run, so the prompt, the
         # seed files and the expected answer are all different from last
@@ -256,13 +306,16 @@ async def run_canary(
             canary = generate_variant(canary, result.seed)
             logger.info("Canary '%s' generated fixture with seed %d", canary.name, result.seed)
 
+        if canary.serve:
+            canary, served = _publish_served(canary)
+
         _seed_workspace(canary, tmp)
 
         sid = manager.create_session(title=f"Canary: {canary.name}", session_type="canary")
         result.session_id = sid
         session = manager.get(sid)
         session.workspace_override = str(tmp)
-        session.tool_allowlist = CANARY_TOOL_ALLOWLIST
+        session.tool_allowlist = _run_allowlist(canary)
         if canary.model:
             session.model_override = canary.model
 
@@ -303,6 +356,10 @@ async def run_canary(
         result.error = result.error or str(e)
     finally:
         result.duration_s = time.monotonic() - start
+        # Served fixtures are per-run and public on the workspace route:
+        # never leave one behind, whatever the turn is doing.
+        if served is not None:
+            shutil.rmtree(served, ignore_errors=True)
         # Gates are per-run scaffolding, never inherited by a later run.
         try:
             if sid:
