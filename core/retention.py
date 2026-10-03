@@ -168,8 +168,8 @@ async def prune_canary_runs(retention_days: int | None = None) -> tuple[int, int
 
     Session prune mirrors the dream-journal pattern (core/dream/journal.py):
     list, filter by type + age, delete. Scoring rows outlive their session only
-    inside the retention window — the tripwire's baseline math reads
-    canary_runs, never the sessions.
+    inside the retention window — the Canary tab reads canary_runs, never
+    the sessions.
 
     Returns (rows_deleted, sessions_deleted).
     """
@@ -395,48 +395,6 @@ def prune_dream_hypotheses(retention_days: int | None = None) -> int:
     if deleted:
         logger.info("Snooze dream cleanup: %d terminal hypothesis row(s) older than %dd", deleted, days)
     return deleted
-
-
-async def nudge_stale_canaries(max_age_days: int = 90) -> int:
-    """Notify once per canary whose last_reviewed is over max_age_days old.
-
-    Staleness nudge (plan §10.8 / §12.2): the watermark is keyed on the
-    reviewed date, so the nudge self-rearms when a human bumps it. No LLM, no
-    writes to the suite. Returns the number of notifications raised.
-    """
-    raised = 0
-    try:
-        from core.canary import scan_canaries
-
-        for c in await run_background(scan_canaries):
-            if not c.last_reviewed:
-                continue
-            try:
-                reviewed = datetime.fromisoformat(str(c.last_reviewed))
-                if reviewed.tzinfo is None:
-                    reviewed = reviewed.replace(tzinfo=timezone.utc)
-            except ValueError:
-                continue
-            if (datetime.now(timezone.utc) - reviewed).days < max_age_days:
-                continue
-            key = f"canary_stale_notified:{c.name}:{c.last_reviewed}"
-            if db.get_snooze_state(key):
-                continue
-            notices.notify(
-                "canary.stale",
-                f"Canary '{c.name}' is stale",
-                (
-                    f"last_reviewed {c.last_reviewed} is over {max_age_days} days old. Re-verify its "
-                    f"gates still reflect a daily-driver task, then bump last_reviewed."
-                ),
-                subject=c.name,
-                link={"kind": "tab", "tab": "canary"},
-            )
-            db.set_snooze_state(key, "1")
-            raised += 1
-    except Exception as e:
-        logger.warning("Canary staleness nudge failed: %s", e)
-    return raised
 
 
 # ---------------------------------------------------------------------------

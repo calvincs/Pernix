@@ -544,10 +544,9 @@ class SnoozeRunner:
             await self._rung("cleanup_rlm_runs", self._cleanup_rlm_runs())
 
         # Activity 12c: Canary retention cleanup (no LLM). Prunes canary_runs
-        # rows and the canary sessions behind them past canary_retention_days.
-        # NEVER dispatches sweeps — post-batch sweeps are enqueued through the
-        # scheduler for the next idle window (plan §5: inline dispatch from a
-        # snooze activity would cancel the cycle that produced the batch).
+        # rows and the canary sessions behind them past canary_retention_days
+        # and drains the .retired/ quarantine past canary_purge_after_days.
+        # NEVER dispatches sweeps.
         if not self._is_cancelled() and settings.canary_enabled:
             _announce(bus, "cleanup_canary_runs", "Pruning old canary runs and sessions")
             await self._rung("cleanup_canary_runs", self._cleanup_canary_runs())
@@ -565,15 +564,6 @@ class SnoozeRunner:
         if not self._is_cancelled() and settings.session_delete_archived_days > 0:
             _announce(bus, "prune_archived_sessions", "Deleting sessions long past archiving")
             await self._rung("prune_archived_sessions", self._prune_archived_sessions())
-
-        # Activity 12d: Canary suite auto-maintenance (no LLM). Promotes
-        # vetted auto-admitted canaries, tags flapping ones flaky, retires
-        # long-green ones to quarantine, purges the quarantine. The Goodhart
-        # lock lives in core/canary/maintain.py: a failing canary is never
-        # auto-mutated.
-        if not self._is_cancelled() and settings.canary_enabled and settings.canary_auto_maintain:
-            _announce(bus, "canary_maintain", "Maintaining the canary suite (promote/flaky/retire/purge)")
-            await self._rung("canary_maintain", self._canary_maintain())
 
         # Activity 13: Refine pass — the single session-improvement rung.
         # Runs independent of did_llm: refine has its own budget, bounded to
@@ -1384,13 +1374,14 @@ Output valid JSON only. No markdown fences. /no_think"""
         self._bump("notifications_pruned", await asyncio.to_thread(retention.prune_notifications))
 
     async def _cleanup_canary_runs(self) -> None:
-        """Activity 12c — canary run/session retention plus the staleness
-        nudge, and the two retention sweeps that had no home: worker sessions
-        and terminal dream hypotheses."""
+        """Activity 12c — canary run/session retention plus the purge of the
+        retired-canary quarantine, and the two retention sweeps that had no
+        home: worker sessions and terminal dream hypotheses."""
         from core import retention
+        from core.canary.maintain import purge_quarantine
 
         await retention.prune_canary_runs()
-        await retention.nudge_stale_canaries()
+        self._bump("canaries_purged", len(await asyncio.to_thread(purge_quarantine)))
         self._bump("worker_sessions_pruned", await retention.prune_worker_sessions())
         # The result manifests those transcripts leave behind, on their own
         # much longer window — a worker's transcript is debugging residue, its
@@ -1413,17 +1404,6 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         result = await asyncio.to_thread(retention.prune_archived_sessions)
         self._bump("archived_sessions_pruned", int(result.get("count") or 0))
-
-    async def _canary_maintain(self) -> None:
-        """Activity 12d — one canary auto-maintenance sweep. Never raises."""
-        try:
-            from core.canary.maintain import run_maintenance
-
-            stats = await run_background(run_maintenance, self._is_cancelled)
-            for key in ("promoted", "settled_flaky", "flaky_tagged", "demoted", "purged"):
-                self._bump(f"canaries_{key}", len(stats.get(key) or []))
-        except Exception as e:
-            logger.warning("Snooze canary maintenance failed: %s", e)
 
     async def _cleanup_rlm_runs(self) -> None:
         """Activity 12a — RLM run dirs past rlm_run_retention_days."""

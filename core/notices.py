@@ -90,12 +90,6 @@ CATEGORIES: dict[str, Category] = {
     "jobs.test_failed": Category("bell", legacy_urgency="high", legacy_emit="sse"),
     # --- canary suite (synthetic tests; the Canary tab is the surface) -----
     "canary.contaminated": Category("log"),
-    "canary.probe_retired": Category("log"),
-    "canary.parked": Category("bell", coalesce=True),
-    "canary.suite_chronic": Category("log"),
-    "canary.suite_unhealthy": Category("bell", coalesce=True, legacy_urgency="high"),
-    "canary.maintenance": Category("log", dedup_daily=True),
-    "canary.stale": Category("log"),
     # --- skills --------------------------------------------------------------
     "skills.verify_unsafe": Category("bell"),
     "skills.auto_rolled_back": Category("bell", legacy_urgency="high"),
@@ -134,7 +128,7 @@ _warned_unknown: set[str] = set()
 
 
 def area_of(category: str) -> str:
-    """The area is the part before the dot: 'canary.parked' -> 'canary'."""
+    """The area is the part before the dot: 'jobs.failed' -> 'jobs'."""
     return category.split(".", 1)[0] if "." in category else category
 
 

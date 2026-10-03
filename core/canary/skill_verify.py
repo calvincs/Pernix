@@ -1,5 +1,9 @@
 """Pernix — skill-change detection + verify-block sync (the skills⇄canary bridge).
 
+NOTE (3.2): the canary maintenance sweep that called sync_and_detect is
+gone, so nothing in the running app calls this module any more. It stays
+until the skill self-healing prune removes it with the rollback path.
+
 Skills are the one machine-editable surface that had no measurement at all:
 no content hash, no change event, no behavioral test — only a syntax
 pre-flight. This module closes both gaps from the maintenance sweep (idle
@@ -7,9 +11,9 @@ by construction, and a watermark scan catches every mutation path including
 hand edits — the same reason `skill_reqs_hash:` lives there):
 
   detect — sha256 over each SKILL.md, watermarked in snooze_state under
-           `skill_hash:{name}`. A changed skill triggers ONE targeted sweep
-           of every canary covering `skill:{name}`. First sight only sets
-           the watermark — a fresh deploy must not stampede the suite.
+           `skill_hash:{name}`. First sight only sets the watermark. (A
+           changed skill no longer triggers a targeted canary sweep; that
+           trigger was cut in 3.2.)
   sync   — a skill may embed its own behavioral test as a `verify:` block
            (prompt, gates, files?, timeout?) in SKILL.md frontmatter. It is
            materialized as the MANAGED canary `skill--{name}` with
@@ -433,25 +437,5 @@ def sync_and_detect(base: Path | None = None, canaries_base: Path | None = None,
             check_verify_rollbacks(canaries_base, stats)
         except Exception as e:
             logger.warning("Verify-failure rollback check failed: %s", e)
-
-    # One targeted sweep for everything that changed — per-name enqueues at
-    # the same instant would race the skip-not-queue sweep lock.
-    if stats["skills_changed"] and not is_cancelled():
-        try:
-            from core.extensions.scheduling import enqueue_targeted_sweep
-
-            covered_names: list[str] = []
-            wanted = {f"skill:{n}" for n in stats["skills_changed"]}
-            for c in scan_canaries(canaries_base):
-                if wanted & set(c.covers):
-                    covered_names.append(c.name)
-            if covered_names and enqueue_targeted_sweep(covered_names, reason="skill-change"):
-                logger.info(
-                    "Skill change (%s) → targeted canary sweep: %s",
-                    ", ".join(stats["skills_changed"]),
-                    ", ".join(covered_names),
-                )
-        except Exception as e:
-            logger.warning("Skill-change sweep enqueue failed: %s", e)
 
     return stats

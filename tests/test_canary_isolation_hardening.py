@@ -376,10 +376,10 @@ def test_a_sibling_generate_py_is_enough_without_the_frontmatter_flag(tmp_path):
     assert c.generated is True
 
 
-def test_the_flag_alone_parses_so_maintenance_rewrites_survive(tmp_path):
+def test_the_flag_alone_parses_so_frontmatter_rewrites_survive(tmp_path):
     """core/canary/maintain.py revalidates a rewritten CANARY.md in a bare
     temp directory. Without the frontmatter flag, every generated canary
-    would be frozen out of park/flaky/probe maintenance by a parse error."""
+    would fail that rewrite (the "reviewed" button) with a parse error."""
     from core.canary.parser import parse_canary_md
 
     c = parse_canary_md(_write_generated_canary(tmp_path, "gen-flagonly", with_py=False))

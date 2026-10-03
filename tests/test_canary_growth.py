@@ -2,8 +2,7 @@
 
 The suite no longer grows itself (3.2): refine proposes no canaries and
 nothing auto-admits one. What stays is the create API's write path and the
-advisory gate-command proof. A stale last_reviewed nudges exactly once per
-(name, date).
+advisory gate-command proof.
 """
 
 from pathlib import Path
@@ -56,40 +55,6 @@ def test_materialize_refuses_duplicates_and_invalid(tmp_path):
     assert name2 is None and "already exists" in err2
     name3, err3 = materialize_canary(dict(_SPEC, name="valid-name", prompt=""), base=base)
     assert name3 is None and "prompt" in err3
-
-
-# ---------------------------------------------------------------------------
-# Staleness nudge
-# ---------------------------------------------------------------------------
-
-
-async def test_staleness_nudge_once_per_review_date(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-
-    from core.snooze import SnoozeRunner
-
-    stale = SimpleNamespace(name="old-canary", last_reviewed="2025-01-01", flaky=False)
-    fresh = SimpleNamespace(name="new-canary", last_reviewed="2099-01-01", flaky=False)
-    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [stale, fresh])
-    monkeypatch.setattr("db.models.list_sessions", lambda limit=500: [])
-
-    runner = SnoozeRunner.__new__(SnoozeRunner)
-    runner._stats = {}
-    await SnoozeRunner._cleanup_canary_runs(runner)
-    # canary.stale is log-tier, so the nudge lives in the activity log, not the bell.
-    notes = [n for n in db.list_notifications("log") if "stale" in (n.get("title") or "")]
-    assert len(notes) == 1 and "old-canary" in notes[0]["title"]
-
-    # Second sweep: watermarked, no duplicate.
-    await SnoozeRunner._cleanup_canary_runs(runner)
-    notes = [n for n in db.list_notifications("log") if "stale" in (n.get("title") or "")]
-    assert len(notes) == 1
-
-    # Human bumps the date past 90d ago -> re-arms.
-    stale.last_reviewed = "2025-06-01"
-    await SnoozeRunner._cleanup_canary_runs(runner)
-    notes = [n for n in db.list_notifications("log") if "stale" in (n.get("title") or "")]
-    assert len(notes) == 2
 
 
 # ---------------------------------------------------------------------------

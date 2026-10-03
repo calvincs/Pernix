@@ -775,8 +775,8 @@ async def _init_scheduler_async():
 
 # One sweep at a time. A second trigger firing mid-sweep skips rather than
 # queues — canaries measure, they don't backlog. The exception is a sweep
-# whose meta says must_run (full sweeps after a model swap or deploy, and
-# coverage-triggered sweeps): those reschedule themselves instead of being
+# whose meta says must_run (full sweeps after a model swap, a deploy or
+# "Run all"): those reschedule themselves instead of being
 # silently eaten by a sweep that happened to be in flight.
 _canary_sweep_lock = asyncio.Lock()
 
@@ -843,45 +843,9 @@ def enqueue_manual_canary(name: str) -> bool:
     return True
 
 
-def enqueue_targeted_sweep(names: list[str], reason: str) -> bool:
-    """Fire a coverage-triggered set of canaries as ONE job.
-
-    One job, not one per name: enqueue_manual_canary calls landing at the
-    same instant would race the skip-not-queue sweep lock and all but the
-    first would be silently dropped. must_run so a sweep in flight
-    defers rather than eats the probe.
-    """
-    names = [n for n in names if n]
-    if not names or not settings.canary_enabled:
-        return False
-    scheduler = _get_scheduler()
-    if not scheduler:
-        return False
-    from apscheduler.triggers.date import DateTrigger
-
-    job_id = f"_canary_targeted_{reason}"
-    scheduler.add_job(
-        _execute_canary_sweep_job,
-        trigger=DateTrigger(run_date=datetime.now(timezone.utc)),
-        id=job_id,
-        replace_existing=True,
-        kwargs={
-            "meta": {
-                "kind": "canary",
-                "transient": True,
-                "trigger": "manual",
-                "names": names,
-                "must_run": True,
-                "job_id": job_id,
-            }
-        },
-    )
-    return True
-
-
 def enqueue_full_sweep(reason: str, delay_s: int = 0) -> bool:
     """A the-world-changed sweep (model swap, deploy, 'Run all'): every
-    canary including parked ones, must_run so nothing in flight eats it."""
+    canary, must_run so nothing in flight eats it."""
     if not settings.canary_enabled:
         return False
     scheduler = _get_scheduler()

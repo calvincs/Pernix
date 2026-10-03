@@ -27,9 +27,6 @@ def _def_payload(d, stats=None) -> dict:
         "generated": d.generated,
         "covers": d.covers,
         "flaky": d.flaky,
-        "parked": d.parked,
-        "max_runs": d.max_runs,
-        "expires": d.expires,
         "gates": [g["name"] for g in d.gates],
         "timeout": d.timeout,
         "last_reviewed": d.last_reviewed,
@@ -81,8 +78,8 @@ async def trigger_run(body: dict = {}):
     if not name:
         raise HTTPException(400, detail="name is required ('*' runs the whole suite)")
     if name == "*":
-        # "Run all" means all: a full sweep includes parked canaries, and
-        # must_run means a sweep in flight defers it instead of eating it.
+        # "Run all" means all, and must_run means a sweep in flight defers
+        # it instead of eating it.
         if not enqueue_full_sweep("run-all"):
             raise HTTPException(503, detail="scheduler unavailable")
         return {"queued": "*"}
@@ -168,34 +165,9 @@ async def update_canary(name: str, body: dict = {}):
     return {"updated": got}
 
 
-@router.patch("/api/canary/{name}")
-async def patch_canary(name: str, body: dict = {}):
-    """Park or unpark (mirrors the skills PATCH enable/disable idiom)."""
-    from core.canary import load_canary
-    from core.canary.maintain import _rewrite_frontmatter
-
-    d = await _asyncio.to_thread(load_canary, name)
-    if d is None or d.path is None:
-        raise HTTPException(404, detail=f"no canary named '{name}'")
-    if "parked" not in body:
-        raise HTTPException(400, detail="body needs {'parked': true|false}")
-    parked = bool(body["parked"])
-    if parked == d.parked:
-        return {"name": name, "parked": parked, "changed": False}
-    ok = await _asyncio.to_thread(_rewrite_frontmatter, d.path, {"parked": parked})
-    if not ok:
-        raise HTTPException(500, detail="frontmatter rewrite failed — see logs")
-    if not parked:
-        # The user unparked it, which answers the "Canary parked" bell item.
-        from core import notices
-
-        notices.resolve("canary.parked", name)
-    return {"name": name, "parked": parked, "changed": True}
-
-
 @router.post("/api/canary/{name}/reviewed")
 async def mark_reviewed(name: str):
-    """Bump last_reviewed to today (answers the staleness nudge)."""
+    """Bump last_reviewed to today."""
     from core.canary import load_canary
     from core.canary.maintain import _rewrite_frontmatter
 

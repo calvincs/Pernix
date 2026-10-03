@@ -232,17 +232,14 @@ The long-running-autonomy substrate: deterministic gates Reflect cannot overrule
 
 ## Canary Suite
 
-Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — never on a schedule. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Self-tuning → Self-checks tab. How it works: [internals/canary.md](internals/canary.md).
+Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: the whole suite runs after a deploy or a model swap, and any canary runs when you press Run — never on a schedule. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, retire) surface in the Explorer's Self-tuning → Self-checks tab. How it works: [internals/canary.md](internals/canary.md).
 
 | Setting | Default | Description |
 |---|---|---|
 | `canary_enabled` | `false` | Master switch for the suite: sweeps, the `canary_run` / `canary_status` tools, and the API. |
 | `canaries_dir` | `data/canaries` | Directory scanned for `<name>/CANARY.md` task definitions. |
 | `canary_retention_days` | `30` | Age after which Snooze prunes `canary_runs` rows and their sessions. |
-| `canary_auto_maintain` | `true` | Maintenance sweep: promotes vetted canaries, tags flapping ones flaky, parks long-green ones, syncs skill verify blocks, retires exhausted probes. A canary whose latest run failed is never auto-mutated — except that a red run un-parks. |
-| `canary_vetting_runs` | `3` | Consistent runs required to promote a canary out of vetting. |
-| `canary_park_after_passes` | `25` | Consecutive passes before a canary is parked (off the heartbeat, still in the suite; any red run un-parks it). Replaces `canary_retire_after_passes`. |
-| `canary_purge_after_days` | `30` | Retired canaries (DELETE API, exhausted probes) sit in `.retired/` this long before deletion — the undo window. |
+| `canary_purge_after_days` | `30` | Retired canaries (`DELETE /api/canary/{name}`) sit in `.retired/` this long before snooze retention deletes them — the undo window. |
 
 ---
 
@@ -546,7 +543,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `audio_model_overrides` | *(empty list)* | Force `supports_audio = true` for models where auto-detection misses audio capability. |
 | `backup_keep_count` | `7` | Timestamped snapshots kept in `data/backups` by the 24h backup tier. Rotation is per-artifact (DB snapshots and memory corpora rotate independently), so a restore always has a matching pair, and it counts every database snapshot in the directory whatever naming scheme wrote it — see [Storage](#storage). Clamped to 0–90 at use time; `0` disables scheduled backups (and rotation then removes nothing, rather than reading the zero as "delete what I have"). Edit it under Settings → Storage → Backup schedule. |
 | `tool_executor_workers` | `32` | Threads in the tool-call pool. Tools run on their own pool so they can never occupy asyncio's default executor, which every API route needs for its DB reads. Occupants are blocked on IO, so raising it costs memory and PIDs rather than throughput. |
-| `background_executor_workers` | `8` | Threads for long-running idle-time background work (dream deep probes, canary maintenance, synthesis, backups, memory dedup). Small on purpose: occupants are heavyweight and idle-time-only. |
+| `background_executor_workers` | `8` | Threads for long-running idle-time background work (dream deep probes, synthesis, backups, memory dedup). Small on purpose: occupants are heavyweight and idle-time-only. |
 
 ---
 
