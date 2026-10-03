@@ -12,16 +12,25 @@ So every canary run is read back afterwards and asked three questions:
   1. Did it call a memory tool? (It has none on its allowlist. If one
      answered, the fence has a hole.)
   2. Did it touch an absolute path outside its temp workspace? Toolchain
-     paths (/usr, /bin, …) do not count — reading Pernix's own data
-     directory, another session's files, or the repository does.
-  3. Does the transcript name another canary, or `data/canaries`? That is
-     the suite reading its own answer key, whichever way it got there.
+     paths (/usr, /bin, …), the skills directory (a canary may load the
+     skill it tests) and the served-fixture directory do not count —
+     reading Pernix's own data directory, another session's files, or the
+     repository does. A single-segment token (`/ERROR`, `/1000`, `/512`) is
+     prose or arithmetic far more often than a path, so it only counts when
+     it names a known data root.
+  3. Does the transcript point at `data/canaries` or at another canary's
+     directory? That is the suite reading its own answer key. Another
+     canary's bare NAME is not a finding: generated canaries share words
+     (`gen-grep-count` contains `grep-count`), and naming a task is not
+     reading its answer.
 
 A hit sets ``canary_runs.outcome = 'contaminated'``. The scored `passed`
 value is preserved exactly as the gates returned it — the run is not
 rewritten, it is disqualified: it is counted apart from passes and failures,
-so a compromised run cannot vouch for the pipeline. One notification per contaminated run; silence is how the last
-version of this failure lasted for the life of the feature.
+so a compromised run cannot vouch for the pipeline. It is a RECORD, not an
+alarm (3.2): the finding lands on the run row and in the Canary tab, and no
+notification is raised. On the reference box almost every contaminated run
+was a false positive of this heuristic, and each one was a notice.
 
 This is detection, not prevention. Bash is on the canary allowlist because
 the seed tasks need it, so the workspace is a fence and not a jail; the scan
@@ -65,6 +74,14 @@ _ABS_PATH_RE = re.compile(r"(?<![\w=:/])/[\w.\-+@]+(?:/[\w.\-+@]+)*")
 # The canary directory itself, however it is spelled.
 _SUITE_DIR_RE = re.compile(r"data[/\\]canaries")
 
+# Single-segment absolute tokens only count when they name one of these.
+# Everything else ("/ERROR", "/1000") is prose, a regex or arithmetic.
+_DATA_ROOT_MARKERS = ("/app/data", "data/memories", "sessions.db")
+
+# Runner-written served fixtures live under this workspace subdirectory
+# (core/canary/runner.py); fetching or reading them is the task.
+SERVE_DIRNAME = ".canary-serve"
+
 
 def _tool_calls(row: dict) -> list[dict]:
     raw = row.get("tool_calls")
@@ -77,16 +94,41 @@ def _tool_calls(row: dict) -> list[dict]:
     return [c for c in calls if isinstance(c, dict)] if isinstance(calls, list) else []
 
 
+def _exempt_roots() -> tuple[str, ...]:
+    """Absolute directories a canary may legitimately read: the skills dir."""
+    try:
+        from config import settings
+
+        return (str(Path(settings.skills_dir).resolve()).rstrip("/") + "/",)
+    except Exception:
+        return ()
+
+
+def _is_outside_path(raw: str, workspace: str, exempt: tuple[str, ...]) -> bool:
+    if workspace and (raw == workspace or raw.startswith(workspace.rstrip("/") + "/")):
+        return False
+    if raw.startswith(SYSTEM_PREFIXES):
+        return False
+    if f"/{SERVE_DIRNAME}/" in raw + "/":
+        return False
+    if any((raw.rstrip("/") + "/").startswith(root) for root in exempt):
+        return False
+    if len([seg for seg in raw.split("/") if seg]) >= 2:
+        return True
+    return any(marker in raw for marker in _DATA_ROOT_MARKERS)
+
+
 def _outside_workspace(text: str, workspace: str) -> list[str]:
-    """Absolute paths in `text` that are neither workspace nor toolchain."""
-    hits = []
-    for raw in _ABS_PATH_RE.findall(text or ""):
-        if workspace and (raw == workspace or raw.startswith(workspace.rstrip("/") + "/")):
-            continue
-        if raw.startswith(SYSTEM_PREFIXES):
-            continue
-        hits.append(raw)
-    return hits
+    """Absolute paths in `text` that are neither workspace, toolchain, the
+    skills directory nor a served fixture — and that look like paths."""
+    exempt = _exempt_roots()
+    return [raw for raw in _ABS_PATH_RE.findall(text or "") if _is_outside_path(raw, workspace, exempt)]
+
+
+def _names_canary_dir(name: str, text: str) -> bool:
+    """True when `text` points at another canary's DIRECTORY
+    (`canaries/<name>`, any separator) — not when it merely says the name."""
+    return re.search(rf"canaries[/\\]+{re.escape(name)}(?![\w-])", text or "") is not None
 
 
 def _other_canary_names(current: str, known: list[str] | None) -> list[str]:
@@ -145,19 +187,16 @@ def scan_session(
         uniq = sorted(set(outside))[:5]
         findings.append(f"read outside the workspace: {', '.join(uniq)}")
 
-    # The transcript itself — assistant prose, tool results, the reflect row.
-    # Content, not just tool args: a canary that was *told* another canary's
-    # name is contaminated whether or not it acted on it.
+    # The transcript itself — assistant prose, tool results, the reflect row —
+    # plus the tool arguments: a path into the suite is a finding wherever it
+    # appears.
     blob = "\n".join(str(m.get("content") or "") for m in messages or [])
+    blob += "\n" + "\n".join(str(c.get("arguments") or c) for m in messages or [] for c in _tool_calls(m))
     if _SUITE_DIR_RE.search(blob):
         findings.append("transcript references data/canaries")
-    named = [
-        other
-        for other in _other_canary_names(canary_name, known_canaries)
-        if re.search(rf"(?<![\w-]){re.escape(other)}(?![\w-])", blob)
-    ]
+    named = [other for other in _other_canary_names(canary_name, known_canaries) if _names_canary_dir(other, blob)]
     if named:
-        findings.append(f"transcript names other canaries: {', '.join(sorted(named)[:5])}")
+        findings.append(f"transcript points at other canaries' directories: {', '.join(sorted(named)[:5])}")
 
     return findings
 
@@ -174,28 +213,3 @@ def contamination_record(findings: list[str]) -> dict:
         "output_tail": detail[:1500],
         "findings": findings,
     }
-
-
-def notify(canary_name: str, session_id: str, findings: list[str]) -> None:
-    """One activity-log line per contaminated run (the Canary tab shows the run)."""
-    from core import notices
-
-    try:
-        notices.notify(
-            "canary.contaminated",
-            f"Canary run contaminated: {canary_name}",
-            (
-                f"Session {session_id[:12]} broke canary isolation, so the run was "
-                f"recorded as outcome='contaminated' and is counted apart from passes "
-                f"and failures. Findings: {'; '.join(findings)[:400]}. "
-                "The scored gate result is kept as-is — check whether a tool lost its "
-                "canary denial, or whether a skill body is steering the agent out of "
-                "its workspace."
-            ),
-            session_id=session_id,
-            session_type="canary",
-            subject=canary_name,
-            link={"kind": "tab", "tab": "canary"},
-        )
-    except Exception as e:
-        logger.warning("Contamination notification failed for '%s': %s", canary_name, e)
