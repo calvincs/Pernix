@@ -140,6 +140,12 @@ const SECTIONS = [
             { key: 'max_tool_rounds', label: 'Max Tool Rounds', type: 'number' },
             { key: 'scout_enabled', label: 'Scout Enabled', type: 'bool' },
             { key: 'scout_timeout', label: 'Scout Timeout (seconds)', type: 'number' },
+            {
+                key: 'scout_max_rounds',
+                label: 'Scout Rounds',
+                type: 'number',
+                hint: 'Rounds the planner may use before the turn starts. 1 is fastest.',
+            },
             { key: 'forced_followup_enabled', label: 'Forced Follow-up Nudge', type: 'bool' },
             { key: 'forced_followup_max_per_turn', label: 'Max Forced Follow-ups / Turn', type: 'number', min: 0, max: 5 },
         ],

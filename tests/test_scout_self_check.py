@@ -276,17 +276,21 @@ def test_scout_baseline_tool_discovery_omits_disabled(tmp_path, monkeypatch):
     assert "search_one" not in names
 
 
-def test_revision_budget_constants():
-    """Item #5: scout gets up to 2 revision rounds, SCOUT_MAX_ROUNDS=6.
+def test_revision_budget_constants(monkeypatch):
+    """Item #5: scout gets up to 2 revision rounds when it runs multi-round
+    (scout_max_rounds=6, the pre-3.2 default and today's ceiling).
 
     Round budget accounts for: 1-3 discovery, 4 submit, 5-6 revisions.
     """
+    from config import settings
     from core.scout import runner
 
+    monkeypatch.setattr(settings, "scout_max_rounds", 6)
     assert runner._MAX_REVISIONS == 2
-    assert runner.SCOUT_MAX_ROUNDS == 6
+    assert runner.SCOUT_MAX_ROUNDS_CAP == 6
+    assert runner._scout_max_rounds() == 6
     # Must have at least 1 non-revision round in addition to the revisions.
-    assert runner.SCOUT_MAX_ROUNDS > runner._MAX_REVISIONS
+    assert runner._scout_max_rounds() > runner._MAX_REVISIONS
 
 
 def test_extract_report_clamps_workers_mode_to_inline():
@@ -485,9 +489,10 @@ def test_revision_on_penultimate_round_can_still_be_honored():
     """Guard the arithmetic: a revision granted at round N must leave a round
     that can call submit_report.
     """
-    from core.scout.runner import _SCOUT_SUBMIT_ONLY, SCOUT_MAX_ROUNDS
+    from core.scout.runner import _SCOUT_SUBMIT_ONLY, SCOUT_MAX_ROUNDS_CAP
 
-    last_round_with_revision_slot = SCOUT_MAX_ROUNDS - 2  # rounds_remaining == 1
+    max_rounds = SCOUT_MAX_ROUNDS_CAP  # the revision loop only exists multi-round
+    last_round_with_revision_slot = max_rounds - 2  # rounds_remaining == 1
     next_round = last_round_with_revision_slot + 1
-    assert next_round == SCOUT_MAX_ROUNDS - 1, "revision lands on the final round"
+    assert next_round == max_rounds - 1, "revision lands on the final round"
     assert _SCOUT_SUBMIT_ONLY, "and that round must still offer submit_report"

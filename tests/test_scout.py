@@ -329,3 +329,185 @@ def test_scout_prompt_stacks_conditional_rules(monkeypatch):
     assert "RECURSIVE ANALYSIS" in prompt
     assert "STRUCTURAL SPECS" in prompt
     assert prompt.rstrip().endswith("/no_think")
+
+
+# ---------------------------------------------------------------------------
+# scout_max_rounds (2026-10 surface prune): one planning round by default
+# ---------------------------------------------------------------------------
+
+_GOOD_REPORT = {
+    "recommended_tools": [],
+    "approach_guidance": "1. Read the file.\n2. Count the errors.\n3. Report the count to the user.",
+    "task_type": "data_analysis",
+}
+
+
+def _scout_env(monkeypatch, responses, rounds):
+    """Drive the real _run_scout_llm loop against scripted LLM responses."""
+    from unittest.mock import MagicMock
+
+    from tests.conftest import FakeLLMClient
+
+    fake = FakeLLMClient(responses=responses)
+    fake.has_capacity = MagicMock(return_value=True)
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
+    monkeypatch.setattr("core.memory.store.get_memory_store", lambda: None)
+    monkeypatch.setattr("db.models.search_messages_fts", lambda *a, **kw: [])
+    monkeypatch.setattr(settings, "background_model", "")
+    monkeypatch.setattr(settings, "llm_model", "test-model")
+    monkeypatch.setattr(settings, "scout_max_rounds", rounds)
+    return fake
+
+
+def _resp(content="", tool_calls=None):
+    from core.llm.types import ChatResponse, TokenUsage
+
+    return ChatResponse(
+        content=content,
+        tool_calls=tool_calls,
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        model="test-model",
+        provider="fake",
+        finish_reason="tool_calls" if tool_calls else "stop",
+    )
+
+
+def _call(name, args, cid="c1"):
+    import json
+
+    from core.llm.types import ToolCall
+
+    return ToolCall(id=cid, name=name, arguments=json.dumps(args))
+
+
+def _tool_names(tools):
+    return [t["function"]["name"] for t in tools or []]
+
+
+async def test_one_round_offers_only_submit_report_and_returns_a_valid_report(monkeypatch):
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("submit_report", _GOOD_REPORT)])], rounds=1)
+
+    report = await _run_scout_llm("count the errors in log.txt", SessionBrief(session_id="s", is_fresh=True))
+
+    assert len(fake.calls) == 1
+    assert _tool_names(fake.calls[0]["tools"]) == ["submit_report"]
+    system = fake.calls[0]["messages"][0]["content"]
+    assert "call submit_report now" in system
+    assert "PROCEDURE" not in system and "search_post_mortems" not in system
+    assert report.scout_rounds == 1
+    assert report.from_fallback is False
+    assert report.approach_guidance.startswith("1. Read the file.")
+    assert report.task_type == "data_analysis"
+    assert report.viability == "verified"  # the post-loop self-check ran
+
+
+async def test_one_round_parses_a_json_text_answer(monkeypatch):
+    import json
+
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(content=json.dumps(_GOOD_REPORT))], rounds=1)
+    report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert len(fake.calls) == 1
+    assert report.from_fallback is False and report.scout_rounds == 1
+    assert report.approach_guidance.startswith("1. Read the file.")
+
+
+async def test_one_round_that_calls_a_search_tool_degrades_instead_of_looping(monkeypatch):
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("search_memory", {"query": "x"})])], rounds=1)
+    report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert len(fake.calls) == 1
+    assert report.from_fallback is True and report.fallback_reason == "degraded"
+
+
+async def test_six_rounds_keep_the_search_tools_and_the_round_budget(monkeypatch):
+    """scout_max_rounds=6 is the pre-3.2 behaviour: search first, then submit."""
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(
+        monkeypatch,
+        [
+            _resp(tool_calls=[_call("search_skills", {"query": "logs"}, "c1")]),
+            _resp(tool_calls=[_call("submit_report", _GOOD_REPORT, "c2")]),
+        ],
+        rounds=6,
+    )
+    report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+
+    assert len(fake.calls) == 2
+    first = _tool_names(fake.calls[0]["tools"])
+    assert "search_skills" in first and "submit_report" in first
+    system = fake.calls[0]["messages"][0]["content"]
+    assert "PROCEDURE" in system and "maximum of 6 tool rounds" in system
+    assert "by round 5 at the latest" in system
+    assert report.scout_rounds == 2 and report.viability == "verified"
+
+
+async def test_six_rounds_offer_submit_only_on_the_last_round(monkeypatch):
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("search_skills", {"query": "x"})])], rounds=6)
+    report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert len(fake.calls) == 6
+    assert all("search_skills" in _tool_names(c["tools"]) for c in fake.calls[:5])
+    assert _tool_names(fake.calls[5]["tools"]) == ["submit_report"]
+    assert report.from_fallback is True and report.scout_rounds == 6
+
+
+def test_scout_max_rounds_is_clamped_and_bounded(monkeypatch):
+    from api.routers.health import _SETTING_BOUNDS
+    from core.scout.runner import SCOUT_MAX_ROUNDS_CAP, _scout_max_rounds
+
+    assert settings.__class__().scout_max_rounds == 1
+    assert _SETTING_BOUNDS["scout_max_rounds"] == (1, SCOUT_MAX_ROUNDS_CAP)
+    for value, expected in ((0, 1), (1, 1), (3, 3), (6, 6), (99, 6), ("x", 1)):
+        monkeypatch.setattr(settings, "scout_max_rounds", value)
+        assert _scout_max_rounds() == expected, value
+
+
+def test_scout_prompt_states_the_configured_round_budget():
+    from core.scout.runner import SCOUT_SYSTEM_PROMPT, _scout_system_prompt
+
+    assert "call submit_report now" in SCOUT_SYSTEM_PROMPT
+    assert "search_memory" not in SCOUT_SYSTEM_PROMPT.split("REPORT FIELD GUIDANCE")[0]
+    three = _scout_system_prompt(3)
+    assert "maximum of 3 tool rounds" in three and "by round 2 at the latest" in three
+    for prompt in (SCOUT_SYSTEM_PROMPT, three):
+        assert "REPORT FIELD GUIDANCE" in prompt and prompt.rstrip().endswith("/no_think")
+
+
+async def test_scout_done_event_carries_fallback_reason(monkeypatch):
+    import json
+
+    from db import models as db
+    from sessions import state_v2 as sv2
+    from sessions.manager import SessionManager
+
+    async def _runner(session_id, message, session, pre_saved=False, is_retry=False):
+        return None
+
+    reasons = []
+    for report in (
+        ScoutReport(approach_guidance="1. a\n2. b\n3. c"),
+        ScoutReport(approach_guidance="plan", from_fallback=True, fallback_reason="bypass"),
+        ScoutReport(approach_guidance="plan", from_fallback=True),
+    ):
+
+        async def _fake_run_scout(session_id, message, brief=None, emit=None, is_retry=False, _r=report):
+            return _r
+
+        monkeypatch.setattr("core.scout.runner.run_scout", _fake_run_scout)
+        mgr = SessionManager()
+        mgr.set_agent_runner(_runner)
+        sid = mgr.create_session(title="scout event")
+        session = mgr.get(sid)
+        sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+        await mgr._run_scout_and_process(session, "go")
+        rows = [m for m in db.get_messages(sid) if m["role"] == "scout"]
+        reasons.append(json.loads(rows[-1]["content"])["fallback_reason"])
+
+    assert reasons == [None, "bypass", "degraded"]

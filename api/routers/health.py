@@ -244,6 +244,7 @@ _SETTING_BOUNDS = {
     "max_fetch_size": (1024, 10_000_000),
     "browser_timeout": (5, 120),
     "scout_timeout": (5, 300),
+    "scout_max_rounds": (1, 6),
     "compaction_threshold": (0.1, 0.95),
     "context_critical_threshold": (0.5, 0.99),
     "max_pending_messages": (1, 100),

@@ -3063,6 +3063,12 @@ class SessionManager:
             "injected_skill_name": scout_report.injected_skill_name,
             "from_cache": scout_report.from_cache,
             "from_fallback": scout_report.from_fallback,
+            # Why the deterministic report was used — "bypass" (cheap turn,
+            # skipped on purpose) or "degraded" (scout ran and produced nothing
+            # usable); None for a real scout report. Lets the box count them.
+            "fallback_reason": (
+                (getattr(scout_report, "fallback_reason", "") or "degraded") if scout_report.from_fallback else None
+            ),
             "latency_ms": scout_report.scout_latency_ms,
             "scout_model": scout_report.scout_model,
             # Observability fields (2026-08-28 scout audit): these existed on
