@@ -269,7 +269,7 @@ class AgentSession:
     # Per-session model override (for workers with specific model needs)
     model_override: str | None = None
 
-    # Per-dispatch tool allow-list for scheduled (cron/heartbeat) runs. Set by
+    # Per-dispatch tool allow-list for scheduled (cron) runs. Set by
     # the scheduling extension from the job's `allowed_tools` field before the
     # prompt is dispatched, cleared in the same finally as model_override.
     # When set it is EXCLUSIVE: the schema builder intersects the active tool

@@ -19,7 +19,7 @@ data/
   certs/               # TLS certs for network mode — NOT wiped on rebuild
   sessions.db          # SQLite: sessions, messages, token usage
   settings.json        # User settings (persists across rebuilds)
-  tools.json           # Custom tools created by the agent (toolmaker)
+  tools.json           # Disabled tools + safety-level overrides (Tools panel)
   logs/                # Application logs
 ```
 
@@ -30,5 +30,5 @@ The `bash` tool runs with CWD = `workspace/`. File tools (`file_read`, `file_wri
 `file_edit`) take paths relative to `workspace/` (e.g. `"myproject/app.html"`).
 Use `glob("**/*.html")` to find files by pattern.
 
-**Skills** are semi-protected domain expertise packages. The agent can read them freely
-but writes require user approval via `ask_user`.
+**Skills** are domain expertise packages (`skills/<name>/SKILL.md` plus optional
+scripts). Edit them in the Skills panel; the agent writes them with `bash`.

@@ -28,9 +28,9 @@ When both providers offer a model with the same name, **Ollama wins** (local, fr
 
 There used to be a DuckDuckGo fallback; it was removed because it produced unreliable results. The Tavily key is now the gate.
 
-### Why does the agent ask me to confirm things like web searches or creating a skill?
+### Why does the agent ask me to confirm things like web searches?
 
-That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `create_skill`, and any MCP tool whose server marks it destructive) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
+That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `add_gate`, and any MCP tool whose server marks it destructive) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
 
 Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Tools & safety → Remembered Approvals**.
 
@@ -201,7 +201,7 @@ Write a **skill**. Skills are just markdown files with YAML frontmatter, optiona
 
 ### How do I add a custom tool?
 
-Use the **toolmaker** extension's `create_tool` to author a Python tool from inside a chat — no code changes to Pernix itself. See [authoring/custom-tools.md](authoring/custom-tools.md).
+Write a skill that bundles a script (the agent runs it under `bash`), or connect an MCP server. The in-chat toolmaker (`create_tool`) was removed in 3.2. See [authoring/writing-skills.md](authoring/writing-skills.md) and [mcp.md](mcp.md).
 
 ---
 

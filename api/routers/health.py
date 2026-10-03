@@ -242,7 +242,6 @@ _SETTING_BOUNDS = {
     "scout_timeout": (5, 300),
     "compaction_threshold": (0.1, 0.95),
     "context_critical_threshold": (0.5, 0.99),
-    "plan_review_timeout": (10, 600),
     "max_pending_messages": (1, 100),
     "notify_webhook_timeout": (1, 60),
     "port": (1024, 65535),

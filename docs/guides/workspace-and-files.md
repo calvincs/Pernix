@@ -20,12 +20,12 @@ data/workspace/
 ├── scratch/                  # ad-hoc files
 ├── dreams/                   # Dream reports (DREAM-<date>.md) — written during idle introspection
 ├── rlm/{run_id}/             # RLM run residue (trace, staged context) — self-purges
-└── .venv/                    # auto-managed venv for custom tools (not for dev use)
+└── .venv/                    # workspace venv for bash, repl and skill scripts (not for dev use)
 ```
 
 The agent organizes outputs into subdirectories by project where it can.
 
-> **Don't confuse the workspace venv with the project venv.** `data/workspace/.venv/` is created on demand by the `toolmaker` extension when a custom tool installs Python packages. The dev venv is `.venv/` at the repo root.
+> **Don't confuse the workspace venv with the project venv.** `data/workspace/.venv/` is the venv `bash`, `repl` and skill scripts run in; `install_package` creates it on demand. The dev venv is `.venv/` at the repo root.
 
 ---
 

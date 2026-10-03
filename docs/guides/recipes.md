@@ -112,7 +112,7 @@ If you want the agent to pause for input on tricky reclassifications, remove the
 
 **What it does:** turn a multi-step prompt you keep typing into a reusable skill.
 
-**Features used:** skillmaker.
+**Features used:** skills.
 
 ### When to do this
 
@@ -128,8 +128,8 @@ If you find yourself prompting the same procedure more than 2–3 times — same
 > *4. Combine into a 600-word brief with these sections: 'Snapshot', 'Recent financials', 'Material recent events', 'Watchlist questions'.*
 > *5. Save to `data/workspace/projects/companies/{ticker}.md`.*
 >
-> *Make this into a reusable skill called `company-brief` so next time I can just say "use the company-brief skill on AAPL". Use the skillmaker extension."*
+> *Make this into a reusable skill called `company-brief` so next time I can just say "use the company-brief skill on AAPL"."*
 
-The agent calls `create_skill` with the procedure as the L2 instruction body. After the next turn, the skill is loaded and discoverable.
+The agent writes `data/skills/company-brief/SKILL.md` with `bash`, putting the procedure in the instruction body. It is registered on the next skills rescan (opening the Skills panel, or the agent's first `load_skill("company-brief")`). You can also write or tweak it yourself in the Skills panel editor.
 
 For the SKILL.md format, see [../authoring/writing-skills.md](../authoring/writing-skills.md).

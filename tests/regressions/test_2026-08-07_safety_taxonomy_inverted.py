@@ -4,14 +4,15 @@ Shipped defects (architecture review 2026-08-07, appendix E). All of these
 were live at 3ef1e6c:
 
 1. Only four tools were `dangerous` (delete_skill,
-   search_web, browse_web), while `create_tool` — which writes model-authored
-   Python into the SERVER'S OWN source tree and imports it in-process — was
-   `safe`, `add_gate` (shell that re-runs unattended every turn) was
+   search_web, browse_web), while `create_tool` (the toolmaker, since retired
+   in the 2026-10 prune) was `safe`, `add_gate` (shell that re-runs unattended every turn) was
    `caution`, and `add_skill_script` (writes a file load_skill then tells the
-   agent to `bash`) was `safe`.
+   agent to `bash`) was `safe`. (Both authoring tools were retired in the
+   2026-10 prune.)
 2. `create_skill(approved=...)` / `add_skill_script(approved=...)` were
    model-supplied booleans. Nothing correlated them with a user response, so
-   the model could self-authorize on the first call.
+   the model could self-authorize on the first call. The executor's
+   server-side gate is still pinned below, on add_gate.
 3. `shell_env_mode` defaulted to "passthrough": every bash child inherited a
    copy of os.environ, including every provider API key.
 4. `add_gate` commands ran with shell=True, agent-chosen cwd, no
@@ -26,9 +27,9 @@ were live at 3ef1e6c:
 7. `_DISPATCH_TIMEOUT_GRACE_S` was skipped whenever the caller passed no
    explicit timeout, violating executor.py's own documented invariant that
    the tool's internal timeout must fire first.
-8. data/workspace/.venv was writable via the "safe" file_write tool and on
-   sys.path for every custom tool — file_write into site-packages planted
-   code that later executed in the server process.
+8. data/workspace/.venv was writable via the "safe" file_write tool —
+   file_write into site-packages planted code that later ran ungated (in
+   the server process, while the toolmaker's custom tools still existed).
 
 The `bash`/`repl` `caution` level is deliberately unchanged and asserted
 here, so a later well-meaning promotion has to argue with this file: every
@@ -56,29 +57,12 @@ def _registry_with(*register_fns) -> ToolRegistry:
 # ---------------------------------------------------------------------------
 
 
-def test_toolmaker_write_and_import_tools_are_dangerous():
-    from core.extensions.toolmaker import register as toolmaker_register
-
-    reg = _registry_with(toolmaker_register)
-    # Both write into core/tools/builtin/ and import into the server process.
-    assert reg.get("create_tool").safety_level == "dangerous"
-    assert reg.get("update_tool").safety_level == "dangerous"
-
-
 def test_add_gate_is_dangerous(monkeypatch):
     monkeypatch.setattr("config.settings.gates_enabled", True)
     from core.extensions.evaluation import register as eval_register
 
     reg = _registry_with(eval_register)
     assert reg.get("add_gate").safety_level == "dangerous"
-
-
-def test_skill_authoring_tools_are_dangerous():
-    from core.extensions.skillmaker import register as skillmaker_register
-
-    reg = _registry_with(skillmaker_register)
-    assert reg.get("create_skill").safety_level == "dangerous"
-    assert reg.get("add_skill_script").safety_level == "dangerous"
 
 
 def test_bash_stays_caution_by_design():
@@ -96,35 +80,19 @@ def test_bash_stays_caution_by_design():
 # ---------------------------------------------------------------------------
 
 
-def test_dangerous_skill_tools_take_no_approved_argument():
-    from core.extensions.skillmaker import add_skill_script, create_skill
-
-    for fn in (create_skill, add_skill_script):
-        assert (
-            "approved" not in inspect.signature(fn).parameters
-        ), f"{fn.__name__} still accepts a model-supplied approval argument"
-
-
-def test_approved_is_absent_from_the_dangerous_tools_schemas():
-    from core.extensions.skillmaker import register as skillmaker_register
-
-    reg = _registry_with(skillmaker_register)
-    for name in ("create_skill", "add_skill_script"):
-        props = (reg.get(name).parameters or {}).get("properties", {})
-        assert "approved" not in props, f"{name} still advertises `approved`"
-
-
-async def test_dangerous_gate_blocks_create_skill_without_server_side_approval(monkeypatch):
+async def test_dangerous_gate_blocks_add_gate_without_server_side_approval(monkeypatch):
     """End-to-end through the executor: no approval state on the session, so
-    the call is refused before the tool function ever runs."""
-    from core.extensions.skillmaker import register as skillmaker_register
+    the call is refused before the tool function ever runs. (This used to be
+    pinned on create_skill, retired with the skillmaker in the 2026-10 prune.)"""
+    from core.extensions.evaluation import register as eval_register
     from core.tools.executor import _execute_single
 
+    monkeypatch.setattr("config.settings.gates_enabled", True)
     monkeypatch.setattr("config.settings.auto_approve_dangerous", False)
-    reg = _registry_with(skillmaker_register)
+    reg = _registry_with(eval_register)
     result = await _execute_single(
-        "create_skill",
-        {"name": "x", "description": "d" * 20, "instructions": "i" * 40, "approved": True},
+        "add_gate",
+        {"name": "x", "command": "true", "approved": True},
         None,
         reg,
     )
@@ -370,8 +338,8 @@ def test_dispatch_grace_applies_without_an_explicit_timeout():
 
 
 def test_file_write_refuses_the_workspace_venv(tmp_path, monkeypatch):
-    """site-packages inside the write root is executable-in-process code:
-    ensure_workspace_venv_on_path() puts it on sys.path for custom tools."""
+    """site-packages inside the write root is code that bash, the REPL and
+    skill scripts import with no dangerous-tool gate."""
     from core.tools import paths
 
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path / "workspace"))

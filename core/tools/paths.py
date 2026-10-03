@@ -43,13 +43,12 @@ PROTECTED_FILES = frozenset(
     }
 )
 
-# `.venv` is here for the same reason `.git` is, but the consequence is
-# sharper: data/workspace/.venv sits inside the only write root, and
-# ensure_workspace_venv_on_path() puts its site-packages on sys.path for every
-# source="custom" tool. Without this entry, file_write — a "safe" tool — could
-# drop a module into site-packages that the server then imports and executes
-# in-process, with the full server environment. bash still manages the venv
-# (pip, python -m venv); only the path-tool surface is closed.
+# `.venv` is here for the same reason `.git` is: data/workspace/.venv sits
+# inside the only write root, and its site-packages is what bash, the REPL and
+# skill scripts import from. Without this entry, file_write — a "safe" tool —
+# could plant a module there that later runs with no dangerous-tool gate.
+# bash still manages the venv (pip, python -m venv); only the path-tool
+# surface is closed.
 PROTECTED_DIRS = frozenset({".git", "__pycache__", ".venv"})
 
 
@@ -515,19 +514,3 @@ def build_shell_env(workspace_root: Path | None = None, run_dir: Path | None = N
     # progress the whole way and the timeout returned none of it).
     env["PYTHONUNBUFFERED"] = "1"
     return env
-
-
-def ensure_workspace_venv_on_path() -> None:
-    """Add workspace venv site-packages to sys.path (idempotent).
-
-    Core tools run in the project venv. Custom tools (source='custom') need
-    packages installed via install_package into data/workspace/.venv.
-    Called before any custom_* module is imported or reloaded.
-    """
-    import glob
-    import sys
-
-    ws_lib = Path(settings.workspace_dir).resolve() / ".venv" / "lib"
-    site_pkgs = next(glob.iglob(str(ws_lib / "python*" / "site-packages")), None)
-    if site_pkgs and site_pkgs not in sys.path:
-        sys.path.insert(0, site_pkgs)

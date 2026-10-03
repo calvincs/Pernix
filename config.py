@@ -340,7 +340,7 @@ class Settings:
     distill_audit_enabled: bool = True
     distill_audit_per_day: int = 2  # sampled sessions per UTC day (0 disables)
 
-    # --- Gates / goals / heartbeats (long-running work, plan Phase 3) ---
+    # --- Gates / goals (long-running work, plan Phase 3) ---
     # Deterministic gates: user-authored shell checks that run before
     # Reflect; a failing gate mechanically clamps a pass verdict to retry.
     # A passing gate verifies only what that gate checks.
@@ -348,8 +348,6 @@ class Settings:
     # Persistent cross-turn goals with budgets; only goal_complete finishes
     # one. continuation defaults are opt-in per goal (plan 3b).
     goals_enabled: bool = False
-    # Heartbeats: recurring instructions steered into running work (3c).
-    heartbeats_enabled: bool = False
 
     # --- Golden-task canary suite (plan 3.5, off by default) ---
     # Canned tasks + deterministic gates run headlessly through the full
@@ -619,15 +617,6 @@ class Settings:
     dream_rlm_probe: bool = False  # deep cross-file probes via RLM (needs rlm_enabled)
     dream_rlm_probe_interval_days: int = 7  # min days between probes
 
-    # --- Evaluation (extension) ---
-    eval_auto: bool = False
-    eval_threshold: float = 0.7
-    eval_max_retries: int = 2
-    eval_browser_verify: bool = False
-
-    # --- Planning ---
-    plan_review_timeout: int = 120
-
     # --- Snooze (idle-time self-optimization) ---
     snooze_enabled: bool = True
     snooze_interval_ticks: int = 10  # Check every N maintenance ticks (N * 60s)
@@ -636,9 +625,8 @@ class Settings:
     # watermark resume). This bound only kills a genuinely wedged cycle.
     # 15 min accommodates slow local models; bump it for very large ones.
     snooze_max_cycle_seconds: int = 900
-    # Wall-clock ceiling on one scheduled dispatch (cron fire / heartbeat idle
-    # tick). Replaces the old implicit tool_timeout × max_tool_rounds product,
-    # which silently quintupled to ~4.2h when max_tool_rounds went 10→50 — a
+    # Wall-clock ceiling on one scheduled dispatch (a cron fire). Replaces
+    # the old implicit tool_timeout × max_tool_rounds product, which silently quintupled to ~4.2h when max_tool_rounds went 10→50 — a
     # wedged job should fail and notify within the hour.
     cron_dispatch_timeout: int = 3600
     snooze_cooldown_minutes: int = 5  # Min idle time before Snooze starts

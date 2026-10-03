@@ -145,7 +145,7 @@ _STORE_TOOLS = """\
 | long-term memory | recall, deep_recall | remember (supersede= for one-call repair), update_memory, forget |
 | session history | list_recent_sessions, read_session_summary, search_sessions | (automatic) |
 | adaptive store | rendered into prompt; adaptive_proposals (pending, plain-language); /api/adaptive/* | adaptive_note (2/day, linted); adaptive_proposal_decide (only when the user says so) |
-| skills | load_skill, read_skill_instructions | create_skill / update_skill |
+| skills | load_skill, read_skill_instructions | SKILL.md file (data/skills/<name>/); Skills panel editor |
 | post-mortems | (scout: search_post_mortems) | (reflect writes them) |
 | workspace files | file_read, grep, glob, bash, repl | file_write, bash |"""
 

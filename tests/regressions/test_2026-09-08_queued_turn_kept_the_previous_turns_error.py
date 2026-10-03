@@ -121,12 +121,12 @@ async def test_a_queued_turn_after_a_failed_one_starts_clean(mgr, monkeypatch):
     session_row = db.get_session(sid)
     session.turn = _TripTurn()
     passed = []
-    for fn in (hooks_mod._maybe_reflect, hooks_mod._maybe_evaluate):
+    for fn in (hooks_mod._maybe_reflect,):
         try:
             await fn(sid, session_row, emit=None, session_obj=session)
         except _GuardPassed:
             passed.append(fn.__name__)
-    assert passed == ["_maybe_reflect", "_maybe_evaluate"]
+    assert passed == ["_maybe_reflect"]  # _maybe_evaluate retired 2026-10
 
 
 async def test_the_error_does_not_propagate_down_three_queued_turns(mgr):
