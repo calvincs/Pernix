@@ -724,7 +724,7 @@ def run_vp(browser, name, w, h, opts):
         time.sleep(0.4)
         pg.evaluate("() => document.getElementById('fp-group-tuning')?.click()")
         time.sleep(0.6)
-        pg.evaluate("() => document.querySelectorAll('.fp-subtab-btn')[1]?.click()")
+        pg.evaluate("() => document.getElementById('fp-tab-canary')?.click()")
         time.sleep(0.8)
         ov = pg.evaluate(
             "() => { const bs=[...document.querySelectorAll('#file-panel .adaptive-head button, #file-panel .adaptive-head .adaptive-btn')].filter(b=>b.offsetParent); const rs=bs.map(b=>b.getBoundingClientRect()); let overlap=false; for(let i=0;i<rs.length;i++) for(let j=i+1;j<rs.length;j++){ const a=rs[i], c=rs[j]; if(a.left<c.right-1 && c.left<a.right-1 && a.top<c.bottom-1 && c.top<a.bottom-1) overlap=true; } return {n: rs.length, overlap, cut: rs.some(r=>r.right>innerWidth+1)}; }"
@@ -2405,8 +2405,8 @@ def adaptive_head_wrap(browser):
     body[data-touch]. The DOCKED desktop Explorer is the same 360px as the
     tablet one and sets neither attribute, so on a plain desktop browser the
     heartbeat chip and four buttons were squeezed into one unwrappable line
-    and overlapped. The Learning and Trust heads use the same class,
-    so this measures every head the panel has. (L04)
+    and overlapped. The Trust head uses the same class (the Learning tab
+    went with the adaptive layer in 3.2). (L04)
     """
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
     pg = ctx.new_page()
@@ -2417,7 +2417,7 @@ def adaptive_head_wrap(browser):
     time.sleep(0.9)
     pg.evaluate("() => document.getElementById('fp-group-tuning')?.click()")
     time.sleep(0.6)
-    for tab in ("canary", "adaptive"):
+    for tab in ("canary",):
         pg.evaluate(f"() => document.getElementById('fp-tab-{tab}')?.click()")
         time.sleep(1.0)
         m = _settle(lambda: (lambda r: r if r and r["heads"] else None)(pg.evaluate(ADAPTIVE_HEAD_JS)))
@@ -2714,7 +2714,7 @@ def bell_tiers(browser):
         and "Embeddings are down" in titles
         and coalesced is not None
         and coalesced["occ"] == "×3"
-        and "Adaptive edits applied" not in titles
+        and "Dream: 2 memory correction(s) applied" not in titles
         and "MCP server boxpriv unreachable" not in titles,
         {"titles": titles, "coalesced": coalesced},
         "m2",
@@ -2744,7 +2744,7 @@ def bell_tiers(browser):
         "bell",
         "m2: Activity lists the log row, the dismissed row and the just-dismissed one, by day",
         sel.get("bell-tab-activity") == "true"
-        and "Adaptive edits applied" in by
+        and "Dream: 2 memory correction(s) applied" in by
         and by.get("MCP server boxpriv unreachable", {}).get("quiet") is True
         and by.get("Job failed: nightly-backup", {}).get("state") == "Dismissed"
         and b["days"][:2] == ["Today", "Yesterday"]

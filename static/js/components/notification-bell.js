@@ -42,7 +42,9 @@ const POLL_CLOSED_MS = 15000;
 // link {"kind":"tab"} → the surface that owns that subsystem. Explorer leaf
 // keys are file-panel.js's own; Settings is its own modal.
 const TAB_TARGETS = {
-    learning: { label: 'Learning', open: () => openFilePanel({ tab: 'adaptive' }) },
+    // Rows written before 3.2 link to the retired Learning tab; they open
+    // the Self-tuning group instead.
+    learning: { label: 'Self-tuning', open: () => openFilePanel({ tab: 'tuning' }) },
     canary: { label: 'Self-checks', open: () => openFilePanel({ tab: 'canary' }) },
     skills: { label: 'Skills', open: () => openFilePanel({ tab: 'skills' }) },
     jobs: { label: 'Jobs', open: () => openFilePanel({ tab: 'jobs' }) },

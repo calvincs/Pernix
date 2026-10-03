@@ -1,5 +1,5 @@
-// Pernix — shared helpers for the Explorer's self-tuning tabs (Learning,
-// Self-checks, Trust): a plain-words header line, accessible disclosure rows,
+// Pernix — shared helpers for the Explorer's self-tuning tabs (Self-checks,
+// Trust): a plain-words header line, accessible disclosure rows,
 // inline result lines, and action buttons whose outcome survives the
 // refresh() that rebuilds the tab.
 
@@ -7,8 +7,8 @@ import { el, text } from '../../render.js';
 
 /**
  * One plain-words line under a tab header, in the shape file-panel.js's
- * _buildTabDesc gives every other Explorer tab. Canary and Adaptive
- * opened straight into badges and vocabulary ("tripwire") with nothing
+ * _buildTabDesc gives every other Explorer tab. Canary (and the Adaptive
+ * tab retired in 3.2) opened straight into badges and vocabulary ("tripwire") with nothing
  * anywhere saying what the tab is FOR. Shared from here because every
  * self-tuning tab needs the same treatment. (S11)
  */

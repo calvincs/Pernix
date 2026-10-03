@@ -131,7 +131,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadHealth();
     setupInput();
     setupNewSession();
-    setupComposeBridge();
     setupFileDrop();
     _setupScrollAffordances();
     initVoice({
@@ -1456,47 +1455,6 @@ function setupNewSession() {
             selectSession(data.session_id);
         } catch (e) {
             console.error('Failed to create session:', e);
-        }
-    });
-}
-
-/**
- * `pernix:compose` — something elsewhere in the app wants a message typed.
- *
- * The Explorer's Learning tab can mint a session about one adaptive proposal
- * and hand back the first message to send, but `send()` and `selectSession()`
- * are module-local to this file and file-panel.js already imports the
- * Explorer's modules, so an import back the other way would be a cycle. One
- * custom event, one listener, and this stays the only place that knows how to
- * drive the composer.
- *
- * `{ session_id?, text, send? }`. The panel is closed on the compact tier
- * because there the Explorer is full-screen and sits on top of the very
- * composer we just filled — leaving it open looks like nothing happened.
- */
-function setupComposeBridge() {
-    window.addEventListener('pernix:compose', async (e) => {
-        const detail = e.detail || {};
-        try {
-            if (detail.session_id) {
-                await loadSessions();
-                await selectSession(detail.session_id);
-            }
-            const panel = document.getElementById('file-panel');
-            if (isCompact() && panel && panel.classList.contains('open')) toggleFilePanel();
-            const t = document.getElementById('msg-input');
-            if (!t) return;   // a composer-less view (hero screen mid-teardown)
-            t.value = detail.text || '';
-            // Same pair every programmatic value change uses: the synthetic
-            // set fires no input event, so nothing else would resize the
-            // textarea, re-enable Send or keep the draft.
-            _refreshComposer();
-            _saveDraft(t.value);
-            t.focus();
-            if (detail.send) await send();
-        } catch (err) {
-            console.error('pernix:compose failed:', err);
-            appendMessage('system', `Could not open that conversation: ${err.message || err}`);
         }
     });
 }
@@ -6690,15 +6648,15 @@ let _closePaletteOverlay = null;   // teardown from a11y.js openOverlay()
 // lists do: it mixed group names with tab names ("Capabilities" for the
 // Skills tab, "Automation" for Jobs) and offered three panes under the
 // internal names the Explorer stopped showing when the interface pass
-// renamed them — MCP is Servers, Canary is Self-checks,
-// Adaptive is Learning. It is derived from the Explorer's own group/tab
+// renamed them — MCP is Servers, Canary is Self-checks. It is derived from
+// the Explorer's own group/tab
 // table now: one entry per real tab, named the way the panel names it.
 //
 // The words those panes used to answer to are still how people look for
 // them, so each entry carries them as aliases. The tab KEY rides along
-// automatically, which is what keeps "canary", "mcp" and
-// "adaptive" — the names the docs, the settings and the agent's own logs
-// still use — landing on the pane that was renamed.
+// automatically, which is what keeps "canary" and "mcp" — the names the
+// docs, the settings and the agent's own logs still use — landing on the
+// pane that was renamed.
 const PALETTE_TAB_ALIASES = {
     workspace: 'browse upload',
     memory: 'notes recall remember',

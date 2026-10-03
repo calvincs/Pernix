@@ -22,7 +22,7 @@ Open the bell. It has two tabs:
 
 Some items close themselves when their cause goes away — the embeddings outage when the server answers again, an MCP alert when the connection is back, a parked canary when it is un-parked, a tripwire flag when the batch is cleared. They leave the bell and stay in *Activity* marked resolved.
 
-**One rollup instead of many.** Proposals that wait for *your* decision (self-tests that never auto-apply, edits held because their evidence points at nothing, skill changes that fail the safety check) are summed into a single item — "N proposals wait for your decision" — that opens the Learning tab and clears at zero.
+**One rollup instead of many.** Skill proposals that wait for *your* decision (changes that fail the safety check, or every pending one when auto-apply is off) are summed into a single item — "N skill proposals wait for your decision" — that opens the Skills tab and clears at zero.
 
 ## Sessions that are not your conversation
 

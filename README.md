@@ -173,7 +173,7 @@ Pernix ships with a full progressive web app (PWA) at the root URL. Key panels:
 | **Session sidebar** | Create, switch between, and manage sessions — Spaces group long-lived work above the time buckets with their own color and directives; full-text search; a legend to filter by type (chat, cron, worker, Dream, Archived); drag the right edge to resize |
 | **Chat** | Real-time conversation with streamed responses and tool call visibility |
 | **Settings** | Six tabs — Providers & models, Agent behaviour, Autonomy & idle work, Tools & safety, Integrations, Environment & network — plus Storage, with a search that spans all of them |
-| **Explorer** | One panel with a group strip and a tab strip: Files (Workspace), Knowledge (Memory), Capabilities (Skills, Tools, Servers (MCP)), Automation (Jobs), Self-tuning (Learning, Self-checks, Trust) |
+| **Explorer** | One panel with a group strip and a tab strip: Files (Workspace), Knowledge (Memory), Capabilities (Skills, Tools, Servers (MCP)), Automation (Jobs), Self-tuning (Self-checks, Trust) |
 | **Jobs** | Explorer → Automation → Jobs: scheduled jobs, live snooze activity, and recent RLM runs |
 | **State timeline** | A Lane of turns, the Story behind the one you pick, and a Map of the state machine — opened from the state badge in the status bar |
 | **Notifications bell** | Alert when the agent is waiting for your input |
