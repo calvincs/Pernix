@@ -95,7 +95,7 @@ Output a JSON object:
       "skill_name": "the active skill",
       "section": "section of SKILL.md (e.g. 'Common Failures', 'Pre-flight', 'Usage')",
       "problem": "1-2 sentences describing what was off",
-      "proposed_change": "actionable prose to insert into SKILL.md",
+      "proposed_change": "the exact Markdown to insert under that section, written as SKILL.md text",
       "confidence": 0.0-1.0
     }
   ],
@@ -113,8 +113,13 @@ RULES:
 - If nothing in the session is worth saving, set "nothing_actionable": true
   and return empty proposals/lessons arrays. This is a real and valid
   outcome — don't fabricate signal.
-- proposed_change must be concrete, paste-ready prose. Reference real
-  section names from the SKILL.md content shown below.
+- proposed_change is the literal text that will be inserted into SKILL.md
+  under `section` — write it as the skill itself speaks to the agent ("On
+  GPU OOM, rerun with --device cpu."). Never an instruction to an editor
+  ("Add a note to Usage that…", "Update the section to…"). A human reviews
+  it in the skill editor and applies it verbatim. Keep it short: a few
+  lines, no repeated headings, nothing the SKILL.md already says.
+  Reference real section names from the SKILL.md content shown below.
 - Proposals only meaningful when an active skill is identified.
 - Skip a proposal whose confidence < 0.6.
 - Lessons must be self-contained (understandable without the session).

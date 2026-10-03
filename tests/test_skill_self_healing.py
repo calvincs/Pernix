@@ -6,7 +6,8 @@ Covers the 2026-08-31 fixes (session 83dc931a8596 post-mortem):
   2. Re-armable refine watermarks (max message id, awaiting_user excluded).
   3. Failure-arc evidence extraction + machine signal in the refine prompt.
   4. Proposal dedupe across re-refines.
-  5. Proposals are suggestions (manual apply with backup; no auto-apply).
+  5. Proposals are suggestions (manual apply with backup; no auto-apply;
+     stale ones archive after 30 days; refine writes paste-ready text).
   6. Skill content-change sweep → memory_stale dream hypotheses.
   7. Migration v32 watermark conversion.
 """
@@ -414,6 +415,47 @@ def test_nothing_applies_a_proposal_on_its_own():
     fields = {f.name for f in dataclasses.fields(Settings)}
     assert "skill_proposal_auto_apply_after_hours" not in fields
     assert "skill_proposal_max_auto_applies_per_day" not in fields
+
+
+def test_archive_stale_proposals_archives_only_old_pending_rows():
+    from core.skills.proposals import archive_stale_skill_proposals
+    from db import models as db
+
+    old = _pending_proposal("heal-me", change="old change", age_hours=31 * 24)
+    fresh = _pending_proposal("heal-me", change="fresh change", age_hours=29 * 24)
+    old_applied = _pending_proposal("heal-me", change="applied change", age_hours=60 * 24)
+    db.resolve_skill_proposal(old_applied, "applied")
+
+    assert archive_stale_skill_proposals() == [old]
+    assert db.get_skill_proposal(old)["status"] == "archived"
+    assert db.get_skill_proposal(fresh)["status"] == "pending"
+    assert db.get_skill_proposal(old_applied)["status"] == "applied"
+    assert archive_stale_skill_proposals() == []  # idempotent
+    assert archive_stale_skill_proposals(days=0) == []  # 0 disables
+
+
+async def test_snooze_archive_rung_runs_before_the_review_rollup(monkeypatch):
+    import inspect
+
+    from core.snooze import SnoozeRunner
+    from db import models as db
+
+    src = inspect.getsource(SnoozeRunner._do_cycle)
+    assert src.index('self._rung("archive_stale_skill_proposals"') < src.index('self._rung("refresh_review_pending"')
+
+    pid = _pending_proposal("heal-me", age_hours=40 * 24)
+    runner = SnoozeRunner.__new__(SnoozeRunner)
+    runner._stats = {}
+    await SnoozeRunner._archive_stale_skill_proposals(runner)
+    assert db.get_skill_proposal(pid)["status"] == "archived"
+    assert runner._stats == {"skill_proposals_archived": 1}
+
+
+def test_refine_prompt_asks_for_paste_ready_skill_text():
+    from core.refine import REFINE_PROMPT
+
+    assert "Never an instruction to an editor" in REFINE_PROMPT
+    assert "actionable prose" not in REFINE_PROMPT
 
 
 # ---------------------------------------------------------------------------

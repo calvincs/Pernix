@@ -425,7 +425,7 @@ class SnoozeRunner:
         an exception in an early rung — a permissions error on one RLM run
         dir, a corrupt FTS row, one hand-created memory file with a space in
         its name — ended the whole coroutine. Everything after it (refine,
-        skill auto-apply, dream) was then skipped on EVERY
+        the skill rungs, dream) was then skipped on EVERY
         cycle for as long as the fault persisted, and the only sign was a
         single "Snooze cycle error" line.
         """
@@ -572,6 +572,12 @@ class SnoozeRunner:
         if not self._is_cancelled() and self._llm_ready():
             _announce(bus, "refine", "Crystallizing skill/memory updates from an idle session")
             await self._rung("refine_one_session", self._refine_one_session())
+
+        # Activity 13b: archive stale skill proposals (no LLM). A pending
+        # suggestion nobody decided on in 30 days becomes 'archived' history,
+        # so the review.pending count below can reach zero.
+        if not self._is_cancelled():
+            await self._rung("archive_stale_skill_proposals", self._archive_stale_skill_proposals())
 
         # Activity 13b': review.pending rollup (no LLM, read-only). The one
         # bell row counting pending skill proposals — every one waits for a
@@ -927,6 +933,21 @@ Output valid JSON only. No markdown fences. /no_think"""
             logger.warning("Snooze: refine pass failed for %s: %s", sid, e)
             db.set_snooze_state(f"refined:{sid}", watermark)
             return False
+
+    # ------------------------------------------------------------------
+    # Activity 13b: archive stale skill proposals
+    # ------------------------------------------------------------------
+
+    async def _archive_stale_skill_proposals(self) -> None:
+        try:
+            from core.skills.proposals import archive_stale_skill_proposals
+
+            archived = await asyncio.to_thread(archive_stale_skill_proposals)
+        except Exception as e:
+            logger.warning("Snooze: stale skill proposal archive failed: %s", e)
+            return
+        if archived:
+            self._bump("skill_proposals_archived", len(archived))
 
     # ------------------------------------------------------------------
     # Activity 13c: Skill content-change sweep → memory re-validation
@@ -1503,7 +1524,7 @@ Output valid JSON only. No markdown fences. /no_think"""
             logger.warning("Snooze synthesis failed: %s", e)
 
     async def _refresh_review_pending(self) -> None:
-        """Recount the never-auto-apply skill proposals into review.pending. Never raises."""
+        """Recount the pending skill proposals into review.pending. Never raises."""
         try:
             from core.skills.review import refresh_review_pending
 
