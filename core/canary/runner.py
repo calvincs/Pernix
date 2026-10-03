@@ -14,8 +14,8 @@ Sweeps run canaries sequentially and one sweep runs at a time (the scheduler
 holds the lock) — a sweep is a background measurement, not a throughput
 problem. Selection is change-driven: the nightly `scheduled` trigger is a
 small least-recently-run heartbeat over the non-parked canaries, `full`
-(model swap, deploy, "Run all") runs everything, and `post_batch`/`manual`
-run the caller's explicit names.
+(model swap, deploy, "Run all") runs everything, and `manual` runs the
+caller's explicit names.
 """
 
 from __future__ import annotations
@@ -414,10 +414,9 @@ async def run_sweep(
     canary_heartbeat_per_night least-recently-run non-parked canaries, just
     enough to keep every active canary's history warm. `full` runs
     everything including parked canaries (model swaps, deploys, "Run all" —
-    the world changed, so every canary gets to speak). `post_batch` and
-    `manual` run the caller's explicit `names` (or everything, absent one) —
-    the post-batch probe's targeting happens at the scheduling layer, and a
-    human asking for a run means now.
+    the world changed, so every canary gets to speak). `manual` runs the
+    caller's explicit `names` (or everything, absent one) — a human asking
+    for a run means now.
     """
     if not settings.canary_enabled:
         logger.info("Canary sweep skipped: canary_enabled is off")
@@ -437,22 +436,6 @@ async def run_sweep(
     results: list[CanaryRunResult] = []
     for d in defs:
         results.append(await run_canary(d, trigger=trigger, batch_id=batch_id))
-
-    # Confirm-rerun: the tripwire's active probe demands two independent
-    # gate_fails before a batch can be auto-rolled-back, and the rerun has to
-    # happen HERE — inside the sweep job, under the sweep lock — because the
-    # lock is skip-not-queue: a rerun enqueued from the (read-only) tripwire
-    # would be silently dropped while any sweep was running. Only honest
-    # gate_fails earn a rerun; timeouts and harness breaks are suite-health
-    # concerns and re-running them proves nothing about the batch.
-    if trigger == "post_batch":
-        by_name = {d.name: d for d in defs}
-        for r in list(results):
-            d = by_name.get(r.task)
-            if d is None or d.flaky or r.outcome != "gate_fail":
-                continue
-            logger.info("Canary '%s' gate-failed post-batch — confirm-rerun", r.task)
-            results.append(await run_canary(d, trigger=trigger, batch_id=batch_id))
 
     passed = sum(1 for r in results if r.passed)
     logger.info("Canary sweep complete: %d/%d passed (trigger=%s)", passed, len(results), trigger)

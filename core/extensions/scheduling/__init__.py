@@ -770,7 +770,7 @@ async def _init_scheduler_async():
 
 
 # ---------------------------------------------------------------------------
-# Canary triggers: scheduled (heartbeat) / post_batch / manual / full
+# Canary triggers: scheduled (heartbeat) / manual / full
 # ---------------------------------------------------------------------------
 
 # One sweep at a time. A second trigger firing mid-sweep skips rather than
@@ -780,9 +780,6 @@ async def _init_scheduler_async():
 # silently eaten by a heartbeat that happened to be in flight.
 _canary_sweep_lock = asyncio.Lock()
 
-# Post-batch retry cap: ~1 hour of 5-minute retries before giving up.
-_CANARY_BATCH_MAX_ATTEMPTS = 12
-_CANARY_BATCH_RETRY_S = 300
 # must_run lock-retry cap: ~20 minutes of 2-minute retries.
 _CANARY_LOCK_MAX_ATTEMPTS = 10
 _CANARY_LOCK_RETRY_S = 120
@@ -827,102 +824,6 @@ async def _execute_canary_sweep_job(meta: dict):
             )
         except Exception as e:
             logger.error("Canary sweep failed: %s", e)
-
-
-def _post_batch_targets(batch_id: str) -> list[str]:
-    """Which canaries a post-batch probe runs, resolved at EXECUTION time
-    (the suite may have changed during the up-to-an-hour idle deferral).
-
-    Canaries whose `covers:` matches the batch's edit kinds come first —
-    they are the ones actually testing what changed — then the
-    sentinel-tagged ones ride along, capped at canary_post_batch_max. A
-    missing or unreadable batch row falls back to sentinels; a suite with
-    neither coverage nor sentinels falls back to the active non-flaky
-    canaries so the tripwire is never left blind by omission.
-    """
-    import json as _json
-
-    from core.canary import scan_canaries
-    from db import models as db
-
-    kinds: set[str] = set()
-    try:
-        batch = db.adaptive_get_batch(batch_id)
-        for edit in _json.loads((batch or {}).get("payload_json") or "[]"):
-            if isinstance(edit, dict) and edit.get("kind"):
-                kinds.add(f"kind:{edit['kind']}")
-    except Exception as e:
-        logger.warning("Post-batch target resolution for %s fell back to sentinels: %s", batch_id, e)
-
-    defs = scan_canaries()
-    targets = [d.name for d in defs if kinds & set(d.covers)]
-    targets += [d.name for d in defs if "sentinel" in d.tags and d.name not in targets]
-    if not targets:
-        targets = [d.name for d in defs if not d.parked and not d.flaky]
-    return targets[: max(1, settings.canary_post_batch_max)]
-
-
-async def _execute_canary_batch_job(meta: dict):
-    """Post-batch sweep executor: waits for an idle window by rescheduling.
-
-    Enqueued by a Phase 4 apply (including approved-proposal applies). NEVER
-    dispatched inline from a snooze activity — inline dispatch would cancel
-    the cycle that produced the batch. Real user work defers the sweep;
-    after _CANARY_BATCH_MAX_ATTEMPTS deferrals it runs anyway (batch-tagged
-    data is worth more than a perfect idle window).
-    """
-    if not settings.canary_enabled:
-        return
-    from sessions.manager import get_manager
-
-    attempts = int(meta.get("attempts", 0)) + 1
-    if get_manager().has_active_work() and attempts < _CANARY_BATCH_MAX_ATTEMPTS:
-        scheduler = _get_scheduler()
-        if scheduler:
-            from datetime import timedelta
-
-            from apscheduler.triggers.date import DateTrigger
-
-            retry_meta = dict(meta)
-            retry_meta["attempts"] = attempts
-            scheduler.add_job(
-                _execute_canary_batch_job,
-                trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=_CANARY_BATCH_RETRY_S)),
-                id=f"_canary_batch_{meta.get('batch_id', '?')}",
-                replace_existing=True,
-                kwargs={"meta": retry_meta},
-            )
-            logger.info(
-                "Post-batch canary sweep deferred (attempt %d): active work present",
-                attempts,
-            )
-        return
-    names = _post_batch_targets(str(meta.get("batch_id") or ""))
-    if not names:
-        logger.info("Post-batch canary sweep for %s: no canaries to run", meta.get("batch_id"))
-        return
-    await _execute_canary_sweep_job({**meta, "trigger": "post_batch", "names": names})
-
-
-def enqueue_post_batch_sweep(batch_id: str, delay_s: int = 60) -> bool:
-    """Queue a batch-tagged sweep for the next idle window (Phase 4 hook)."""
-    if not settings.canary_enabled:
-        return False
-    scheduler = _get_scheduler()
-    if not scheduler:
-        return False
-    from datetime import timedelta
-
-    from apscheduler.triggers.date import DateTrigger
-
-    scheduler.add_job(
-        _execute_canary_batch_job,
-        trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=max(1, delay_s))),
-        id=f"_canary_batch_{batch_id}",
-        replace_existing=True,
-        kwargs={"meta": {"kind": "canary", "transient": True, "batch_id": batch_id}},
-    )
-    return True
 
 
 def enqueue_manual_canary(name: str) -> bool:

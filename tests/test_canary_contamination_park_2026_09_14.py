@@ -118,29 +118,14 @@ def test_a_contaminated_proposal_never_becomes_a_file():
     assert load_canary("workspace-organizer-evidence-gate", base=_base()) is None
 
 
-def test_the_rejection_reason_is_recorded_on_a_proposal():
+def test_the_rejection_is_logged_not_queued():
+    """Until 3.2 an isolation-breaking spec was filed as a resolved
+    'rejected' proposal; the proposal queue went with the adaptive layer, so
+    it is now logged and dropped."""
     bad = dict(_SPEC, name="workspace-organizer", prompt="Organise ./data/workspace by evidence type.")
     assert queue_canary_proposals([bad], "skill-change", session_id="s-1") == 0
-
-    rejected = db.adaptive_list_proposals(status="rejected", limit=20)
-    mine = [r for r in rejected if "workspace-organizer" in (r.get("rationale") or "")]
-    assert len(mine) == 1
-    assert "breaks canary isolation" in mine[0]["rationale"]
-    assert json.loads(mine[0]["payload_json"])["rejected_reason"]
-    # It must not occupy review-queue budget, and re-deriving it every cycle
-    # must not stack copies.
-    assert mine[0]["status"] == "rejected"
-    queue_canary_proposals([bad], "skill-change", session_id="s-1")
-    assert (
-        len(
-            [
-                r
-                for r in db.adaptive_list_proposals(status="rejected", limit=20)
-                if "workspace-organizer" in (r.get("rationale") or "")
-            ]
-        )
-        == 1
-    )
+    assert db.adaptive_list_proposals(status=None, limit=20) == []
+    assert load_canary("workspace-organizer", base=_base()) is None
 
 
 # ---------------------------------------------------------------------------

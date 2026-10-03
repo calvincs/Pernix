@@ -1657,14 +1657,6 @@ Output valid JSON only. No markdown fences. /no_think"""
                     f"{edits_n} edit(s) across {len(landed)} batch(es) applied at idle — review in the Adaptive panel.",
                     link=_LEARNING_TAB,
                 )
-                # Post-batch sweeps: batch-tagged canary data for the
-                # tripwire join. Enqueued through the scheduler for its own
-                # idle window — NEVER dispatched inline from this activity.
-                if settings.canary_enabled:
-                    from core.extensions.scheduling import enqueue_post_batch_sweep
-
-                    for r in landed:
-                        enqueue_post_batch_sweep(r["batch_id"])
         except Exception as e:
             logger.warning("Adaptive drain failed: %s", e)
 

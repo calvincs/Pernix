@@ -351,18 +351,12 @@ def test_drain_respects_daily_cap(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_approve_applies_and_enqueues_sweep(monkeypatch):
-    swept = []
-    monkeypatch.setattr(
-        "core.extensions.scheduling.enqueue_post_batch_sweep",
-        lambda batch_id: swept.append(batch_id) or True,
-    )
+def test_approve_applies(monkeypatch):
     pid = queue_edits([_edit(kind="policy", title="gate deploys", content="rule")], "refine")["proposal_id"]
     result = approve_proposal(pid)
     assert result["applied"] == ["gate-deploys"]
     assert db.adaptive_get_entry("gate-deploys")["risk"] == "high"
     assert db.adaptive_get_proposal(pid)["status"] == "approved"
-    assert swept == [result["batch_id"]]
     # The event chain records the proposal linkage.
     ev = db.adaptive_list_events(entry_id="gate-deploys")[0]
     assert ev["proposal_id"] == pid and ev["actor"] == "user"
