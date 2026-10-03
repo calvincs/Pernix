@@ -578,7 +578,7 @@ def test_enqueue_helpers(monkeypatch):
     assert not hasattr(sched, "enqueue_post_batch_sweep")
 
 
-def test_enqueue_targeted_and_full_sweeps(monkeypatch):
+def test_enqueue_full_sweeps(monkeypatch):
     import core.extensions.scheduling as sched
 
     jobs = {}
@@ -590,22 +590,19 @@ def test_enqueue_targeted_and_full_sweeps(monkeypatch):
     monkeypatch.setattr(sched, "_scheduler", _S())
     monkeypatch.setattr("config.settings.canary_enabled", True)
 
-    assert sched.enqueue_targeted_sweep(["a", "b"], reason="skill-foo")
-    meta = jobs["_canary_targeted_skill-foo"].kwargs["meta"]
-    assert meta["names"] == ["a", "b"] and meta["must_run"] is True and meta["trigger"] == "manual"
-
     assert sched.enqueue_full_sweep("model-swap", delay_s=60)
     meta = jobs["_canary_full_model-swap"].kwargs["meta"]
     assert meta["trigger"] == "full" and meta["must_run"] is True
 
-    assert sched.enqueue_targeted_sweep([], reason="empty") is False
+    # The skill-change targeted sweep was cut in 3.2.
+    assert not hasattr(sched, "enqueue_targeted_sweep")
     monkeypatch.setattr("config.settings.canary_enabled", False)
     assert sched.enqueue_full_sweep("off") is False
 
 
 async def test_must_run_sweep_defers_on_a_held_lock(monkeypatch):
     """The lock is skip-not-queue for plain sweeps, but a must_run sweep (model
-    swap, deploy, coverage trigger) reschedules instead of being eaten."""
+    swap, deploy, Run all) reschedules instead of being eaten."""
     import core.extensions.scheduling as sched
 
     jobs = {}

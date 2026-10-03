@@ -251,11 +251,9 @@ def test_long_background_callers_do_not_use_to_thread():
     # (file, callable-name-as-written-at-the-call-site)
     watched = [
         ("core/dream/probe.py", "_run_engine_blocking"),
-        ("core/snooze.py", "run_maintenance"),
         ("core/snooze.py", "synthesis.run"),
         ("maintenance.py", "run_backup"),
         ("core/memory/sweeps.py", "_pairwise_dedup"),
-        ("core/retention.py", "scan_canaries"),
     ]
     for rel, fn in watched:
         text = (repo / rel).read_text()

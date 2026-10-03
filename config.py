@@ -238,7 +238,7 @@ class Settings:
     # raising it costs memory and PIDs rather than throughput.
     tool_executor_workers: int = 32
     # Threads for long-running idle-time background work (dream deep probes,
-    # canary maintenance, synthesis, backups, memory dedup). Same reasoning as
+    # synthesis, backups, memory dedup). Same reasoning as
     # tool_executor_workers — these must never occupy asyncio's default
     # executor, which every API route needs for its DB reads. Small on purpose:
     # occupants are heavyweight and idle-time-only, so a hard ceiling on
@@ -359,16 +359,9 @@ class Settings:
     canary_enabled: bool = False
     canaries_dir: str = "data/canaries"
     canary_retention_days: int = 30
-    # Suite self-management (active only under canary_enabled). New canaries
-    # are hand-written; the suite no longer grows itself. The maintenance sweep promotes vetted canaries, tags flapping ones
-    # flaky, PARKS long-green ones (off the heartbeat, still coverage-run,
-    # auto-unparked by a red run), retires exhausted probes, and purges the
-    # .retired/ quarantine after a retention window. Hard invariant (enforced
-    # in core/canary/maintain.py): a canary whose latest run failed is never
-    # auto-mutated — only a pass streak or a human moves it.
-    canary_auto_maintain: bool = True
-    canary_vetting_runs: int = 3  # consistent runs required to promote out of vetting
-    canary_park_after_passes: int = 25  # consecutive passes before auto-parking
+    # The suite is hand-curated: it neither grows nor maintains itself.
+    # DELETE /api/canary/{name} moves a canary to .retired/, and snooze
+    # retention deletes it for good after canary_purge_after_days.
     canary_purge_after_days: int = 30  # retired canaries older than this are deleted
 
     # --- Skill self-healing (refine skill proposals, veto-window apply) ---

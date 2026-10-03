@@ -12,12 +12,9 @@ Format (mirrors SKILL.md, reusing the same frontmatter helper):
         watch_paths: [src/]
     model: ""            # optional model override
     timeout: 600         # optional per-run wall clock (seconds)
-    tags: [coding, debug]  # 'sentinel' = always in the post-batch probe
-    covers: [skill:foo, kind:prompt_note]  # change surfaces this canary tests
-    flaky: false         # flaky canaries inform, never trip the tripwire
-    parked: false        # parked = off the heartbeat; still coverage-run
-    max_runs: 0          # probe: auto-retire after N total runs (0 = never)
-    expires: ""          # probe: auto-retire after this ISO date
+    tags: [coding, debug]
+    covers: [skill:foo]  # change surfaces this canary tests (informational)
+    flaky: false         # flaky canaries inform, never count as failures
     last_reviewed: 2026-08-06
     ---
     Free-form notes for humans reviewing this canary.
@@ -31,13 +28,17 @@ GENERATED CANARIES (trust-loop hardening W5). A canary directory may carry a
 The runner picks a fresh random seed per run and takes prompt/files/gates
 from that call, so a memorised answer cannot pass a sentinel. Such a file
 may omit ``prompt``, ``gates`` and ``files`` — everything else (name,
-timeout, tags, flaky, parked, covers, probe fields) is read normally.
+timeout, tags, flaky, covers) is read normally.
 
 Detection is the sibling ``generate.py`` OR the frontmatter flag
-``generated: true``. Both, because maintenance rewrites (park, flaky, probe
-retirement) revalidate the new text in a bare temp directory where the
-sibling file does not exist — without the flag every generated canary would
-be frozen out of the maintenance sweep by a parse error.
+``generated: true``. Both, because frontmatter rewrites (the "reviewed"
+button) revalidate the new text in a bare temp directory where the sibling
+file does not exist — without the flag every generated canary would fail
+that rewrite with a parse error.
+
+LEGACY KEYS. ``parked``, ``max_runs``, ``expires`` and ``cadence`` belonged
+to the suite auto-maintenance retired in 3.2. They still parse, so old files
+stay valid, and nothing reads them.
 """
 
 from __future__ import annotations
@@ -75,21 +76,15 @@ class CanaryDef:
     timeout: int = DEFAULT_TIMEOUT_S
     tags: list[str] = field(default_factory=list)
     # Change surfaces this canary tests, as `<domain>:<name>` strings —
-    # `skill:stateful-env-reverse-engineering`, `kind:prompt_note`. Coverage
-    # triggers (a skill edit) select canaries by these.
+    # `skill:youtube-whisper`. Informational: shown in the Canary tab.
     covers: list[str] = field(default_factory=list)
     flaky: bool = False
-    # Parked = long-green and off the heartbeat rotation. Still visible,
-    # still runs on coverage triggers, full sweeps and manual runs; a red
-    # run auto-unparks it. Written by auto-maintenance, editable by hand.
+    # Legacy keys of the auto-maintenance retired in 3.2 (parking, one-off
+    # probes, cadence demotion). Parsed so old files stay valid and
+    # hand-authored values survive rewrites; nothing reads them any more.
     parked: bool = False
-    # Probe fields: a canary with max_runs > 0 (total runs) or a past
-    # `expires` date is auto-retired by maintenance with a summary
-    # notification — "occasionally test something" without suite residue.
     max_runs: int = 0
     expires: str = ""
-    # Legacy (pre-parking cadence demotion). Parsed so old files stay valid
-    # and hand-authored values survive rewrites; nothing reads it any more.
     cadence: int = 1
     last_reviewed: str = ""
     body: str = ""

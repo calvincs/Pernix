@@ -12,8 +12,8 @@ core/tools/executor.py carved tool dispatch out for exactly this reason. This
 module closes the same hole for the OTHER long occupants — the idle-time
 background subsystems. They are far rarer than tool calls but individually much
 longer: a dream deep-probe is a full multi-iteration RLM run (and retries once),
-a backup walks a multi-gigabyte data directory, a canary maintenance sweep and
-a memory dedup pass are both LLM-driven. Any one of them can hold a default
+a backup walks a multi-gigabyte data directory, and a memory dedup pass is
+LLM-driven. Any one of them can hold a default
 thread for minutes.
 
 Short DB reads deliberately stay on `asyncio.to_thread`. They are measured in

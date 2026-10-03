@@ -170,7 +170,7 @@ async def switch_model(body: dict):
     Path("data/model_pref.txt").write_text(model)
 
     # The model IS the agent: a swap invalidates every canary's green
-    # history, so the whole suite (parked included) re-baselines. Delayed a
+    # history, so the whole suite re-baselines. Delayed a
     # minute so the router/registry settle first; must_run so nothing in
     # flight eats it.
     if model != old_model:

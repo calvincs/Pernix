@@ -47,11 +47,11 @@ def test_default_tier_and_session_type_map():
 
 
 def test_category_override_beats_area_override_and_bad_values_are_ignored(monkeypatch):
-    monkeypatch.setattr("config.settings.notify_tier_overrides", {"canary": "bell", "canary.contaminated": "drop"})
-    assert notices.resolve_tier("canary.contaminated") == "drop"
-    assert notices.resolve_tier("canary.maintenance") == "bell"
-    monkeypatch.setattr("config.settings.notify_tier_overrides", {"canary": "loud"})
-    assert notices.resolve_tier("canary.maintenance") == "log"
+    monkeypatch.setattr("config.settings.notify_tier_overrides", {"dream": "bell", "dream.queue_stalled": "drop"})
+    assert notices.resolve_tier("dream.queue_stalled") == "drop"
+    assert notices.resolve_tier("dream.corrections_applied") == "bell"
+    monkeypatch.setattr("config.settings.notify_tier_overrides", {"dream": "loud"})
+    assert notices.resolve_tier("dream.corrections_applied") == "log"
 
 
 # --- notify() ----------------------------------------------------------------
@@ -74,7 +74,7 @@ def test_log_tier_is_a_row_and_nothing_else(wires):
 
 def test_bell_tier_broadcasts_but_never_reaches_the_bus(wires):
     sse, bus = wires
-    notices.notify("canary.parked", "Canary parked: x", subject="x")
+    notices.notify("system.embeddings_down", "Embeddings are down", subject="x")
     assert len(sse.events) == 1 and sse.events[0]["tier"] == "bell"
     assert bus.events == []
     assert len(db.get_notifications()) == 1
@@ -120,9 +120,9 @@ def test_daily_dedup_swallows_a_same_day_repeat(wires):
 def test_explicit_dedup_key_keeps_the_old_marker_format(wires):
     from datetime import datetime, timezone
 
-    notices.notify("canary.maintenance", "m", dedup_key="canary_maintain:abc")
+    notices.notify("dream.corrections_applied", "m", dedup_key="dream_corrections:abc")
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    assert db.get_snooze_state(f"notify_dedup:{day}:canary_maintain:abc")
+    assert db.get_snooze_state(f"notify_dedup:{day}:dream_corrections:abc")
 
 
 def test_coalesce_folds_repeats_then_resolve_closes_and_a_new_row_follows(wires):
@@ -191,7 +191,7 @@ def test_soft_dismiss_keeps_the_row_in_the_log(wires):
 
 def test_counts_separate_needs_you_from_bell_from_unread(wires):
     notices.notify("jobs.failed", "a")
-    notices.notify("canary.parked", "b", subject="p")
+    notices.notify("system.embeddings_down", "b", subject="p")
     notices.notify("dream.corrections_applied", "c")
     assert db.notification_counts() == {"needs_you": 1, "bell": 1, "unread": 3}
     assert db.mark_notifications_read() == 3
@@ -200,7 +200,7 @@ def test_counts_separate_needs_you_from_bell_from_unread(wires):
 
 def test_dismiss_all_clears_the_bell_but_not_the_log(wires):
     notices.notify("jobs.failed", "a")
-    notices.notify("canary.parked", "b", subject="p")
+    notices.notify("system.embeddings_down", "b", subject="p")
     notices.notify("dream.corrections_applied", "c")
     assert db.dismiss_all_notifications() == 2
     assert db.get_notifications() == []
@@ -210,7 +210,7 @@ def test_dismiss_all_clears_the_bell_but_not_the_log(wires):
 def test_log_view_filters_by_area_and_pages_with_before(wires):
     for i in range(3):
         notices.notify("dream.corrections_applied", f"d{i}")
-    notices.notify("canary.parked", "c", subject="p")
+    notices.notify("system.embeddings_down", "c", subject="p")
     assert {r["area"] for r in db.list_notifications("log", area="dream")} == {"dream"}
     page = db.list_notifications("log", limit=2)
     older = db.list_notifications("log", before=page[-1]["created_at"], limit=10)
@@ -227,7 +227,7 @@ def test_prune_keeps_open_interrupts_and_caps_rows(wires, monkeypatch):
     old = "2020-01-01T00:00:00+00:00"
     keep = notices.notify("jobs.failed", "still waiting")
     gone_old = notices.notify("dream.corrections_applied", "old")
-    gone_bell = notices.notify("canary.parked", "old bell", subject="p")
+    gone_bell = notices.notify("system.embeddings_down", "old bell", subject="p")
     with connect_sessions() as conn:
         conn.execute("UPDATE notifications SET created_at = ?", (old,))
     assert db.prune_notifications(30) == 2
@@ -292,7 +292,7 @@ def test_v43_resolves_open_adaptive_rows_and_nothing_else(tmp_path, monkeypatch)
         ("log", "adaptive.edits_applied", None, None),
         ("dismissed", "adaptive.tripwire_rolled_back", "2026-09-30T01:00:00+00:00", None),
         ("resolved", "adaptive.tripwire_suspect", None, "2026-09-30T02:00:00+00:00"),
-        ("other", "canary.parked", None, None),
+        ("other", "system.mcp_down", None, None),
     ]
     with connect_sessions() as conn:
         for nid, cat, dismissed, resolved in rows:

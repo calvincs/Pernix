@@ -94,17 +94,14 @@ async def test_put_refuses_a_renamed_frontmatter():
         assert resp.status_code == 400 and "match" in resp.json()["detail"]
 
 
-async def test_park_unpark_roundtrip():
+async def test_park_endpoint_is_gone():
+    """Parking left with suite auto-maintenance (3.2). A `parked:` key in an
+    old CANARY.md still parses; nothing reads it."""
     async with _client() as client:
-        await client.post("/api/canary", json={"raw": RAW})
+        await client.post("/api/canary", json={"raw": RAW.replace("tags:", "parked: true\ntags:", 1)})
         resp = await client.patch("/api/canary/api-made", json={"parked": True})
-        assert resp.status_code == 200 and resp.json()["changed"] is True
-        assert load_canary("api-made", base=_base()).parked is True
-        # Idempotent re-park reports unchanged.
-        resp = await client.patch("/api/canary/api-made", json={"parked": True})
-        assert resp.json()["changed"] is False
-        resp = await client.patch("/api/canary/api-made", json={"parked": False})
-        assert load_canary("api-made", base=_base()).parked is False
+        assert resp.status_code == 405
+        assert "parked" not in (await client.get("/api/canary")).json()["canaries"][0]
 
 
 async def test_reviewed_bumps_the_date():
@@ -131,7 +128,7 @@ async def test_listing_carries_lifecycle_fields():
         await client.post("/api/canary", json={"raw": RAW})
         listing = (await client.get("/api/canary")).json()
         c = listing["canaries"][0]
-        assert c["parked"] is False and c["covers"] == ["kind:prompt_note"]
+        assert c["covers"] == ["kind:prompt_note"]
         assert c["stats"]["last_run"]["outcome"] == "timeout"
         runs = (await client.get("/api/canary/runs")).json()["runs"]
         assert runs[0]["outcome"] == "timeout" and "timeout" in runs[0]["error"]
@@ -141,10 +138,8 @@ async def test_missing_canary_is_a_404():
     async with _client() as client:
         for method, path in (
             ("GET", "/api/canary/ghost"),
-            ("PATCH", "/api/canary/ghost"),
             ("DELETE", "/api/canary/ghost"),
             ("POST", "/api/canary/ghost/reviewed"),
         ):
-            kwargs = {"json": {"parked": True}} if method == "PATCH" else {}
-            resp = await client.request(method, path, **kwargs)
+            resp = await client.request(method, path)
             assert resp.status_code == 404, f"{method} {path}"

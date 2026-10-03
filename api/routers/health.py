@@ -284,7 +284,6 @@ _SETTING_BOUNDS = {
     "dream_journal_retention_days": (2, 365),
     "dream_rlm_probe_interval_days": (1, 90),
     "canary_retention_days": (1, 365),
-    "canary_park_after_passes": (3, 200),
     # Mirrors scripts/backup.py's KEEP_MIN/KEEP_MAX so the API rejects what the
     # backup run would have clamped anyway. 0 disables scheduled backups.
     "backup_keep_count": (0, 90),
@@ -559,7 +558,7 @@ async def update_settings(body: dict):
         settings.save()
 
     # A different llm_model is a different agent: re-baseline the whole
-    # canary suite (parked included). Same hook as POST /api/models/switch.
+    # canary suite. Same hook as POST /api/models/switch.
     if "llm_model" in updated:
         try:
             from core.extensions.scheduling import enqueue_full_sweep

@@ -5,8 +5,8 @@ Pernix does a lot on its own — it grades its answers, tunes its own habits, ru
 | Tier | What you get | Used for |
 |---|---|---|
 | **Interrupt** | A number on the bell, a live desktop notification, and a Web Push / webhook to your phone | The agent needs you, or you must be told: a question, a failed job, a turn that stopped and needs a reply, a goal that ran out of budget, money (the fallback model carrying the load) |
-| **Bell** | A quiet item in the bell panel and a small dot on the bell — never a number, never a push | Worth a look, not worth a buzz: a canary parked, an embeddings outage, an MCP server that stopped answering, a skill that was rolled back for you |
-| **Log** | A line in the **Activity** tab — never a badge | Receipts for self-maintenance that already has its own tab: skill auto-applies, dream corrections, canary upkeep, space suggestions |
+| **Bell** | A quiet item in the bell panel and a small dot on the bell — never a number, never a push | Worth a look, not worth a buzz: an embeddings outage, an MCP server that stopped answering, a skill that was rolled back for you |
+| **Log** | A line in the **Activity** tab — never a badge | Receipts for self-maintenance that already has its own tab: skill auto-applies, dream corrections, space suggestions |
 | **Drop** | Nothing recorded | Reserved for overrides, and for synthetic canary and worker sessions (see below) |
 
 Questions from the agent (`ask_user`) are separate from this: they live in the question panel, always count toward the badge and always push.
@@ -20,7 +20,7 @@ Open the bell. It has two tabs:
 
 **Dismiss never deletes.** A dismissed item leaves *Needs you* and stays in *Activity* until the retention window ends (`notification_retention_days`, default 30). Open interrupt items are never pruned.
 
-Some items close themselves when their cause goes away — the embeddings outage when the server answers again, an MCP alert when the connection is back, a parked canary when it is un-parked. They leave the bell and stay in *Activity* marked resolved.
+Some items close themselves when their cause goes away — the embeddings outage when the server answers again, an MCP alert when the connection is back. They leave the bell and stay in *Activity* marked resolved.
 
 **One rollup instead of many.** Skill proposals that wait for *your* decision (changes that fail the safety check, or every pending one when auto-apply is off) are summed into a single item — "N skill proposals wait for your decision" — that opens the Skills tab and clears at zero.
 
@@ -38,7 +38,7 @@ Settings → Integrations → **Notification tiers** has one choice per **area**
 { "notify_tier_overrides": { "canary": "bell", "system.mcp_down": "interrupt" } }
 ```
 
-A key is an area (`canary`) or a full category (`canary.parked`); the category wins when both are set. A key for a retired area (`adaptive`, removed with the adaptive layer in 3.2) is dropped silently when settings are saved. `notify_tiers_enabled: false` is the kill switch: every notice goes back to a bell row with its old urgency and its old channels — no restart needed. `push_urgency_floor` still applies on top of the tiers (set it to `urgent` to silence the phone entirely; questions keep pushing).
+A key is an area (`canary`) or a full category (`jobs.test_failed`); the category wins when both are set. A key for a retired area (`adaptive`, removed with the adaptive layer in 3.2) is dropped silently when settings are saved. `notify_tiers_enabled: false` is the kill switch: every notice goes back to a bell row with its old urgency and its old channels — no restart needed. `push_urgency_floor` still applies on top of the tiers (set it to `urgent` to silence the phone entirely; questions keep pushing).
 
 ## Phone push
 
@@ -63,8 +63,7 @@ Generated from `core/notices.py`. *Session types* lists where a category's tier 
 | `jobs.uncertain_after_restart` | bell | |
 | `jobs.test_passed` / `jobs.test_failed` | log / bell | the Jobs tab already shows a test's result |
 | `review.pending` | bell | one coalesced row counting the skill proposals only you can decide; opens the Skills tab, resolves at zero |
-| `canary.contaminated`, `canary.probe_retired`, `canary.suite_chronic`, `canary.maintenance`, `canary.stale` | log | the Canary tab is the surface |
-| `canary.parked`, `canary.suite_unhealthy` | bell | coalesce; resolved when un-parked / healthy |
+| `canary.contaminated` | log | the Canary tab is the surface |
 | `skills.verify_unsafe`, `skills.auto_rolled_back` | bell | |
 | `skills.rolled_back`, `skills.proposals_auto_applied` | log | |
 | `dream.corrections_applied`, `dream.queue_stalled`, `dream.promotion_stalled` | log | |

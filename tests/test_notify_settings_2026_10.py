@@ -124,13 +124,13 @@ async def test_settings_get_exposes_areas_from_registry():
         cats = [c for c in CATEGORIES if area_of(c) == area]
         assert info["categories"] == cats
         assert info["default_tiers"] == [t for t in TIERS if any(CATEGORIES[c].tier == t for c in cats)]
-    assert areas["canary"]["default_tiers"] == ["bell", "log"]
+    assert areas["canary"]["default_tiers"] == ["log"]
 
 
 async def test_saved_override_reaches_resolve_tier():
     from core.notices import resolve_tier
 
-    assert resolve_tier("canary.parked") == "bell"
+    assert resolve_tier("canary.contaminated") == "log"
     assert resolve_tier("jobs.test_failed") == "bell"
     async with _client() as client:
         resp = await client.post(
@@ -138,7 +138,7 @@ async def test_saved_override_reaches_resolve_tier():
             json={"notify_tier_overrides": {"canary": "drop", "jobs": "log", "jobs.test_failed": "interrupt"}},
         )
     assert resp.status_code == 200
-    assert resolve_tier("canary.parked") == "drop"
+    assert resolve_tier("canary.contaminated") == "drop"
     assert resolve_tier("jobs.failed") == "log"
     # A category override beats its area's.
     assert resolve_tier("jobs.test_failed") == "interrupt"
@@ -148,5 +148,5 @@ async def test_saved_override_reaches_resolve_tier():
         await client.post(
             "/api/settings", json={"notify_tier_overrides": {"canary": "default", "jobs.test_failed": "interrupt"}}
         )
-    assert resolve_tier("canary.parked") == "bell"
+    assert resolve_tier("canary.contaminated") == "log"
     assert resolve_tier("jobs.failed") == "interrupt"

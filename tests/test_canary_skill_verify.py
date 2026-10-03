@@ -79,22 +79,20 @@ def test_first_sight_watermarks_without_a_change_event():
     assert db.get_snooze_state("skill_hash:fresh")
 
 
-def test_edit_after_watermark_is_a_change_and_enqueues_one_sweep(monkeypatch):
+def test_edit_after_watermark_is_a_change_but_enqueues_no_sweep():
+    """The skill-change targeted sweep was cut in 3.2: a change is still
+    detected and the managed canary resynced, but nothing is queued."""
+    import core.extensions.scheduling as sched
+
     md = _mk_skill("evolving", SKILL_WITH_VERIFY)
     sync_and_detect()  # watermark + materialize the verify canary
 
-    sweeps: list = []
-    monkeypatch.setattr(
-        "core.extensions.scheduling.enqueue_targeted_sweep",
-        lambda names, reason: sweeps.append((sorted(names), reason)) or True,
-    )
     md.write_text(md.read_text().replace("DONE", "FINISHED"), encoding="utf-8")
     stats = sync_and_detect()
     assert stats["skills_changed"] == ["evolving"]
-    # The managed canary was resynced and is the covering canary swept.
     cname = verify_canary_name("evolving")
-    assert sweeps == [([cname], "skill-change")]
     assert "FINISHED" in load_canary(cname, base=_cbase()).gates[0]["command"]
+    assert not hasattr(sched, "enqueue_targeted_sweep")
 
 
 def test_verify_block_materializes_a_managed_covering_canary():

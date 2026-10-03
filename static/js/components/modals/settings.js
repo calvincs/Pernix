@@ -399,21 +399,6 @@ const SECTIONS = [
         fields: [
             { key: 'canary_enabled', label: 'Canary Suite Enabled', type: 'bool', restart: RESTART_TOOLS },
             { key: 'canary_retention_days', label: 'Run Retention (days)', type: 'number', min: 1, max: 365 },
-            {
-                key: 'canary_park_after_passes',
-                label: 'Park After Consecutive Passes',
-                type: 'number', min: 3, max: 200,
-                hint: 'Long-green canaries are parked: off the heartbeat, still in the suite, auto-unparked by any red run.',
-            },
-            {
-                key: 'canary_auto_maintain',
-                label: 'Auto-maintain Suite',
-                type: 'bool',
-                risk: 'autonomy',
-                hint: 'The idle sweep promotes vetted canaries, tags flapping ones flaky, parks long-green ones, '
-                    + 'syncs skill verify blocks, and retires exhausted probes. A canary whose latest run failed is '
-                    + 'never auto-moved — except that a red run un-parks.',
-            },
         ],
     },
     {
@@ -2225,7 +2210,7 @@ function buildThisBrowserSection() {
 //
 // notify_tier_overrides is one dict-valued setting: {area or category: tier}.
 // Each area gets a row of its own, and "Default" simply leaves the area out.
-// Category-level keys (a full name like "canary.parked") have no row: they are
+// Category-level keys (a full name like "jobs.test_failed") have no row: they are
 // carried through a save untouched, so hand-tuning in settings.json survives
 // the modal. The default tiers come from the server (GET /api/settings
 // notify_areas, built from the registry); the labels are UI copy and live here.

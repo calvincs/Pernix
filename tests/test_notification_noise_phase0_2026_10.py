@@ -85,17 +85,6 @@ def test_user_rollback_still_notifies(tmp_path, monkeypatch):
     assert rows and rows[0]["category"] == "skills.rolled_back"
 
 
-def test_skills_changed_alone_does_not_raise_a_maintenance_notice(tmp_path, monkeypatch):
-    from core.canary import maintain
-
-    monkeypatch.setattr("config.settings.canary_enabled", True)
-    monkeypatch.setattr("config.settings.canary_auto_maintain", True)
-    monkeypatch.setattr("core.canary.skill_verify.sync_and_detect", lambda **kw: {"skills_changed": ["some-skill"]})
-    stats = maintain.run_maintenance(base=tmp_path / "canaries")
-    assert stats["skills_changed"] == ["some-skill"]  # still reported to the caller / log
-    assert not [n for n in db.get_notifications() if n["title"] == "Canary suite auto-maintenance"]
-
-
 def test_ask_user_statement_skips_the_event_bus(monkeypatch, wired):
     from core.tools.builtin.dialog_tools import ask_user
     from tests.test_core_tools import _dialog_session

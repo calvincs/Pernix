@@ -129,8 +129,8 @@ def generate_variant(canary: CanaryDef, seed: int) -> CanaryDef:
     """The seeded instance of a generated canary.
 
     Everything the generator owns (prompt, files, gates) is replaced;
-    everything the file owns (name, timeout, tags, flaky, parked, covers,
-    probe fields) survives untouched.
+    everything the file owns (name, timeout, tags, flaky, covers) survives
+    untouched.
     """
     path = canary.generator_path
     if path is None:
