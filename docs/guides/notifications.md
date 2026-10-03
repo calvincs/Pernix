@@ -62,7 +62,7 @@ Generated from `core/notices.py`. *Session types* lists where a category's tier 
 | `jobs.failed` | interrupt | |
 | `jobs.uncertain_after_restart` | bell | |
 | `jobs.test_passed` / `jobs.test_failed` | log / bell | the Jobs tab already shows a test's result |
-| `review.pending` | bell | one coalesced row, resolves at zero |
+| `review.pending` | bell | one coalesced row counting the skill proposals only you can decide; opens the Skills tab, resolves at zero |
 | `canary.contaminated`, `canary.probe_retired`, `canary.suite_chronic`, `canary.maintenance`, `canary.auto_admitted`, `canary.stale` | log | the Canary tab is the surface |
 | `canary.parked`, `canary.suite_unhealthy` | bell | coalesce; resolved when un-parked / healthy |
 | `skills.verify_unsafe`, `skills.auto_rolled_back` | bell | |

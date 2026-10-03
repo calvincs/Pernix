@@ -1,11 +1,12 @@
 """Tiered notifications, stream 2b: the adaptive, dream, skills-apply and
 fallback-burn producers route through core/notices.py, and the one
-"N proposals wait for your decision" bell row (core/adaptive/review.py).
+"N skill proposals wait for your decision" bell row (core/skills/review.py).
 
 What is pinned here: each producer's category (and so its tier), that every
 pre-v42 dedup marker still suppresses a repeat on deploy day, that a tripwire
 suspect leaves the bell when a clean comparison clears it, and that
-review.pending counts only never-auto-apply items in ONE coalescing row.
+review.pending counts only never-auto-apply skill proposals in ONE
+coalescing row.
 """
 
 from __future__ import annotations
@@ -159,37 +160,6 @@ def test_tripwire_rollback_is_its_own_bell_item(tripwire, monkeypatch):
 # --- snooze producers ----------------------------------------------------------
 
 
-async def test_adaptive_step_routes_every_notice_and_keeps_sweep_markers(monkeypatch):
-    from core.snooze import SnoozeRunner
-
-    monkeypatch.setattr("core.snooze._mutation_blocked", lambda: False)
-    monkeypatch.setattr(
-        "core.adaptive.auto_approve_stale_proposals",
-        lambda: {"approved": [7], "summaries": ["#7 thing"], "results": []},
-    )
-    monkeypatch.setattr("core.adaptive.drain_pending", lambda: {"results": [{"batch_id": "b", "applied": [1]}]})
-    monkeypatch.setattr(settings, "canary_enabled", False)
-    one = {"retired": ["e1"], "reasons": {"e1": "r"}}
-    monkeypatch.setattr("core.adaptive.retire.retire_unused_entries", lambda: one)
-    monkeypatch.setattr("core.adaptive.retire.retire_lint_failures", lambda: one)
-    monkeypatch.setattr("core.adaptive.trial.sweep_trials", lambda: {**one, "promoted": [], "retired": ["e1"]})
-    monkeypatch.setattr("core.adaptive.tripwire.evaluate_tripwire", lambda: [])
-    db.set_snooze_state(f"notify_dedup:{_today()}:adaptive_lint_sweep", "1")
-
-    runner = SnoozeRunner.__new__(SnoozeRunner)
-    runner._stats = {}
-    runner._is_cancelled = lambda: False
-    await SnoozeRunner._adaptive_step(runner)
-
-    for cat in ("adaptive.auto_approved", "adaptive.edits_applied", "adaptive.value_sweep", "adaptive.trial_sweep"):
-        rows = _rows(cat)
-        assert len(rows) == 1 and rows[0]["tier"] == "log", cat
-        assert not _bell(cat)
-    assert _rows("adaptive.lint_sweep") == []  # the pre-v42 marker held
-    assert db.get_snooze_state(f"notify_dedup:{_today()}:adaptive_usage_sweep")
-    assert db.get_snooze_state(f"notify_dedup:{_today()}:adaptive_trial_sweep")
-
-
 async def test_skill_auto_apply_is_log_tier(monkeypatch):
     from core.snooze import SnoozeRunner
 
@@ -257,70 +227,82 @@ def test_dream_stall_checks_are_log_tier():
 
 
 def _seed_review_items():
-    canary = db.adaptive_add_proposal("canary_propose", json.dumps({"canary": {"name": "c1"}}), "[]", "new canary")
-    held = db.adaptive_add_proposal("dream", json.dumps(_EDIT), "[]", "held")
-    db.set_snooze_state(f"adaptive_unfounded_notified:{held}", "x")
-    # Pending but the clock will take it: not counted.
-    db.adaptive_add_proposal("refine", json.dumps(_EDIT), "[]", "ripening")
-    # A stale hold marker on a delete-only proposal: delete-only is exempt, not counted.
-    delete_only = db.adaptive_add_proposal("dream", json.dumps([{"action": "delete", "entry_id": "x"}]), "[]", "d")
-    db.set_snooze_state(f"adaptive_unfounded_notified:{delete_only}", "x")
+    # Canary and adaptive proposals no longer count (both queues retired in 3.2).
+    db.adaptive_add_proposal("canary_propose", json.dumps({"canary": {"name": "c1"}}), "[]", "new canary")
+    db.adaptive_add_proposal("dream", json.dumps(_EDIT), "[]", "held")
     low = db.add_skill_proposal("s", "Notes", "p", "add a line", 0.3)
+    big = db.add_skill_proposal("s", "Notes", "p", "x" * 5000, 0.9)
     db.add_skill_proposal("s", "Notes", "p", "add a line", 0.9)  # auto-applies: not counted
-    return canary, held, low
+    return low, big
 
 
-def test_review_pending_counts_only_what_waits_for_a_human():
-    from core.adaptive.review import count_review_pending, refresh_review_pending
+def test_review_pending_counts_only_skill_proposals_that_wait_for_a_human():
+    from core.skills.review import count_review_pending, refresh_review_pending
 
     _seed_review_items()
-    assert count_review_pending() == {"canary": 1, "adaptive": 1, "skills": 1}
-    assert refresh_review_pending() == 3
+    assert count_review_pending() == 2
+    assert refresh_review_pending() == 2
     rows = _bell("review.pending")
     assert len(rows) == 1
-    assert rows[0]["title"] == "3 proposal(s) wait for your decision"
-    assert rows[0]["subject"] == "proposals" and rows[0]["link"] == {"kind": "tab", "tab": "learning"}
-    assert "canary" in rows[0]["body"] and "skill" in rows[0]["body"]
+    assert rows[0]["title"] == "2 skill proposal(s) wait for your decision"
+    assert rows[0]["subject"] == "proposals" and rows[0]["link"] == {"kind": "tab", "tab": "skills"}
+    assert "skill proposal" in rows[0]["body"]
+    assert "canary" not in rows[0]["body"] and "adaptive" not in rows[0]["body"]
 
 
-def test_review_pending_with_the_veto_clock_off_counts_every_pending_row(monkeypatch):
-    from core.adaptive.review import count_review_pending
+def test_review_pending_with_the_veto_clock_off_counts_every_pending_skill_proposal(monkeypatch):
+    from core.skills.review import count_review_pending
 
-    monkeypatch.setattr(settings, "adaptive_auto_approve_after_hours", 0)
     monkeypatch.setattr(settings, "skill_proposal_auto_apply_after_hours", 0)
     _seed_review_items()
-    assert count_review_pending() == {"canary": 1, "adaptive": 3, "skills": 2}
+    assert count_review_pending() == 3
 
 
 def test_review_pending_coalesces_into_one_row_and_resolves_at_zero():
-    from core.adaptive.review import refresh_review_pending
+    from core.skills.review import refresh_review_pending
 
-    canary, held, low = _seed_review_items()
+    low, big = _seed_review_items()
     refresh_review_pending()
     refresh_review_pending()  # unchanged count: no update, row stays read/unread as it was
     rows = _bell("review.pending")
     assert len(rows) == 1 and rows[0]["occurrences"] == 1
 
-    db.adaptive_resolve_proposal(canary, "rejected")
-    assert refresh_review_pending() == 2
+    db.resolve_skill_proposal(low, "rejected")
+    assert refresh_review_pending() == 1
     rows = _bell("review.pending")
     assert len(rows) == 1 and rows[0]["occurrences"] == 2
-    assert rows[0]["title"] == "2 proposal(s) wait for your decision"
+    assert rows[0]["title"] == "1 skill proposal(s) wait for your decision"
 
-    db.adaptive_resolve_proposal(held, "rejected")
-    db.resolve_skill_proposal(low, "rejected")
+    db.resolve_skill_proposal(big, "rejected")
     assert refresh_review_pending() == 0
     assert _bell("review.pending") == []
     assert len(_rows("review.pending")) == 1  # one row in the log, now resolved
 
 
-async def test_adaptive_step_refreshes_review_pending_even_when_mutations_wait(monkeypatch):
+async def test_snooze_refreshes_review_pending_through_the_skills_rollup(monkeypatch):
     from core.snooze import SnoozeRunner
 
-    monkeypatch.setattr("core.snooze._mutation_blocked", lambda: True)
+    monkeypatch.setattr("core.snooze._mutation_blocked", lambda: True)  # read-only: never waits
     _seed_review_items()
     runner = SnoozeRunner.__new__(SnoozeRunner)
     runner._stats = {}
     runner._is_cancelled = lambda: False
-    await SnoozeRunner._adaptive_step(runner)
+    await SnoozeRunner._refresh_review_pending(runner)
     assert len(_bell("review.pending")) == 1
+
+
+def test_the_rollup_rung_follows_skill_auto_apply_unconditionally():
+    """Activity 15 (the adaptive step) is gone; the rollup is its own rung
+    right after Activity 13b and does not hide behind the auto-apply gate."""
+    import inspect
+
+    from core.snooze import SnoozeRunner
+
+    src = inspect.getsource(SnoozeRunner._do_cycle)
+    assert "adaptive" not in src
+    auto_apply = src.index('self._rung("auto_apply_skill_proposals"')
+    rollup = src.index('self._rung("refresh_review_pending"')
+    sweep = src.index('self._rung("sweep_skill_content_changes"')
+    assert auto_apply < rollup < sweep
+    guard = src[src.rindex("if ", 0, rollup) : rollup]
+    assert "skill_proposal_auto_apply_after_hours" not in guard
