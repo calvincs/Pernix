@@ -61,6 +61,14 @@ _CLIENT_ONLY_EVENTS = {
     # for (an unused listener costs nothing) and cheap insurance against an
     # older server on the other end of a remote/LAN client.
     "user_question",
+    # The feature-eval loop that emitted these was retired in the 2026-10
+    # prune; the client handlers stay with the server's eval-retry plumbing
+    # until follow-up C2 removes both together.
+    "eval.start",
+    "eval.pass",
+    "eval.done",
+    "eval.retry",
+    "eval.exhausted",
 }
 
 

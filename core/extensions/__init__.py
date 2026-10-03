@@ -25,7 +25,6 @@ BUNDLED_EXTENSIONS = [
     "core.extensions.packages",
     "core.extensions.model_mgmt",
     "core.extensions.session_tools",
-    "core.extensions.planning",
     "core.extensions.candor",
     "core.extensions.rlm",
     "core.extensions.telos",

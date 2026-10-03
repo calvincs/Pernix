@@ -308,7 +308,6 @@ async def test_auto_title_never_fires_for_a_canary_session(monkeypatch):
     monkeypatch.setattr("config.settings.memory_recall", False)
     monkeypatch.setattr("config.settings.gates_enabled", False)
     monkeypatch.setattr("config.settings.reflect_enabled", False)
-    monkeypatch.setattr("config.settings.eval_auto", False)
     monkeypatch.setattr("config.settings.candor_enabled", False)
     monkeypatch.setattr("config.settings.telos_enabled", False)
 

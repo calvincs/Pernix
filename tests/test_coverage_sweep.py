@@ -326,7 +326,6 @@ async def test_run_post_task_hooks_no_title_change(mock_llm_client, monkeypatch)
     from sessions.state import AgentSession
 
     monkeypatch.setattr("config.settings.reflect_enabled", False)
-    monkeypatch.setattr("config.settings.eval_auto", False)
     monkeypatch.setattr("config.settings.memory_recall", False)
 
     sid = db.create_session(title="Already Titled")

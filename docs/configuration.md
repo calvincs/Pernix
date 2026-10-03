@@ -607,11 +607,6 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 |---|---|---|
 | `max_fetch_size` | `100000` | Maximum bytes the `http_get` tool will fetch (100KB). |
 | `browser_timeout` | `30` | Page load timeout for `browse_web` (seconds). |
-| `plan_review_timeout` | `120` | Seconds the planning extension waits for user review before timing out. |
-| `eval_auto` | `false` | Run evaluation extension automatically after qualifying turns. |
-| `eval_threshold` | `0.7` | Minimum eval score to consider a turn successful. |
-| `eval_max_retries` | `2` | Max evaluation-driven retries per turn. |
-| `eval_browser_verify` | `false` | Use browser-based verification when evaluating frontend changes. |
 | `reflect_max_retries_worker` | `2` | Separate retry cap for worker sub-agents (bounds fan-out cost). |
 | `reflect_emit_digest_on_pass` | `false` | Have reflect emit a turn digest even on `pass` verdicts. Default off; the digest is always emitted on `retry`/`escalate` so the next scout can plan around real evidence. |
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Enforced at parse time. |

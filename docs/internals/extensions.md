@@ -49,20 +49,6 @@ Always enabled. The worker model lives here.
 
 See [../guides/workers.md](../guides/workers.md).
 
-### `planning`
-
-`core/extensions/planning/__init__.py`
-
-Lightweight feature-tracker for spec-driven development. Always enabled.
-
-| Tool | Safety | What |
-|---|---|---|
-| `add_feature` | safe | Add a feature/task to the active plan |
-| `mark_feature_passed` | safe | Mark complete |
-| `list_features` | safe | Show outstanding plan items |
-
-`plan_review_timeout` (default 120 s) limits how long the planning extension waits for user review before timing out.
-
 ### `scheduling`
 
 `core/extensions/scheduling/__init__.py`
@@ -108,23 +94,15 @@ The server's own project venv (`.venv/` at the repo root) is never touched.
 
 `core/extensions/evaluation/__init__.py`
 
-Auto-evaluates outcomes when `eval_auto = true` (default `false`) — but it is not tool-less: `register()` also contributes the deterministic-gate tools and an on-demand evaluator.
+The agent surface of [deterministic gates](autonomy.md).
 
 | Tool | Safety | Gated on |
 |---|---|---|
 | `add_gate` | dangerous | `gates_enabled` |
 | `list_gates` | safe | `gates_enabled` |
 | `remove_gate` | safe | `gates_enabled` |
-| `evaluate` | safe | always |
 
-The gate tools are the agent surface of [deterministic gates](autonomy.md); `evaluate` scores planned features against acceptance criteria. Settings:
-
-- `eval_auto` — enable automatic evaluation
-- `eval_threshold` (default 0.7) — pass threshold
-- `eval_max_retries` (default 2) — eval-driven retries per turn
-- `eval_browser_verify` (default `false`) — use a headless browser to verify outcomes (useful for frontend changes)
-
-Most users leave auto-evaluation off. Reflect (the always-on quality gate) covers most of the value.
+The `evaluate` tool and the `eval_auto` post-task hook were removed in 3.2 together with the planning extension (`add_feature` / `mark_feature_passed` / `list_features`): they only ever graded features recorded in `data/registry.json`. Reflect (the always-on quality gate) and deterministic gates cover verification.
 
 ### `model_mgmt`
 
@@ -188,11 +166,10 @@ The teleological layer's agent surface (off by default): read the drive state, a
 | web — `browse_web` | on (needs browser binary) | `browser_enabled`, Playwright/Chromium |
 | web — `http_get` | on | none |
 | orchestration | on | none |
-| planning | on | none |
 | scheduling | on | none |
 | session_tools | on | none |
 | packages | on | none |
-| evaluation | `evaluate` on; auto-eval and gate tools off | `eval_auto`, `gates_enabled` |
+| evaluation | gate tools off | `gates_enabled` |
 | model_mgmt | on | none |
 | candor | off | `candor_enabled` (tool registration restart-gated) |
 | rlm — `rlm_process` | off | `rlm_enabled` (tool registration restart-gated) |

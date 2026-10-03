@@ -91,8 +91,6 @@ TOOL_COOCCURRENCE: dict[str, list[str]] = {
     # tools needed to stage sources, but everyday file_read use must not drag
     # the (enabled-only) rlm_process schema into every session's active set.
     "rlm_process": ["file_read", "file_write", "glob"],
-    "add_feature": ["list_features", "mark_feature_passed"],
-    "evaluate": ["list_features", "add_feature", "browse_web"],
     "schedule_job": ["list_scheduled_jobs", "remove_scheduled_job", "set_job_state", "update_scheduled_job"],
     "set_job_state": ["list_scheduled_jobs", "schedule_job"],
     "update_scheduled_job": ["list_scheduled_jobs", "schedule_job"],
