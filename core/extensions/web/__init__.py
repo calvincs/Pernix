@@ -474,6 +474,34 @@ def _clip_html_for_extraction(html: str, url: str, cap: int | None = None) -> tu
     )
 
 
+def _own_tls_verify(url: str):
+    """The TLS `verify` value for one http_get hop.
+
+    Pernix's own server, in network mode, serves HTTPS with a certificate a
+    public CA bundle does not know (self-signed by default, SAN localhost /
+    127.0.0.1). A fetch of exactly that server — https, host localhost or
+    127.0.0.1, port == settings.port — is verified against Pernix's OWN
+    certificate file: an SSL context whose only trust anchor is that cert,
+    with hostname checking on. Every other URL gets True (the default CA
+    bundle). Verification is never switched off; when the own certificate
+    cannot be found, the default applies and the fetch fails loudly.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in ("localhost", "127.0.0.1"):
+        return True
+    if not getattr(settings, "network_enabled", False) or parsed.port != getattr(settings, "port", None):
+        return True
+    from core import certs
+
+    cert = settings.ssl_cert_path if settings.ssl_mode == "custom" else str(certs.SELF_SIGNED_CERT)
+    if not cert or not os.path.isfile(cert):
+        logger.warning("http_get: own certificate %r not found; using the default CA bundle", cert)
+        return True
+    import ssl
+
+    return ssl.create_default_context(cafile=cert)
+
+
 def http_get(url: str, _context: dict | None = None):
     """Fetch content from a URL. Returns (text, status), body max 100KB.
 
@@ -494,91 +522,96 @@ def http_get(url: str, _context: dict | None = None):
         # address after the initial URL passed the SSRF check.
         deadline = time.monotonic() + _HTTP_GET_DEADLINE_S
         cap = int(settings.max_fetch_size)
-        with httpx.Client(follow_redirects=False) as client:
-            for _ in range(10):
-                if _fetch_cancelled(_context):
+        for _ in range(10):
+            if _fetch_cancelled(_context):
+                return _fetch_outcome(
+                    f"Error fetching {url}: cancelled before the request was sent",
+                    "cancelled",
+                    url,
+                    source_complete=False,
+                )
+            # Each operation gets the smaller of its own ceiling and what
+            # is left of the total. httpx's timeout is per-read, so a
+            # single fixed value let a slow-drip server satisfy it forever
+            # from inside an exchange the deadline had already ended.
+            op = _http_op_timeout(deadline - time.monotonic())
+            if op is None:
+                return _fetch_outcome(
+                    f"Error fetching {url}: exceeded the {_HTTP_GET_DEADLINE_S:.0f}s overall fetch deadline",
+                    "deadline",
+                    url,
+                    source_complete=False,
+                )
+            # stream(), not get(): get() reads and decodes the ENTIRE body
+            # before max_fetch_size is applied, so one `http_get` of a
+            # multi-GB file took the whole container's memory with it.
+            # One client per hop: TLS verification is chosen for the URL this
+            # hop actually fetches (_own_tls_verify), so a redirect can never
+            # carry the own-certificate trust over to another host.
+            with (
+                httpx.Client(follow_redirects=False, verify=_own_tls_verify(url)) as client,
+                client.stream("GET", url, timeout=op) as resp,
+            ):
+                if resp.is_redirect:
+                    location = resp.headers.get("location")
+                    if not location:
+                        break
+                    url = _validate_url(urljoin(url, location), allow_loopback=allow_loopback)
+                    continue
+                resp.raise_for_status()
+
+                declared = resp.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > cap * _OVERSIZE_FACTOR:
                     return _fetch_outcome(
-                        f"Error fetching {url}: cancelled before the request was sent",
-                        "cancelled",
+                        f"Error fetching {url}: response is {int(declared)} bytes, over the fetch cap",
+                        "refused",
                         url,
                         source_complete=False,
                     )
-                # Each operation gets the smaller of its own ceiling and what
-                # is left of the total. httpx's timeout is per-read, so a
-                # single fixed value let a slow-drip server satisfy it forever
-                # from inside an exchange the deadline had already ended.
-                op = _http_op_timeout(deadline - time.monotonic())
-                if op is None:
+
+                ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if ctype and not (ctype.startswith("text/") or ctype in _TEXTUAL_CONTENT_TYPES):
                     return _fetch_outcome(
-                        f"Error fetching {url}: exceeded the {_HTTP_GET_DEADLINE_S:.0f}s overall fetch deadline",
-                        "deadline",
+                        f"Error fetching {url}: content-type {ctype} is not text",
+                        "refused",
                         url,
                         source_complete=False,
                     )
-                # stream(), not get(): get() reads and decodes the ENTIRE body
-                # before max_fetch_size is applied, so one `http_get` of a
-                # multi-GB file took the whole container's memory with it.
-                with client.stream("GET", url, timeout=op) as resp:
-                    if resp.is_redirect:
-                        location = resp.headers.get("location")
-                        if not location:
-                            break
-                        url = _validate_url(urljoin(url, location), allow_loopback=allow_loopback)
-                        continue
-                    resp.raise_for_status()
 
-                    declared = resp.headers.get("content-length")
-                    if declared and declared.isdigit() and int(declared) > cap * _OVERSIZE_FACTOR:
-                        return _fetch_outcome(
-                            f"Error fetching {url}: response is {int(declared)} bytes, over the fetch cap",
-                            "refused",
-                            url,
-                            source_complete=False,
-                        )
+                chunks: list[bytes] = []
+                total = 0
+                # Which limit stopped the read, not merely that one did.
+                # Both branches used to end in the same "[truncated at
+                # {cap} bytes]" line, so a 3 KB body cut short by the
+                # whole-exchange deadline claimed it had filled the 100 KB
+                # cap — a fetch that should be retried reading as a fetch
+                # that returned everything worth having.
+                stop_reason = ""
+                stop_status = ""
+                for chunk in resp.iter_bytes():
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > cap:
+                        stop_reason, stop_status = f"the {cap:,}-byte fetch cap", "capped"
+                        break
+                    if time.monotonic() > deadline:
+                        stop_reason = f"the {_HTTP_GET_DEADLINE_S:.0f}s whole-exchange deadline"
+                        stop_status = "deadline"
+                        break
+                    if _fetch_cancelled(_context):
+                        # Checked every chunk, so the thread unwinds within
+                        # one read of the cancel rather than running the
+                        # body out with nobody awaiting it.
+                        stop_reason = "cancellation by the dispatcher"
+                        stop_status = "cancelled"
+                        break
+                raw = b"".join(chunks)
+                content = raw.decode(resp.encoding or "utf-8", errors="replace")
 
-                    ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-                    if ctype and not (ctype.startswith("text/") or ctype in _TEXTUAL_CONTENT_TYPES):
-                        return _fetch_outcome(
-                            f"Error fetching {url}: content-type {ctype} is not text",
-                            "refused",
-                            url,
-                            source_complete=False,
-                        )
-
-                    chunks: list[bytes] = []
-                    total = 0
-                    # Which limit stopped the read, not merely that one did.
-                    # Both branches used to end in the same "[truncated at
-                    # {cap} bytes]" line, so a 3 KB body cut short by the
-                    # whole-exchange deadline claimed it had filled the 100 KB
-                    # cap — a fetch that should be retried reading as a fetch
-                    # that returned everything worth having.
-                    stop_reason = ""
-                    stop_status = ""
-                    for chunk in resp.iter_bytes():
-                        chunks.append(chunk)
-                        total += len(chunk)
-                        if total > cap:
-                            stop_reason, stop_status = f"the {cap:,}-byte fetch cap", "capped"
-                            break
-                        if time.monotonic() > deadline:
-                            stop_reason = f"the {_HTTP_GET_DEADLINE_S:.0f}s whole-exchange deadline"
-                            stop_status = "deadline"
-                            break
-                        if _fetch_cancelled(_context):
-                            # Checked every chunk, so the thread unwinds within
-                            # one read of the cancel rather than running the
-                            # body out with nobody awaiting it.
-                            stop_reason = "cancellation by the dispatcher"
-                            stop_status = "cancelled"
-                            break
-                    raw = b"".join(chunks)
-                    content = raw.decode(resp.encoding or "utf-8", errors="replace")
-
-                if len(content) > cap and not stop_reason:
-                    stop_reason, stop_status = f"the {cap:,}-byte fetch cap", "capped"
-                return _finish_fetch(url, content, cap, stop_reason, stop_status, declared)
-            return _fetch_outcome(f"Error fetching {url}: too many redirects", "error", url, source_complete=False)
+            if len(content) > cap and not stop_reason:
+                stop_reason, stop_status = f"the {cap:,}-byte fetch cap", "capped"
+            return _finish_fetch(url, content, cap, stop_reason, stop_status, declared)
+        return _fetch_outcome(f"Error fetching {url}: too many redirects", "error", url, source_complete=False)
     except ValueError as e:
         return _fetch_outcome(f"Error: redirect blocked: {e}", "refused", url, source_complete=False)
     except Exception as e:
