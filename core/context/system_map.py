@@ -36,10 +36,6 @@ _MAPPED_TABLES = (
     "gates",
     "session_goals",
     "token_usage",
-    "adaptive_entries",
-    "adaptive_events",
-    "adaptive_batches",
-    "adaptive_proposals",
     "canary_runs",
     "rlm_runs",
     "dream_hypotheses",
@@ -58,7 +54,6 @@ data/workspace/spaces/    per-space home folders (space sessions work here; runs
 data/skills/              skills (SKILL.md + scripts/ + references/)
 data/agent/               SOUL.md / RULES.md / SESSIONS.md (user-owned — never machine-written)
 data/agent/spaces/<slug>/ per-space directive overrides (same three files; present file wins)
-data/adaptive/ADAPTIVE.md read-only mirror of the adaptive store (never read back)
 data/canaries/            canary suite (CANARY.md per task)
 data/kernels/<sid>/       session-kernel snapshots + large-tool-result payloads
 data/settings.json        runtime settings
@@ -84,13 +79,6 @@ CONTEXT_BLOCKS = (
         "reference",
         "per session",
         "space membership, workspace home (soft, not a sandbox), memory prefix",
-    ),
-    (
-        "Adaptive notes/policies",
-        "adaptive store (machine)",
-        "advisory — RULES.md wins",
-        "idle applies",
-        "learned prompt_notes + policies, with producer + evidence",
     ),
     (
         "[AVAILABLE SKILLS]",
@@ -128,7 +116,7 @@ CONTEXT_BLOCKS = (
         "turn ledger (composed)",
         "reference — verify before acting",
         "per turn",
-        "finished work, last verdict, adaptive changes, canary regressions, platform restarts",
+        "finished work, last verdict, open questions, canary regressions, platform restarts",
     ),
     (
         "PRIOR ATTEMPT DIGEST",
@@ -144,7 +132,6 @@ _STORE_TOOLS = """\
 |---|---|---|
 | long-term memory | recall, deep_recall | remember (supersede= for one-call repair), update_memory, forget |
 | session history | list_recent_sessions, read_session_summary, search_sessions | (automatic) |
-| adaptive store | rendered into prompt; adaptive_proposals (pending, plain-language); /api/adaptive/* | adaptive_note (2/day, linted); adaptive_proposal_decide (only when the user says so) |
 | skills | load_skill, read_skill_instructions | SKILL.md file (data/skills/<name>/); Skills panel editor |
 | post-mortems | (scout: search_post_mortems) | (reflect writes them) |
 | workspace files | file_read, grep, glob, bash, repl | file_write, bash |"""

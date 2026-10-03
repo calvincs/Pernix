@@ -1,22 +1,22 @@
 // Pernix — Trust tab (Explorer): is the learning loop measuring anything real?
 //
-// The other three Self-tuning tabs each show one subsystem doing its job:
-// Learning lists the rules the agent wrote, Self-checks lists the canaries,
-// Goals lists the questions. None of them answers the question underneath all
-// three — how much of this is grounded in something that actually happened,
-// and how much is the model agreeing with itself.
+// The Self-checks tab shows the canary suite doing its job. It does not answer
+// the question underneath it — how much of what the grader concludes is
+// grounded in something that actually happened, and how much is the model
+// agreeing with itself.
 //
 // So this tab is deliberately the plainest surface in the app: counts, in
 // sections, with no chart anywhere. A chart would invite reading a trend into
 // four data points; what these numbers are for is "is the share of grounded
-// outcomes going up, and did any of the trials separate". Everything comes
+// outcomes going up". Everything comes
 // from one GET, and every field is optional — an older server, a subsystem
 // that is off, or a table that is empty all render as zeros rather than as an
 // error.
 //
 // Written against the API contract in docs/dev/trust-loop-hardening-plan.md
-// (workstream W2). Until that backend lands the endpoint is a 404, and a 404
-// here is one honest sentence rather than a broken panel.
+// (workstream W2); the adaptive entries and trial-arm sections went with the
+// adaptive layer in 3.2. On a server without the endpoint it is a 404, and a
+// 404 here is one honest sentence rather than a broken panel.
 
 import { el, text, clear } from '../../render.js';
 import { icon } from '../../icons.js';
@@ -24,10 +24,6 @@ import { get } from '../../api.js';
 import { tabGlossary } from './tab-kit.js';
 
 const MISSING_BACKEND = 'Trust metrics need the 3.2 backend';
-
-function badge(label, cls = '') {
-    return el('span', { class: `adaptive-badge ${cls}` }, [text(label)]);
-}
 
 function section(title) {
     return el('div', { class: 'adaptive-section-title' }, [text(title)]);
@@ -62,13 +58,6 @@ function pct(value) {
     const n = Number(value);
     if (!Number.isFinite(n)) return null;
     return `${Math.round((n <= 1 ? n * 100 : n))}%`;
-}
-
-/** A p-value, or an em dash when the test has not been run. */
-function pval(value) {
-    const n = Number(value);
-    if (value == null || !Number.isFinite(n)) return '—';
-    return n < 0.001 ? '<0.001' : n.toFixed(3);
 }
 
 /**
@@ -137,22 +126,6 @@ function outcomesSection(outcomes) {
     ];
 }
 
-function entriesSection(entries) {
-    const byStatus = entries.by_status || {};
-    const out = [section('Adaptive entries')];
-    const names = Object.keys(byStatus).sort();
-    if (!names.length) {
-        out.push(el('div', { class: 'adaptive-empty' }, [text('No entries — the agent has not written any rules about itself yet.')]));
-    }
-    for (const status of names) out.push(stat(status, num(byStatus[status])));
-    out.push(stat(
-        'Unfounded',
-        num(entries.unfounded),
-        'no reference that resolves to a recorded outcome — these wait for you rather than auto-applying',
-    ));
-    return out;
-}
-
 function canariesSection(canaries) {
     return [
         section('Self-checks (14 days)'),
@@ -164,34 +137,6 @@ function canariesSection(canaries) {
             'a run that reached memory or a file outside its own workspace — excluded from every measurement',
         ),
     ];
-}
-
-function trialsSection(trials) {
-    const out = [section(`Trial arms (${trials.length})`)];
-    if (!trials.length) {
-        out.push(el('div', { class: 'adaptive-empty' }, [
-            text('No entries on trial — with trial mode on, an auto-applied entry renders on half of '
-                + 'the turns and its treated and control outcomes are counted here.'),
-        ]));
-        return out;
-    }
-    for (const t of trials) {
-        const treated = t.treated || {};
-        const control = t.control || {};
-        const status = String(t.status || 'running');
-        out.push(el('div', { class: 'adaptive-card trust-trial' }, [
-            el('div', { class: 'adaptive-card-head' }, [
-                badge(status, status === 'retired' ? 'off' : status === 'promoted' ? 'ok' : ''),
-                text(` ${t.title || t.entry_id || ''}`),
-            ]),
-            el('div', { class: 'trust-trial-arms' }, [
-                text(`treated ${num(treated.successes)}/${num(treated.n)}`
-                    + ` · control ${num(control.successes)}/${num(control.n)}`
-                    + ` · p ${pval(t.p)}`),
-            ]),
-        ]));
-    }
-    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,9 +159,9 @@ export async function renderTrustTab(container) {
     }
 
     container.appendChild(tabGlossary(
-        'How much of the learning loop is grounded in something that happened: how '
+        'How much of the grading is grounded in something that happened: how '
         + 'often the grader agrees with you, where each turn’s verdict came from, '
-        + 'and which rules have been measured rather than assumed.',
+        + 'and whether the self-checks stayed clean.',
     ));
 
     container.appendChild(el('div', { class: 'adaptive-head' }, [
@@ -230,7 +175,5 @@ export async function renderTrustTab(container) {
 
     for (const node of graderSection(data.grader || {})) container.appendChild(node);
     for (const node of outcomesSection(data.outcomes || {})) container.appendChild(node);
-    for (const node of entriesSection(data.entries || {})) container.appendChild(node);
     for (const node of canariesSection(data.canaries || {})) container.appendChild(node);
-    for (const node of trialsSection(data.trials || [])) container.appendChild(node);
 }
