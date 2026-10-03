@@ -1,12 +1,13 @@
-"""Tiered notifications, stream 2b: the dream, skills-apply and fallback-burn
+"""Tiered notifications, stream 2b: the dream and fallback-burn
 producers route through core/notices.py, and the one "N skill proposals
 wait for your decision" bell row (core/skills/review.py).
 
 What is pinned here: each producer's category (and so its tier), that every
 pre-v42 dedup marker still suppresses a repeat on deploy day, and that
-review.pending counts only never-auto-apply skill proposals in ONE
-coalescing row. (The adaptive engine and tripwire producers this file also
-covered went with the adaptive layer in 3.2.)
+review.pending counts every pending skill proposal in ONE coalescing row.
+(The adaptive engine and tripwire producers this file also covered went with
+the adaptive layer in 3.2; the skill auto-apply producer went with the veto
+window.)
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from config import settings
 from db import models as db
 from db.database import connect_sessions
 
@@ -53,19 +53,6 @@ def _bell(category: str) -> list[dict]:
 
 
 # --- snooze producers ----------------------------------------------------------
-
-
-async def test_skill_auto_apply_is_log_tier(monkeypatch):
-    from core.snooze import SnoozeRunner
-
-    monkeypatch.setattr(
-        "core.skills.proposals.auto_apply_ripe_proposals", lambda: {"applied": ["p1"], "summaries": ["s § x"]}
-    )
-    runner = SnoozeRunner.__new__(SnoozeRunner)
-    runner._stats = {}
-    await SnoozeRunner._auto_apply_skill_proposals(runner)
-    rows = _rows("skills.proposals_auto_applied")
-    assert len(rows) == 1 and rows[0]["tier"] == "log" and rows[0]["title"] == "Skill proposals auto-applied"
 
 
 async def test_fallback_burn_interrupts_once_a_day_across_the_deploy(monkeypatch, wires):
@@ -133,36 +120,31 @@ def _seed_review_items():
             )
     low = db.add_skill_proposal("s", "Notes", "p", "add a line", 0.3)
     big = db.add_skill_proposal("s", "Notes", "p", "x" * 5000, 0.9)
-    db.add_skill_proposal("s", "Notes", "p", "add a line", 0.9)  # auto-applies: not counted
-    return low, big
+    plain = db.add_skill_proposal("s", "Notes", "p", "add a line", 0.9)
+    db.resolve_skill_proposal(db.add_skill_proposal("s", "Notes", "p", "done", 0.9), "applied")  # not pending
+    return low, big, plain
 
 
-def test_review_pending_counts_only_skill_proposals_that_wait_for_a_human():
+def test_review_pending_counts_every_pending_skill_proposal():
     from core.skills.review import count_review_pending, refresh_review_pending
 
     _seed_review_items()
-    assert count_review_pending() == 2
-    assert refresh_review_pending() == 2
+    assert count_review_pending() == 3
+    assert refresh_review_pending() == 3
     rows = _bell("review.pending")
     assert len(rows) == 1
-    assert rows[0]["title"] == "2 skill proposal(s) wait for your decision"
+    assert rows[0]["title"] == "3 skill proposal(s) wait for your decision"
     assert rows[0]["subject"] == "proposals" and rows[0]["link"] == {"kind": "tab", "tab": "skills"}
     assert "skill proposal" in rows[0]["body"]
+    assert "veto" not in rows[0]["body"]
     assert "canary" not in rows[0]["body"] and "adaptive" not in rows[0]["body"]
-
-
-def test_review_pending_with_the_veto_clock_off_counts_every_pending_skill_proposal(monkeypatch):
-    from core.skills.review import count_review_pending
-
-    monkeypatch.setattr(settings, "skill_proposal_auto_apply_after_hours", 0)
-    _seed_review_items()
-    assert count_review_pending() == 3
 
 
 def test_review_pending_coalesces_into_one_row_and_resolves_at_zero():
     from core.skills.review import refresh_review_pending
 
-    low, big = _seed_review_items()
+    low, big, plain = _seed_review_items()
+    db.resolve_skill_proposal(plain, "rejected")
     refresh_review_pending()
     refresh_review_pending()  # unchanged count: no update, row stays read/unread as it was
     rows = _bell("review.pending")
@@ -192,18 +174,20 @@ async def test_snooze_refreshes_review_pending_through_the_skills_rollup(monkeyp
     assert len(_bell("review.pending")) == 1
 
 
-def test_the_rollup_rung_follows_skill_auto_apply_unconditionally():
-    """Activity 15 (the adaptive step) is gone; the rollup is its own rung
-    right after Activity 13b and does not hide behind the auto-apply gate."""
+def test_the_rollup_rung_runs_unconditionally_after_refine():
+    """Activity 15 (the adaptive step) and 13b (skill auto-apply) are gone;
+    the rollup is its own rung between refine and the skill-change sweep,
+    gated on nothing but cancellation."""
     import inspect
 
     from core.snooze import SnoozeRunner
 
     src = inspect.getsource(SnoozeRunner._do_cycle)
     assert "adaptive" not in src
-    auto_apply = src.index('self._rung("auto_apply_skill_proposals"')
+    assert "auto_apply" not in src
+    refine = src.index('self._rung("refine_one_session"')
     rollup = src.index('self._rung("refresh_review_pending"')
     sweep = src.index('self._rung("sweep_skill_content_changes"')
-    assert auto_apply < rollup < sweep
+    assert refine < rollup < sweep
     guard = src[src.rindex("if ", 0, rollup) : rollup]
-    assert "skill_proposal_auto_apply_after_hours" not in guard
+    assert guard.strip().startswith("if not self._is_cancelled():")

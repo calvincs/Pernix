@@ -573,18 +573,10 @@ class SnoozeRunner:
             _announce(bus, "refine", "Crystallizing skill/memory updates from an idle session")
             await self._rung("refine_one_session", self._refine_one_session())
 
-        # Activity 13b: Skill proposal veto-window auto-apply (no LLM).
-        # Pending SKILL.md proposals older than the veto window are
-        # machine-validated and applied with a timestamped backup.
-        if not self._is_cancelled() and settings.skill_proposal_auto_apply_after_hours > 0:
-            _announce(bus, "skill_auto_apply", "Applying skill proposals past the veto window")
-            await self._rung("auto_apply_skill_proposals", self._auto_apply_skill_proposals())
-
-        # Activity 13b': review.pending rollup (no LLM, read-only). After the
-        # veto window has applied what it will, the one bell row counting
-        # the skill proposals only a human can decide. Unconditional: a
-        # decision made since the last pass should clear the bell even when
-        # auto-apply is off.
+        # Activity 13b': review.pending rollup (no LLM, read-only). The one
+        # bell row counting pending skill proposals — every one waits for a
+        # human. Unconditional: a decision made since the last pass should
+        # clear the bell.
         if not self._is_cancelled():
             await self._rung("refresh_review_pending", self._refresh_review_pending())
 
@@ -935,49 +927,6 @@ Output valid JSON only. No markdown fences. /no_think"""
             logger.warning("Snooze: refine pass failed for %s: %s", sid, e)
             db.set_snooze_state(f"refined:{sid}", watermark)
             return False
-
-    # ------------------------------------------------------------------
-    # Activity 13b: Skill proposal veto-window auto-apply
-    # ------------------------------------------------------------------
-
-    async def _auto_apply_skill_proposals(self) -> None:
-        """Apply pending skill proposals whose veto window has elapsed.
-
-        Thin wrapper over core.skills.proposals.auto_apply_ripe_proposals
-        (machine validation, backups, day cap, idle guard all live there).
-        Announces applied changes as a notification so a veto-after-the-fact
-        is one file restore away.
-        """
-        try:
-            from core.skills.proposals import auto_apply_ripe_proposals
-
-            out = await asyncio.to_thread(auto_apply_ripe_proposals)
-        except Exception as e:
-            logger.warning("Snooze: skill proposal auto-apply failed: %s", e)
-            return
-
-        applied = out.get("applied") or []
-        if not applied:
-            return
-        self._bump("skill_proposals_auto_applied", len(applied))
-        lines = out.get("summaries") or [str(p) for p in applied]
-        try:
-            notices.notify(
-                "skills.proposals_auto_applied",
-                "Skill proposals auto-applied",
-                (
-                    f"{len(applied)} skill proposal(s) past the "
-                    f"{settings.skill_proposal_auto_apply_after_hours}h veto window "
-                    "were validated and applied to SKILL.md.\n"
-                    + "\n".join(f"• {line}" for line in lines)
-                    + "\nBackups in data/skill_backups/<skill>/ — restore one to roll "
-                    "back; reject a pending proposal in the Skills tab to veto it "
-                    "inside the window."
-                ),
-                link={"kind": "tab", "tab": "skills"},
-            )
-        except Exception as e:
-            logger.debug("Snooze: skill auto-apply notification failed: %s", e)
 
     # ------------------------------------------------------------------
     # Activity 13c: Skill content-change sweep → memory re-validation
