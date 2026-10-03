@@ -326,60 +326,6 @@ def test_tripwire_anchors_on_apply_time_not_queue_time(monkeypatch):
     assert any(a["action"] == "flagged" and a["batch_id"] == batch_id for a in actions)
 
 
-async def test_tripwire_dismiss_is_durable(monkeypatch):
-    """cleared_at is terminal: the sweep must not re-flag a dismissed batch."""
-    from fastapi import FastAPI
-    from httpx import ASGITransport, AsyncClient
-
-    from api.routers import adaptive as adaptive_router
-    from core.adaptive.tripwire import evaluate_tripwire
-
-    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
-    _seed_canary_history("ab-dismissed", baseline_pass=True, post_pass=False)
-    assert any(a["action"] == "flagged" for a in evaluate_tripwire())
-    assert [n["category"] for n in db.get_notifications()] == ["adaptive.tripwire_suspect"]
-
-    app = FastAPI()
-    app.include_router(adaptive_router.router)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/api/adaptive/batches/ab-dismissed/dismiss")
-    assert resp.status_code == 200 and resp.json()["cleared"]
-    assert db.get_notifications() == []  # a human dismiss closes the flag's bell item too
-
-    # Same evidence, next cycle — the dismiss holds instead of re-flagging.
-    assert evaluate_tripwire() == []
-    assert db.adaptive_get_batch("ab-dismissed")["status"] == "applied"
-
-
-async def test_delete_entry_endpoint_frees_the_cap(monkeypatch):
-    from fastapi import FastAPI
-    from httpx import ASGITransport, AsyncClient
-
-    from api.routers import adaptive as adaptive_router
-    from core.adaptive.render import build_routing_hints_block
-
-    monkeypatch.setattr("config.settings.adaptive_max_entries_per_kind", 1)
-    _apply_hint(title="wedged", content="stale hint")
-    assert "stale hint" in build_routing_hints_block()
-
-    app = FastAPI()
-    app.include_router(adaptive_router.router)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.delete("/api/adaptive/entries/wedged")
-        assert resp.status_code == 200 and resp.json()["status"] == "deleted"
-        # Second delete is a 404 — the soft delete is idempotent-by-refusal.
-        assert (await client.delete("/api/adaptive/entries/wedged")).status_code == 404
-
-    assert build_routing_hints_block() == ""  # gone from the scout prompt
-    assert db.adaptive_entry_count("routing_hint") == 0  # and from the cap
-    ev = db.adaptive_list_events(entry_id="wedged")[0]
-    assert ev["action"] == "delete" and ev["actor"] == "human" and ev["before_json"]
-
-    # Cap freed: a fresh hint lands where the wedged one blocked it.
-    _apply_hint(title="successor", content="fresh hint")
-    assert db.adaptive_get_entry("successor")["status"] == "active"
-
-
 def test_tripwire_flaky_canaries_never_trip(monkeypatch):
     from core.adaptive.tripwire import evaluate_tripwire
 

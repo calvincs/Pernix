@@ -524,9 +524,7 @@ async def test_trust_answers_with_zeros_over_empty_tables():
     assert await _trust() == {
         "grader": {"agreement": 0.0, "n": 0, "holdout": None},
         "outcomes": {"by_source": {"llm": 0, "next_turn": 0, "user": 0}, "graded_7d": 0, "user_turns_7d": 0},
-        "entries": {"by_status": {}, "unfounded": 0},
         "canaries": {"contaminated_14d": 0, "runs_14d": 0, "fails_14d": 0},
-        "trials": [],
     }
 
 

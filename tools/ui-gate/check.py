@@ -1997,18 +1997,7 @@ TRUST_PAYLOAD = {
         "graded_7d": 180,
         "user_turns_7d": 190,
     },
-    "entries": {"by_status": {"active": 12, "retired": 3}, "unfounded": 2},
     "canaries": {"contaminated_14d": 0, "runs_14d": 44, "fails_14d": 1},
-    "trials": [
-        {
-            "entry_id": "prefer-rg",
-            "title": "Prefer ripgrep over find",
-            "treated": {"n": 41, "successes": 33},
-            "control": {"n": 39, "successes": 25},
-            "p": 0.0412,
-            "status": "running",
-        }
-    ],
 }
 
 # The toolbar (or sheet trigger) on the first assistant answer and the first
@@ -2047,13 +2036,12 @@ TRUST_JS = r"""() => {
   const panel = document.getElementById('file-panel');
   const edge = panel ? panel.getBoundingClientRect().right : 0;
   return {children: c.children.length,
-          cut: [...c.querySelectorAll('.trust-stat-row, .trust-trial')]
+          cut: [...c.querySelectorAll('.trust-stat-row')]
                  .filter(r => r.getBoundingClientRect().right > edge - 2).length,
           stats: [...c.querySelectorAll('.trust-stat')].map(s => ({
               label: t(s.querySelector('.trust-stat-label')),
               value: t(s.querySelector('.trust-stat-value')),
               note: t(s.querySelector('.trust-stat-note'))})),
-          trials: [...c.querySelectorAll('.trust-trial')].map(x => x.textContent.replace(/\s+/g, ' ').trim()),
           empties: [...c.querySelectorAll('.adaptive-empty')].map(x => x.textContent.trim()),
           text: c.textContent}; }"""
 
@@ -2438,7 +2426,7 @@ def adaptive_head_wrap(browser):
 
 
 def trust_tab(browser):
-    """m2: the Trust tab is counts, with a real empty state for the trials."""
+    """m2: the Trust tab is counts, each with its sample size."""
     state = {"payload": json.loads(json.dumps(TRUST_PAYLOAD))}
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
     _stub_trust(ctx, state)
@@ -2460,9 +2448,6 @@ def trust_tab(browser):
         ("Your next message", "31"),
         ("Reflect said so", "140"),
         ("Turns graded (7d)", "180"),
-        ("active", "12"),
-        ("retired", "3"),
-        ("Unfounded", "2"),
         ("Runs", "44"),
         ("Failures", "1"),
         ("Contaminated", "0"),
@@ -2485,32 +2470,23 @@ def trust_tab(browser):
         {"cut": t.get("cut")},
         "m2",
     )
-    check(
-        "trust",
-        "m2: a trial reports both arms and its p-value",
-        len(t.get("trials") or []) == 1
-        and "Prefer ripgrep over find" in t["trials"][0]
-        and "treated 33/41 \u00b7 control 25/39 \u00b7 p 0.041" in t["trials"][0],
-        t.get("trials"),
-        "m2",
-    )
-
-    # The batch that ships trial arms is later than the one that ships this
-    # tab, so the empty state is the state it will actually open in.
-    state["payload"]["trials"] = []
+    # The adaptive entries and trial arms left the payload in 3.2; a server
+    # that still sends them must not bring the sections back.
+    state["payload"]["entries"] = {"by_status": {"active": 12}, "unfounded": 2}
+    state["payload"]["trials"] = [{"entry_id": "x", "title": "Old trial"}]
     pg.evaluate(
         "() => [...document.querySelectorAll('#fp-trust .adaptive-btn')]"
         ".find(b => b.textContent.trim().endsWith('Refresh')).click()"
     )
-    empty = _settle(lambda: (lambda r: r if r and r["stats"] and not r["trials"] else None)(pg.evaluate(TRUST_JS)))
-    empty = empty or pg.evaluate(TRUST_JS) or {}
+    time.sleep(1.0)
+    again = pg.evaluate(TRUST_JS) or {}
     check(
         "trust",
-        "m2: with no trials the section says so rather than going blank",
-        empty.get("trials") == []
-        and any(e.startswith("No entries on trial") for e in empty.get("empties", []))
-        and "Trial arms (0)" in empty.get("text", ""),
-        empty.get("empties"),
+        "m2: no adaptive-entry or trial section renders, even from an old payload",
+        "Adaptive entries" not in again.get("text", "")
+        and "Trial arms" not in again.get("text", "")
+        and "Old trial" not in again.get("text", ""),
+        again.get("text", "")[:200],
         "m2",
     )
     ctx.close()

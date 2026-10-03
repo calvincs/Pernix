@@ -1026,7 +1026,7 @@ Returns `enabled`, the heartbeat `schedule` and `heartbeat_per_night`, and every
 ```
 GET /api/canary/runs?task=&batch_id=&limit=50
 ```
-Run history, newest first (limit clamped to 500). Filter by task name or by the adaptive `batch_id` a post-batch sweep was tagged with.
+Run history, newest first (limit clamped to 500). Filter by task name, or by `batch_id` for rows written before 3.2, when post-batch sweeps of the retired adaptive layer tagged their runs with one.
 
 ### Trigger a Run
 ```
@@ -1055,63 +1055,9 @@ POST   /api/canary/{name}/reviewed   → bumps last_reviewed to today
 DELETE /api/canary/{name}            → moves to .retired/ (purged after canary_purge_after_days — reversible until then)
 ```
 
----
+The canary suite emits no SSE events: poll the endpoints above. Its only push signal is a row in the notifications feed.
 
-## Adaptive Layer
-
-The governed policy store — see [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md). Read endpoints work regardless of `adaptive_enabled`.
-
-```
-GET  /api/adaptive/entries?kind=&status=active,trial&limit=200
-                                                           Entries by kind/status (+ enabled/auto_apply
-                                                           flags). status takes one status or a comma-list;
-                                                           empty = every status. Default is the live set.
-                                                           Each row carries `usage` — the per-entry
-                                                           usefulness counters (uses/successes/failures from
-                                                           scout and reflect citations), null when never used
-POST /api/adaptive/entries                                 Direct authorship: {kind, title, content, scope?}.
-                                                           Immediately active, journaled, deliberately
-                                                           unlinted — the human is the authority the content
-                                                           lint substitutes for. 400 on validation/cap/dup
-DEL  /api/adaptive/entries/{entry_id}                      Release valve: soft-delete one entry as actor
-                                                           "human" (status -> deleted, version bumped,
-                                                           journaled so it rolls back). 404 if unknown or
-                                                           not active. Frees a per-kind cap slot that
-                                                           producers can otherwise only ever fill
-GET  /api/adaptive/events?batch_id=&entry_id=&limit=100    Append-only event journal (before/after snapshots)
-GET  /api/adaptive/batches?status=&limit=100               Apply batches and their tripwire status
-GET  /api/adaptive/proposals?status=pending&limit=100      Proposals by status: pending | approved |
-                                                           auto_approved | auto_applied (dream memory
-                                                           corrections, applied on promotion) | rejected |
-                                                           expired | all. An
-                                                           unknown status is a 400 that names the enum —
-                                                           never a silent []. ?id=N fetches one row whatever
-                                                           its status. Every row carries `summary` (producer,
-                                                           what it is, target), `auto_approve_exempt`
-                                                           (canary proposals wait for a human),
-                                                           `auto_approve_after` (when the veto window closes)
-                                                           and `explanation` {what, why, fate, fate_kind:
-                                                           auto|needs_you|held, producer_label} — plain
-                                                           language, template-built, null if unbuildable
-GET  /api/adaptive/proposals/{id}                          One proposal, any status; 404 if unknown
-POST /api/adaptive/proposals/{id}/discuss                  Mint a normal chat session titled after the
-                                                           proposal; returns {session_id, opener, title} —
-                                                           the Learning tab's "Chat about this" sends the
-                                                           opener there. 404 if unknown
-POST /api/adaptive/proposals/{id}/approve                  Apply-on-approve: executes the batch through the
-                                                           same apply engine as auto-applies and enqueues a
-                                                           batch-tagged canary sweep
-POST /api/adaptive/proposals/{id}/reject                   Reject a pending proposal
-POST /api/adaptive/rollback                                Roll back — body {"batch_id": ...} or {"event_id": ...};
-                                                           walks events in reverse and restores exact snapshots
-POST /api/adaptive/batches/{batch_id}/dismiss              Human dismiss of a tripwire flag: suspect → applied
-                                                           and cleared_at stamped, which is what makes the
-                                                           dismiss durable — the tripwire sweep skips
-                                                           cleared batches, so the same evidence can never
-                                                           re-flag it. 400 if the batch is not suspect
-```
-
-Neither the adaptive layer nor the canary suite emits SSE events. Both are polled through the endpoints above; the tripwire's only push signal is a high-urgency row in the notifications feed.
+The adaptive layer's `/api/adaptive/*` endpoints were removed in 3.2 with the layer itself; its tables stay in the database as history.
 
 ---
 

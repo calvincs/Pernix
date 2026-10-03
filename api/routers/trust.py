@@ -5,22 +5,18 @@ many entries exist, how many canaries passed. None of them answer the only
 question that matters about a loop that changes its own behaviour — whether
 the signal it is learning from is real.
 
-So this endpoint reports the five things that can falsify it:
+So this endpoint reports the three things that can falsify it:
 
 * `grader`   — how often the reflect verdict and the user's own thumb agree,
                plus the nightly hold-out score when one has been recorded.
 * `outcomes` — the outcome-source mix (llm < next_turn < user) and how much of
                the week's traffic got graded at all.
-* `entries`  — adaptive entries by status, and how many are `unfounded`:
-               created from evidence that resolves to no recorded outcome.
 * `canaries` — runs, failures, and how many were contaminated by the memory
                they exist to test.
-* `trials`   — per-entry treated/control results once trial arms ship.
 
-Inputs that do not exist yet answer with zeros. Several of them are written by
-sibling workstreams (the hold-out score, the receipts module, the
-contamination scan, trial arms), and a dashboard that 500s until the last of
-them lands is a dashboard nobody can use to watch them land.
+Inputs that do not exist yet answer with zeros: a dashboard that 500s until
+the last of its inputs lands is a dashboard nobody can use to watch them land.
+The `entries` and `trials` sections went with the adaptive layer in 3.2.
 """
 
 from __future__ import annotations
@@ -68,44 +64,6 @@ def _holdout() -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _unfounded_entries() -> int:
-    """Adaptive entries whose creating evidence resolves to no recorded outcome.
-
-    The resolver lives in core/adaptive/receipts.py, which another workstream
-    owns; until it exists the honest answer is zero rather than an error.
-    """
-    try:
-        from core.adaptive import receipts
-    except ImportError:
-        return 0
-    counter = getattr(receipts, "count_unfounded", None)
-    if not callable(counter):
-        return 0
-    try:
-        return int(counter())
-    except Exception as e:
-        logger.debug("Unfounded-entry count failed: %s", e)
-        return 0
-
-
-def _trials() -> list:
-    """Entries on trial, plus the ones the sweep settled in the last 14 days.
-
-    Same posture as the rest of this surface: an empty list is the correct
-    answer for "nothing is under trial", and a store that predates trial arms
-    reports that rather than failing the whole dashboard.
-    """
-    try:
-        from core.adaptive.trial import list_trials
-    except ImportError:
-        return []
-    try:
-        return list_trials()
-    except Exception as e:
-        logger.debug("Trial listing failed: %s", e)
-        return []
-
-
 def _snapshot() -> dict:
     """Assemble the whole surface. Runs off-loop; every part fails to zeros."""
     from core.metrics import grader_agreement
@@ -133,22 +91,15 @@ def _snapshot() -> dict:
             "graded_7d": outcomes["graded"],
             "user_turns_7d": db.count_user_turns_since(outcome_since),
         },
-        "entries": {
-            "by_status": db.adaptive_entry_status_counts(),
-            "unfounded": _unfounded_entries(),
-        },
         "canaries": {
             "contaminated_14d": canaries["contaminated"],
             "runs_14d": canaries["runs"],
             "fails_14d": canaries["fails"],
         },
-        # Per-entry treated/control results: what an adaptation is worth,
-        # measured, rather than how recently it was written.
-        "trials": _trials(),
     }
 
 
 @router.get("/api/trust")
 async def get_trust():
-    """Grader agreement, outcome-source mix, entry provenance, contamination."""
+    """Grader agreement, outcome-source mix, canary contamination."""
     return await asyncio.to_thread(_snapshot)
