@@ -1,19 +1,19 @@
 """Pernix — Canary proposal generation (plan §5 "growing the suite", §12.2).
 
 Refine turns real failed turns into CANDIDATE canaries — the regression-test
-convention at the behavior level. Two admission paths:
+convention at the behavior level. One admission path:
 
-  human   — proposals ride adaptive_proposals (producer="canary_propose",
-            dict payload); APPROVING one materializes the CANARY.md through a
-            validated round-trip, then enqueues a manual vetting run.
   auto    — (canary_auto_admit) a spec whose gate commands pass the strict
             allowlist proof below materializes immediately, tagged
-            flaky+vetting so it INFORMS but cannot trip the tripwire until
-            the maintenance sweep has seen canary_vetting_runs consistent
-            runs. Specs the machine cannot prove safe — and everything once
-            the suite hits canary_max_suite — fall back to the human path.
+            flaky+vetting so it informs but cannot fail the suite until the
+            maintenance sweep has seen canary_vetting_runs consistent runs.
 
-The allowlist is the security boundary the human click used to be: gate
+Specs the machine cannot prove safe — and everything once the suite hits
+canary_max_suite — are logged and dropped. Until 3.2 they waited in the
+adaptive proposal queue for a human; that queue was retired with the
+adaptive layer.
+
+The allowlist is the security boundary a human click used to be: gate
 commands are LLM-authored from transcripts that contain untrusted content,
 so auto-admission executes only a closed set of binaries on workspace-
 relative paths with no shell metacharacters.
@@ -21,7 +21,6 @@ relative paths with no shell metacharacters.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import shlex
@@ -34,7 +33,6 @@ import yaml
 
 from config import settings
 from core import notices
-from db import models as db
 
 logger = logging.getLogger("pernix.canary")
 
@@ -264,11 +262,11 @@ def auto_admissible(spec: dict) -> str | None:
 
 
 def queue_canary_proposals(proposals: list, producer: str, session_id: str = "") -> int:
-    """Admit or store canary proposals. Returns count accepted (both paths).
+    """Admit canary proposals. Returns the count auto-admitted.
 
     Auto-admissible specs materialize immediately (tagged flaky+vetting — see
-    materialize_canary) with a vetting run enqueued; everything else keeps
-    the human-review path.
+    materialize_canary) with a vetting run enqueued; everything else is
+    logged and dropped.
     """
     stored = 0
     for p in proposals or []:
@@ -277,18 +275,9 @@ def queue_canary_proposals(proposals: list, producer: str, session_id: str = "")
         err = _validate_spec(p)
         if err:
             logger.info("canary proposal rejected (%s): %s", producer, err)
-            if err.startswith("breaks canary isolation"):
-                # Recorded, not just logged: this rejection is a statement
-                # about the GENERATOR (it keeps writing tasks that cannot run
-                # in the sandbox), and a line in a container log is not where
-                # anyone would look for it. Filed resolved, so it never
-                # occupies review-queue budget.
-                _record_rejected(p, producer, session_id, err)
             continue
 
         # Holdout rule (W5): never re-admit a holdout task under a new name.
-        # Refused outright — not queued for review — because the reviewable
-        # artifact would itself carry the answer.
         twin = resembles_holdout(p)
         if twin:
             logger.info("canary proposal rejected (%s): resembles holdout canary '%s'", producer, twin)
@@ -321,41 +310,10 @@ def queue_canary_proposals(proposals: list, producer: str, session_id: str = "")
                 continue
             fallback_reason = f"materialization failed: {mat_err}"
 
-        evidence = [f"session:{session_id}"] if session_id else []
-        db.adaptive_add_proposal(
-            producer="canary_propose",
-            payload_json=json.dumps({"canary": p}),
-            evidence_json=json.dumps(evidence),
-            rationale=f"[new canary '{p['name']}'] {str(p.get('rationale') or '')[:400]} "
-            f"(proposed by {producer}; approving writes data/canaries/{p['name']}/CANARY.md "
-            f"and queues a vetting run; not auto-admitted: {fallback_reason})",
+        logger.info(
+            "canary proposal '%s' dropped (%s): not auto-admitted: %s", p.get("name"), producer, fallback_reason
         )
-        stored += 1
     return stored
-
-
-def _record_rejected(spec: dict, producer: str, session_id: str, reason: str) -> None:
-    """File a refused proposal as an already-resolved 'rejected' row.
-
-    Deduped against the recent rejected rows: a producer re-derives the same
-    finding every cycle, and one row per cycle would bury the queue it is
-    filed next to.
-    """
-    payload = json.dumps({"canary": spec, "rejected_reason": reason})
-    try:
-        for prior in db.adaptive_list_proposals(status="rejected", limit=50):
-            if prior.get("producer") == "canary_propose" and prior.get("payload_json") == payload:
-                return
-        pid = db.adaptive_add_proposal(
-            producer="canary_propose",
-            payload_json=payload,
-            evidence_json=json.dumps([f"session:{session_id}"] if session_id else []),
-            rationale=f"[canary '{spec.get('name')}' REJECTED] {reason} (proposed by {producer})",
-        )
-        if pid is not None:
-            db.adaptive_resolve_proposal(pid, "rejected")
-    except Exception as e:
-        logger.warning("Recording the canary rejection for '%s' failed: %s", spec.get("name"), e)
 
 
 def _validate_spec(p: dict) -> str | None:

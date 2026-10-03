@@ -718,14 +718,6 @@ def approve_proposal(proposal_id: int, actor: str = "user", resolution: str = "a
         except Exception:
             pass
 
-    try:
-        from core.extensions.scheduling import enqueue_post_batch_sweep
-
-        # Nothing landed (every edit refused) → no state change to measure.
-        if result["applied"] and enqueue_post_batch_sweep(batch_id):
-            result["sweep_enqueued"] = True
-    except Exception as e:
-        logger.warning("Post-batch sweep enqueue failed for %s: %s", batch_id, e)
     return result
 
 
