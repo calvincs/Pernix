@@ -175,9 +175,9 @@ async def test_snooze_refreshes_review_pending_through_the_skills_rollup(monkeyp
 
 
 def test_the_rollup_rung_runs_unconditionally_after_refine():
-    """Activity 15 (the adaptive step) and 13b (skill auto-apply) are gone;
-    the rollup is its own rung between refine and the skill-change sweep,
-    gated on nothing but cancellation."""
+    """Activity 15 (the adaptive step) and the skill auto-apply are gone;
+    the rollup is its own rung after the stale-proposal archive and before
+    the skill-change sweep, gated on nothing but cancellation."""
     import inspect
 
     from core.snooze import SnoozeRunner
@@ -186,8 +186,9 @@ def test_the_rollup_rung_runs_unconditionally_after_refine():
     assert "adaptive" not in src
     assert "auto_apply" not in src
     refine = src.index('self._rung("refine_one_session"')
+    archive = src.index('self._rung("archive_stale_skill_proposals"')
     rollup = src.index('self._rung("refresh_review_pending"')
     sweep = src.index('self._rung("sweep_skill_content_changes"')
-    assert refine < rollup < sweep
+    assert refine < archive < rollup < sweep
     guard = src[src.rindex("if ", 0, rollup) : rollup]
     assert guard.strip().startswith("if not self._is_cancelled():")

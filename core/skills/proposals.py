@@ -7,8 +7,10 @@ Skills tab (status 'applied'). Every apply takes a timestamped backup under
 data/skill_backups/, and rollback is a function call away
 (``restore_skill_backup``, POST /api/skills/proposals/{id}/rollback).
 
-Rows with status 'auto_applied' are history from the retired veto-window
-sweep (3.1); they stay valid for listing and rollback.
+A pending proposal nobody decides on within 30 days is archived by snooze
+(``archive_stale_skill_proposals``, Activity 13b). Rows with status
+'auto_applied' are history from the retired veto-window sweep (3.1); they
+stay valid for listing and rollback.
 
 Lived under core/workflows/ until the workflow engine was removed; proposals
 target SKILL.md files and never had anything to do with workflows beyond
@@ -435,3 +437,30 @@ def apply_proposal(proposal_id: str, status_label: str = "applied") -> ApplyResu
         bytes_before=len(body),
         bytes_after=len(new_body),
     )
+
+
+# A suggestion nobody acted on in a month is not going to be acted on; it
+# only keeps the review.pending count from ever reaching zero.
+STALE_PROPOSAL_DAYS = 30
+
+
+def archive_stale_skill_proposals(days: int = STALE_PROPOSAL_DAYS) -> list[str]:
+    """Archive pending skill proposals older than `days` (status 'archived').
+
+    No LLM, no file writes: the row stays as history and refine's dedupe
+    still sees it, so the same change is not proposed again. Returns the
+    archived ids.
+    """
+    if days <= 0:
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    archived: list[str] = []
+    for prop in db.list_skill_proposals(status="pending", limit=1000):
+        if (prop.get("created_at") or "") >= cutoff:
+            continue
+        pid = str(prop.get("id"))
+        if db.resolve_skill_proposal(pid, "archived"):
+            archived.append(pid)
+    if archived:
+        logger.info("Skill proposals: archived %d pending past %d days", len(archived), days)
+    return archived
