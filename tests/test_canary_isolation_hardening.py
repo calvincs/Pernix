@@ -188,7 +188,6 @@ async def _run_scout_counting_memory(session_type: str) -> dict:
         mock_settings.llm_model = "test-model"
         mock_settings.workspace_dir = "/tmp/nonexistent-w5"
         mock_settings.scout_preload_memory_char_limit = 300
-        mock_settings.adaptive_enabled = False
 
         from core.scout.runner import _run_scout_llm
 

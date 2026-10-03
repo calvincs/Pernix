@@ -284,26 +284,11 @@ _SETTING_BOUNDS = {
     "dream_journal_retention_days": (2, 365),
     "dream_rlm_probe_interval_days": (1, 90),
     "canary_retention_days": (1, 365),
-    "canary_baseline_runs": (1, 20),
-    "canary_regression_delta": (0.01, 1.0),
     "canary_heartbeat_per_night": (1, 10),
-    "canary_post_batch_max": (1, 12),
     "canary_park_after_passes": (3, 200),
-    "adaptive_max_entries_per_kind": (1, 100),
     # Mirrors scripts/backup.py's KEEP_MIN/KEEP_MAX so the API rejects what the
     # backup run would have clamped anyway. 0 disables scheduled backups.
     "backup_keep_count": (0, 90),
-    "adaptive_max_auto_applies_per_day": (0, 50),
-    "adaptive_edit_cooldown_hours": (0, 720),
-    "adaptive_tripwire_window_turns": (5, 200),
-    # 1h..30d. 0 is not offered: it would mean "never settle an unjudged
-    # batch", which is the bug this window exists to close.
-    "adaptive_tripwire_window_hours": (1, 720),
-    "adaptive_usage_retire_days": (0, 365),
-    "adaptive_prompt_note_ttl_days": (0, 365),
-    "adaptive_suspect_ttl_days": (0, 90),
-    "adaptive_trial_min_arm": (5, 10_000),
-    "adaptive_trial_ttl_days": (1, 365),
     "notification_retention_days": (0, 365),
     "mcp_call_timeout": (5, 3600),
     "mcp_connect_timeout": (5, 300),

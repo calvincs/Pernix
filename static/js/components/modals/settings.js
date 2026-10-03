@@ -235,14 +235,14 @@ const SECTIONS = [
     {
         title: 'Background Work (Snooze)',
         tab: 'autonomy',
-        description: 'The master switch for everything the agent does while you are idle: memory maintenance and distillation, dreaming, canary sweeps, adaptive edits and embedding sweeps all run inside a snooze cycle. Turning Background Work off stops all of it and is the one control that reliably ends idle-time LLM spend, whatever the individual feature toggles say. Cooldown is how long the machine must be quiet before a cycle may start; the tick interval paces how often the scheduler even looks. The cycle time limit is a hang backstop, not a scheduler — a cycle normally ends when its activity ladder finishes or you start typing; raise it for slow local models.',
+        description: 'The master switch for everything the agent does while you are idle: memory maintenance and distillation, dreaming, canary sweeps, skill proposals and embedding sweeps all run inside a snooze cycle. Turning Background Work off stops all of it and is the one control that reliably ends idle-time LLM spend, whatever the individual feature toggles say. Cooldown is how long the machine must be quiet before a cycle may start; the tick interval paces how often the scheduler even looks. The cycle time limit is a hang backstop, not a scheduler — a cycle normally ends when its activity ladder finishes or you start typing; raise it for slow local models.',
         fields: [
             {
                 key: 'snooze_enabled',
                 label: 'Background Work Enabled',
                 type: 'bool',
                 risk: 'autonomy',
-                hint: 'Off = no idle-time LLM spend at all: memory maintenance, dream, canary, adaptive and embedding sweeps are all skipped.',
+                hint: 'Off = no idle-time LLM spend at all: memory maintenance, dream, canary, refine and embedding sweeps are all skipped.',
             },
             { key: 'snooze_cooldown_minutes', label: 'Idle Cooldown (min)', type: 'number', min: 0 },
             {
@@ -395,7 +395,7 @@ const SECTIONS = [
     {
         title: 'Canary Suite',
         tab: 'autonomy',
-        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline. Change-driven: canaries run when something they cover changes (an adaptive batch, a skill edit, a model swap, a deploy), plus a small nightly heartbeat that keeps history warm. The Adaptive Layer\'s tripwire reads the post-batch results per task. Canary sessions are isolated and tool-allowlisted: computation and reads only.',
+        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline. Change-driven: canaries run when something they cover changes (a skill edit, a model swap, a deploy), plus a small nightly heartbeat that keeps history warm. Canary sessions are isolated and tool-allowlisted: computation and reads only.',
         fields: [
             { key: 'canary_enabled', label: 'Canary Suite Enabled', type: 'bool', restart: RESTART_TOOLS },
             { key: 'canary_schedule', label: 'Heartbeat Schedule (cron)', type: 'text' },
@@ -405,20 +405,7 @@ const SECTIONS = [
                 type: 'number', min: 1, max: 10,
                 hint: 'How many least-recently-run active canaries each scheduled heartbeat runs. Parked canaries sit out.',
             },
-            {
-                key: 'canary_post_batch_max',
-                label: 'Post-batch Probe Size',
-                type: 'number', min: 1, max: 12,
-                hint: 'Cap on canaries per post-batch probe: the ones covering the batch\'s edit kinds first, sentinels riding along.',
-            },
             { key: 'canary_retention_days', label: 'Run Retention (days)', type: 'number', min: 1, max: 365 },
-            {
-                key: 'canary_baseline_runs',
-                label: 'Green Precondition Window',
-                type: 'number', min: 1, max: 20,
-                hint: 'A canary may testify against a batch only when this many trailing runs before the apply were all green.',
-            },
-            { key: 'canary_regression_delta', label: 'Passive Drift Delta (0–1 fraction)', type: 'number', step: 0.05 },
             {
                 key: 'canary_park_after_passes',
                 label: 'Park After Consecutive Passes',
@@ -431,7 +418,8 @@ const SECTIONS = [
                 type: 'bool',
                 risk: 'autonomy',
                 hint: 'Lets the agent write new canary specs into data/canaries/ without asking, once their gate '
-                    + 'commands pass an allowlist proof and vetting runs. Off routes every new canary through you.',
+                    + 'commands pass an allowlist proof and vetting runs. Off, or a spec that fails the proof, '
+                    + 'means the spec is logged and dropped.',
             },
             {
                 key: 'canary_auto_maintain',
@@ -441,77 +429,6 @@ const SECTIONS = [
                 hint: 'The idle sweep promotes vetted canaries, tags flapping ones flaky, parks long-green ones, '
                     + 'syncs skill verify blocks, and retires exhausted probes. A canary whose latest run failed is '
                     + 'never auto-moved — except that a red run un-parks.',
-            },
-        ],
-    },
-    {
-        title: 'Adaptive Layer',
-        tab: 'autonomy',
-        description: 'Governed machine-editable policy: routing hints and prompt notes the agent may auto-apply at idle (with full history and one-click rollback), and policies/worker specs that always wait for your approval. The canary tripwire flags any batch that makes the agent measurably worse. Run the canary suite for at least a week before enabling auto-apply.',
-        fields: [
-            { key: 'adaptive_enabled', label: 'Adaptive Layer Enabled', type: 'bool', risk: 'autonomy' },
-            { key: 'adaptive_auto_apply', label: 'Auto-apply Low-risk Edits', type: 'bool', risk: 'autonomy' },
-            { key: 'adaptive_auto_rollback', label: 'Auto-rollback on Canary Regression', type: 'bool', risk: 'autonomy' },
-            {
-                key: 'adaptive_pm_drift_rollback',
-                label: 'Auto-rollback on Outcome Drift',
-                type: 'bool',
-                risk: 'autonomy',
-                hint: 'The second rollback trigger, and the stricter one: a two-proportion test on turn outcomes '
-                    + 'before and after the apply, at least 30 graded turns each side, p<0.01. Needs '
-                    + 'Auto-rollback on Canary Regression on — a weaker result only flags the batch suspect.',
-            },
-            {
-                key: 'adaptive_trial_enabled',
-                label: 'Trial New Entries Before Trusting Them',
-                type: 'bool',
-                risk: 'autonomy',
-                hint: 'A rule the agent writes for itself renders on half of the turns — the same half every '
-                    + 'time for a given turn — and is kept or dropped on the measured difference between the '
-                    + 'halves. Yours are never trialled. Results show in the Trust tab.',
-            },
-            { key: 'adaptive_trial_min_arm', label: 'Trial Min Turns / Arm', type: 'number', min: 5, max: 10000 },
-            { key: 'adaptive_trial_ttl_days', label: 'Trial Length (days)', type: 'number', min: 1, max: 365 },
-            { key: 'adaptive_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number' },
-            { key: 'adaptive_max_entries_per_kind', label: 'Max Entries / Kind', type: 'number' },
-            { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (hours)', type: 'number' },
-            {
-                key: 'adaptive_usage_retire_days',
-                label: 'Retire Unused After (days)',
-                type: 'number', min: 0, max: 365,
-                hint: 'Entries with zero recorded uses (scout/reflect citations) over this many instrumented days are retired — journaled, rollbackable. 0 disables.',
-            },
-            {
-                key: 'adaptive_prompt_note_ttl_days',
-                label: 'Prompt-note TTL (days)',
-                type: 'number', min: 0, max: 365,
-                hint: 'Prompt notes have no producer-side retirement; this TTL is their backstop. 0 = keep forever.',
-            },
-            {
-                key: 'adaptive_harmful_retire_min_uses',
-                label: 'Failure-dominated Retire — Min Outcomes',
-                type: 'number', min: 0, max: 100,
-                hint: 'An entry with at least this many attributed outcomes (successes + failures from synthesis) whose success share falls below the threshold retires even though it is used. 0 disables.',
-            },
-            {
-                key: 'adaptive_harmful_retire_max_success',
-                label: 'Failure-dominated Retire — Success Floor (0–1 fraction)',
-                type: 'number', min: 0, max: 1, step: 0.05,
-                hint: 'Success share below this = failure-dominated. Journaled soft-delete, one-click rollback, candor/user sources exempt.',
-            },
-            {
-                key: 'adaptive_suspect_ttl_days',
-                label: 'Passive Suspect-flag TTL (days)',
-                type: 'number', min: 0, max: 90,
-                hint: 'A suspect flag from the passive post-mortem signal alone can never self-clear; it auto-clears after this many days. Canary-confirmed flags are exempt. 0 = flags wait for your dismiss.',
-            },
-            {
-                key: 'adaptive_agent_notes_enabled',
-                label: 'Agent Self-notes (adaptive_note tool)',
-                type: 'bool',
-                risk: 'autonomy',
-                restart: RESTART_TOOLS,
-                hint: 'Lets the live agent mint prompt notes and routing hints the moment it learns something — content lint applies, 2/day, normal pipeline + tripwire, never policy.',
             },
         ],
     },

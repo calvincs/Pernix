@@ -22,7 +22,7 @@ shortly after that skill was edited by an auto-applied proposal is the
 closest thing to a measured regression this surface has. With
 ``skill_proposal_auto_rollback`` on, that pairing restores the backup taken
 at apply time and marks the proposal 'rolled_back'. Off by default — the
-signal earns trust the way adaptive_auto_rollback does.
+signal earns trust first.
 
 SECURITY: verify-gate commands execute on the HOST (core/gates.py jails the
 cwd, not the command), and SKILL.md is machine-editable — bash, the API,
