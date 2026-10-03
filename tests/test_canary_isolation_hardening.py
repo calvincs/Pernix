@@ -939,70 +939,6 @@ async def test_a_clean_run_is_not_flagged(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The tripwire ignores contaminated rows
-# ---------------------------------------------------------------------------
-
-
-def _seed_history(batch_id: str, *, baseline_outcomes: list[str], post_outcomes: list[str]) -> None:
-    from db.database import connect_sessions
-
-    for outcome in baseline_outcomes:
-        db.add_canary_run("t1", "scheduled", None, "[]", outcome in ("pass", "contaminated"), outcome=outcome)
-    with connect_sessions() as conn:
-        conn.execute("UPDATE canary_runs SET created_at = '2026-01-01T00:00:00+00:00' WHERE trigger = 'scheduled'")
-    db.adaptive_create_batch(batch_id, "refine", "[]", status="applied")
-    for outcome in post_outcomes:
-        db.add_canary_run("t1", "post_batch", None, "[]", outcome == "pass", batch_id=batch_id, outcome=outcome)
-
-
-def test_contaminated_post_batch_rows_cannot_convict_a_batch(monkeypatch):
-    from core.adaptive.tripwire import evaluate_tripwire
-
-    monkeypatch.setattr("config.settings.adaptive_enabled", True)
-    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
-    _seed_history(
-        "ab-dirty",
-        baseline_outcomes=["pass", "pass", "pass"],
-        post_outcomes=["contaminated", "contaminated"],
-    )
-    actions = evaluate_tripwire()
-    assert not [a for a in actions if a["batch_id"] == "ab-dirty"]
-    assert db.adaptive_get_batch("ab-dirty")["status"] == "applied"
-
-
-def test_the_same_rows_would_convict_if_they_were_clean(monkeypatch):
-    """The control for the test above: without the exclusion these two
-    gate_fails are a confirmed regression."""
-    from core.adaptive.tripwire import evaluate_tripwire
-
-    monkeypatch.setattr("config.settings.adaptive_enabled", True)
-    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
-    _seed_history(
-        "ab-real",
-        baseline_outcomes=["pass", "pass", "pass"],
-        post_outcomes=["gate_fail", "gate_fail"],
-    )
-    actions = evaluate_tripwire()
-    assert any(a["action"] == "flagged" and a["batch_id"] == "ab-real" for a in actions)
-
-
-def test_contaminated_rows_cannot_stand_in_a_green_baseline(monkeypatch):
-    """A contaminated run passed its gates, but it cannot vouch for the task:
-    without three clean green runs before the apply, nothing testifies."""
-    from core.adaptive.tripwire import evaluate_tripwire
-
-    monkeypatch.setattr("config.settings.adaptive_enabled", True)
-    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
-    _seed_history(
-        "ab-thin",
-        baseline_outcomes=["pass", "pass", "contaminated"],
-        post_outcomes=["gate_fail", "gate_fail"],
-    )
-    actions = evaluate_tripwire()
-    assert not [a for a in actions if a["batch_id"] == "ab-thin"]
-
-
-# ---------------------------------------------------------------------------
 # The holdout rule
 # ---------------------------------------------------------------------------
 
@@ -1123,7 +1059,6 @@ def test_queue_canary_proposals_drops_a_holdout_lookalike(monkeypatch, tmp_path)
         "rationale": "r",
     }
     assert propose.queue_canary_proposals([lookalike], producer="refine") == 0
-    assert db.adaptive_list_proposals() == []
 
 
 def test_materialize_canary_refuses_a_holdout_lookalike(monkeypatch, tmp_path):

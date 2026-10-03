@@ -6,7 +6,7 @@ Pernix does a lot on its own — it grades its answers, tunes its own habits, ru
 |---|---|---|
 | **Interrupt** | A number on the bell, a live desktop notification, and a Web Push / webhook to your phone | The agent needs you, or you must be told: a question, a failed job, a turn that stopped and needs a reply, a goal that ran out of budget, money (the fallback model carrying the load) |
 | **Bell** | A quiet item in the bell panel and a small dot on the bell — never a number, never a push | Worth a look, not worth a buzz: a canary parked, an embeddings outage, an MCP server that stopped answering, a skill that was rolled back for you |
-| **Log** | A line in the **Activity** tab — never a badge | Receipts for self-maintenance that already has its own tab: skill and adaptive auto-applies, dream corrections, canary upkeep, space suggestions |
+| **Log** | A line in the **Activity** tab — never a badge | Receipts for self-maintenance that already has its own tab: skill auto-applies, dream corrections, canary upkeep, space suggestions |
 | **Drop** | Nothing recorded | Reserved for overrides, and for synthetic canary and worker sessions (see below) |
 
 Questions from the agent (`ask_user`) are separate from this: they live in the question panel, always count toward the badge and always push.
@@ -38,7 +38,7 @@ Settings → Integrations → **Notification tiers** has one choice per **area**
 { "notify_tier_overrides": { "canary": "bell", "system.mcp_down": "interrupt" } }
 ```
 
-A key is an area (`canary`) or a full category (`canary.parked`); the category wins when both are set. `notify_tiers_enabled: false` is the kill switch: every notice goes back to a bell row with its old urgency and its old channels — no restart needed. `push_urgency_floor` still applies on top of the tiers (set it to `urgent` to silence the phone entirely; questions keep pushing).
+A key is an area (`canary`) or a full category (`canary.parked`); the category wins when both are set. A key for a retired area (`adaptive`, removed with the adaptive layer in 3.2) is dropped silently when settings are saved. `notify_tiers_enabled: false` is the kill switch: every notice goes back to a bell row with its old urgency and its old channels — no restart needed. `push_urgency_floor` still applies on top of the tiers (set it to `urgent` to silence the phone entirely; questions keep pushing).
 
 ## Phone push
 
@@ -67,8 +67,6 @@ Generated from `core/notices.py`. *Session types* lists where a category's tier 
 | `canary.parked`, `canary.suite_unhealthy` | bell | coalesce; resolved when un-parked / healthy |
 | `skills.verify_unsafe`, `skills.auto_rolled_back` | bell | |
 | `skills.rolled_back`, `skills.proposals_auto_applied` | log | |
-| `adaptive.queue_full`, `cap_reached`, `proposal_held`, `auto_approved`, `edits_applied`, `value_sweep`, `lint_sweep`, `trial_sweep`, `cleanup` | log | the Learning tab is the surface; most repeat at most once a day |
-| `adaptive.tripwire_suspect`, `adaptive.tripwire_rolled_back` | bell | suspect coalesces and resolves when cleared |
 | `dream.corrections_applied`, `dream.queue_stalled`, `dream.promotion_stalled` | log | |
 | `spaces.suggested` | log | the suggestion row in the sidebar is the surface |
 | `system.fallback_burn` | interrupt | the fallback model is carrying the load |

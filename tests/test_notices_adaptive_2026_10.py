@@ -1,12 +1,12 @@
-"""Tiered notifications, stream 2b: the adaptive, dream, skills-apply and
-fallback-burn producers route through core/notices.py, and the one
-"N skill proposals wait for your decision" bell row (core/skills/review.py).
+"""Tiered notifications, stream 2b: the dream, skills-apply and fallback-burn
+producers route through core/notices.py, and the one "N skill proposals
+wait for your decision" bell row (core/skills/review.py).
 
 What is pinned here: each producer's category (and so its tier), that every
-pre-v42 dedup marker still suppresses a repeat on deploy day, that a tripwire
-suspect leaves the bell when a clean comparison clears it, and that
+pre-v42 dedup marker still suppresses a repeat on deploy day, and that
 review.pending counts only never-auto-apply skill proposals in ONE
-coalescing row.
+coalescing row. (The adaptive engine and tripwire producers this file also
+covered went with the adaptive layer in 3.2.)
 """
 
 from __future__ import annotations
@@ -50,111 +50,6 @@ def _rows(category: str) -> list[dict]:
 
 def _bell(category: str) -> list[dict]:
     return [n for n in db.list_notifications("bell", limit=500) if n.get("category") == category]
-
-
-def _backdate_proposal(pid: int, hours: int) -> None:
-    stamp = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    with connect_sessions() as conn:
-        conn.execute("UPDATE adaptive_proposals SET created_at = ? WHERE id = ?", (stamp, pid))
-
-
-_EDIT = [
-    {
-        "action": "create",
-        "kind": "policy",
-        "scope": "global",
-        "title": "receipts veto test",
-        "content": "Before claiming a file is written: read it back.",
-        "evidence": ["the agent seemed sloppy"],
-    }
-]
-
-
-# --- adaptive engine ---------------------------------------------------------
-
-
-def test_queue_full_is_log_tier_and_keeps_its_daily_marker():
-    from core.adaptive.engine import _notify_proposal_queue_full
-
-    _notify_proposal_queue_full("dream")
-    rows = _rows("adaptive.queue_full")
-    assert len(rows) == 1 and rows[0]["tier"] == "log" and rows[0]["subject"] == "dream"
-    assert rows[0]["title"] == "Adaptive layer: review queue is full"
-    assert not _bell("adaptive.queue_full")
-    assert db.get_snooze_state(f"adaptive_queue_full:{_today()}:dream")
-    _notify_proposal_queue_full("dream")
-    assert len(_rows("adaptive.queue_full")) == 1
-
-
-def test_cap_reached_keeps_the_pre_v42_dedup_key():
-    from core.adaptive.engine import CAP_REJECTION_MARKER, _notify_capped
-
-    rejected = [{"reason": f"kind 'routing_hint' {CAP_REJECTION_MARKER} (3)"}]
-    # A marker written by the old call site this morning still holds.
-    db.set_snooze_state(f"notify_dedup:{_today()}:adaptive_capped:telos", "1")
-    _notify_capped("telos", rejected)
-    assert _rows("adaptive.cap_reached") == []
-
-    _notify_capped("refine", rejected)
-    rows = _rows("adaptive.cap_reached")
-    assert len(rows) == 1 and rows[0]["tier"] == "log" and rows[0]["subject"] == "refine"
-    assert "routing_hint" in rows[0]["body"]
-
-
-def test_held_proposal_is_log_tier_and_keeps_its_once_ever_marker(monkeypatch):
-    from core.adaptive.engine import _hold_unfounded
-
-    pid = db.adaptive_add_proposal("dream", json.dumps(_EDIT), json.dumps(["the agent seemed sloppy"]), "why")
-    prop = db.adaptive_get_proposal(pid)
-    assert _hold_unfounded(prop) is True
-    rows = _rows("adaptive.proposal_held")
-    assert len(rows) == 1 and rows[0]["tier"] == "log" and rows[0]["subject"] == str(pid)
-    assert db.get_snooze_state(f"adaptive_unfounded_notified:{pid}")
-    assert _hold_unfounded(prop) is True
-    assert len(_rows("adaptive.proposal_held")) == 1
-
-
-# --- tripwire ------------------------------------------------------------------
-
-
-@pytest.fixture
-def tripwire(monkeypatch):
-    import core.adaptive.tripwire as tw
-
-    monkeypatch.setattr(settings, "adaptive_enabled", True)
-    monkeypatch.setattr(settings, "adaptive_auto_rollback", False)
-    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
-    monkeypatch.setattr(tw, "_post_mortem_signal", lambda *a, **k: None)
-    signal = {"value": (True, False, "canary regression: t1 failed")}
-    monkeypatch.setattr(tw, "_canary_signal", lambda *a, **k: signal["value"])
-    db.adaptive_create_batch("b-1", "refine", "[]", status="applied")
-    return tw, signal
-
-
-def test_tripwire_suspect_is_a_bell_item_that_a_clean_comparison_resolves(tripwire):
-    tw, signal = tripwire
-    tw.evaluate_tripwire()
-    open_rows = _bell("adaptive.tripwire_suspect")
-    assert len(open_rows) == 1 and open_rows[0]["subject"] == "b-1" and open_rows[0]["tier"] == "bell"
-    assert open_rows[0]["link"] == {"kind": "tab", "tab": "learning"}
-
-    signal["value"] = (False, False, "")
-    actions = tw.evaluate_tripwire()
-    assert any(a["action"] == "cleared" for a in actions)
-    assert _bell("adaptive.tripwire_suspect") == []
-    # Resolved, not deleted: the activity log keeps the history.
-    assert len(_rows("adaptive.tripwire_suspect")) == 1
-
-
-def test_tripwire_rollback_is_its_own_bell_item(tripwire, monkeypatch):
-    tw, signal = tripwire
-    monkeypatch.setattr(settings, "adaptive_auto_rollback", True)
-    signal["value"] = (True, True, "canary regression: t1 confirmed")
-    monkeypatch.setattr("core.adaptive.engine.rollback", lambda **k: {})
-    tw.evaluate_tripwire()
-    assert len(_bell("adaptive.tripwire_rolled_back")) == 1
-    # The rollback answered the suspect item's question.
-    assert _bell("adaptive.tripwire_suspect") == []
 
 
 # --- snooze producers ----------------------------------------------------------
@@ -227,9 +122,15 @@ def test_dream_stall_checks_are_log_tier():
 
 
 def _seed_review_items():
-    # Canary and adaptive proposals no longer count (both queues retired in 3.2).
-    db.adaptive_add_proposal("canary_propose", json.dumps({"canary": {"name": "c1"}}), "[]", "new canary")
-    db.adaptive_add_proposal("dream", json.dumps(_EDIT), "[]", "held")
+    # Leftover canary and adaptive proposal rows no longer count (both queues
+    # were retired in 3.2; the table stays as history).
+    with connect_sessions() as conn:
+        for producer, payload in (("canary_propose", {"canary": {"name": "c1"}}), ("dream", [{"action": "create"}])):
+            conn.execute(
+                "INSERT INTO adaptive_proposals (producer, payload_json, status, created_at) "
+                "VALUES (?, ?, 'pending', '2026-09-01T00:00:00+00:00')",
+                (producer, json.dumps(payload)),
+            )
     low = db.add_skill_proposal("s", "Notes", "p", "add a line", 0.3)
     big = db.add_skill_proposal("s", "Notes", "p", "x" * 5000, 0.9)
     db.add_skill_proposal("s", "Notes", "p", "add a line", 0.9)  # auto-applies: not counted

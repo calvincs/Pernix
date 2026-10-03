@@ -168,12 +168,14 @@ def _validate_notify_settings(body: dict) -> None:
     An override key is a registered category or its area; a value is one of
     core.notices.TIERS. "", None and "default" mean "no override" and are
     dropped before saving. No key is protected: the user owns his notifications.
+    A key in a retired area (core.notices.RETIRED_AREAS) is dropped silently —
+    a cached client may still send one.
     """
     if "notify_tiers_enabled" in body and not isinstance(body["notify_tiers_enabled"], bool):
         raise HTTPException(400, detail="notify_tiers_enabled must be true or false")
     if "notify_tier_overrides" not in body:
         return
-    from core.notices import CATEGORIES, TIERS, area_of
+    from core.notices import CATEGORIES, RETIRED_AREAS, TIERS, area_of
 
     raw = body["notify_tier_overrides"]
     if not isinstance(raw, dict):
@@ -181,6 +183,8 @@ def _validate_notify_settings(body: dict) -> None:
     known = set(CATEGORIES) | {area_of(c) for c in CATEGORIES}
     clean = {}
     for key, value in raw.items():
+        if key not in known and area_of(key) in RETIRED_AREAS:
+            continue
         if key not in known:
             raise HTTPException(
                 400,

@@ -110,9 +110,9 @@ def test_drop_writes_nothing(wires, monkeypatch):
 
 
 def test_daily_dedup_swallows_a_same_day_repeat(wires):
-    first = notices.notify("adaptive.cap_reached", "cap", subject="refine")
-    second = notices.notify("adaptive.cap_reached", "cap", subject="refine")
-    other = notices.notify("adaptive.cap_reached", "cap", subject="dream")
+    first = notices.notify("dream.corrections_applied", "fix", subject="pernix.config")
+    second = notices.notify("dream.corrections_applied", "fix", subject="pernix.config")
+    other = notices.notify("dream.corrections_applied", "fix", subject="pernix.versions")
     assert first and not second and other
     assert len(db.list_notifications("log")) == 2
 
@@ -147,11 +147,11 @@ def test_kill_switch_restores_legacy_bell_rows_and_channels(wires, monkeypatch):
     sse, bus = wires
     monkeypatch.setattr("config.settings.notify_tiers_enabled", False)
     notices.notify("jobs.failed", "Job failed: x")  # legacy: bell + SSE + push
-    notices.notify("adaptive.auto_approved", "auto-approved")  # legacy: bell row only
+    notices.notify("dream.queue_stalled", "stalled")  # legacy: bell row only
     rows = db.get_notifications()
     assert {r["category"]: (r["tier"], r["urgency"]) for r in rows} == {
         "jobs.failed": ("bell", "high"),
-        "adaptive.auto_approved": ("bell", "normal"),
+        "dream.queue_stalled": ("bell", "normal"),
     }
     assert [e["category"] for e in sse.events] == ["jobs.failed"]
     assert [e["category"] for e in bus.events] == ["jobs.failed"]
