@@ -354,16 +354,10 @@ class Settings:
     # pipeline in session_type="canary" sessions. Zero rows, zero behavior
     # change while off.
     #
-    # Canaries are CHANGE-DRIVEN: they run when something they cover changes
-    # (a skill edit, a model swap, a deploy), not on a
-    # wall clock. The only standing schedule is a small heartbeat — the
-    # canary_heartbeat_per_night least-recently-run active canaries per
-    # night — which keeps every canary's history warm enough that a failure
-    # right after a change is provably the change's fault.
+    # Canaries are CHANGE-DRIVEN: they run after a deploy or a model swap, or
+    # when you press Run — never on a wall clock.
     canary_enabled: bool = False
     canaries_dir: str = "data/canaries"
-    canary_schedule: str = "0 3 * * *"  # heartbeat cron expression
-    canary_heartbeat_per_night: int = 2
     canary_retention_days: int = 30
     # Graduated autonomy (suite self-management, active only under
     # canary_enabled). Auto-admission replaces the human approval click with

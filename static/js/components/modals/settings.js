@@ -395,16 +395,9 @@ const SECTIONS = [
     {
         title: 'Canary Suite',
         tab: 'autonomy',
-        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline. Change-driven: canaries run when something they cover changes (a skill edit, a model swap, a deploy), plus a small nightly heartbeat that keeps history warm. Canary sessions are isolated and tool-allowlisted: computation and reads only.',
+        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline. Change-driven: canaries run after a deploy or a model change, or when you press Run — never on a schedule. Canary sessions are isolated and tool-allowlisted: computation and reads only.',
         fields: [
             { key: 'canary_enabled', label: 'Canary Suite Enabled', type: 'bool', restart: RESTART_TOOLS },
-            { key: 'canary_schedule', label: 'Heartbeat Schedule (cron)', type: 'text' },
-            {
-                key: 'canary_heartbeat_per_night',
-                label: 'Heartbeat Canaries per Night',
-                type: 'number', min: 1, max: 10,
-                hint: 'How many least-recently-run active canaries each scheduled heartbeat runs. Parked canaries sit out.',
-            },
             { key: 'canary_retention_days', label: 'Run Retention (days)', type: 'number', min: 1, max: 365 },
             {
                 key: 'canary_park_after_passes',

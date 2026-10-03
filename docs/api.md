@@ -1020,7 +1020,7 @@ Golden-task canaries — see [internals/canary.md](internals/canary.md). Listing
 ```
 GET /api/canary
 ```
-Returns `enabled`, the heartbeat `schedule` and `heartbeat_per_night`, and every canary definition (name, tags, `covers`, flaky/`parked` flags, probe fields `max_runs`/`expires`, gate names, timeout, `last_reviewed`) with per-task stats over the retention window (`runs`, `passed`, `last_run` including its `outcome`).
+Returns `enabled` and every canary definition (name, tags, `covers`, flaky/`parked` flags, probe fields `max_runs`/`expires`, gate names, timeout, `last_reviewed`) with per-task stats over the retention window (`runs`, `passed`, `last_run` including its `outcome`).
 
 ### List Runs
 ```

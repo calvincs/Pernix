@@ -59,8 +59,6 @@ async def list_canaries():
             }
     return {
         "enabled": settings.canary_enabled,
-        "schedule": settings.canary_schedule,
-        "heartbeat_per_night": settings.canary_heartbeat_per_night,
         "canaries": [_def_payload(d, by_task.get(d.name, {"runs": 0, "passed": 0, "last_run": None})) for d in defs],
     }
 
@@ -84,7 +82,7 @@ async def trigger_run(body: dict = {}):
         raise HTTPException(400, detail="name is required ('*' runs the whole suite)")
     if name == "*":
         # "Run all" means all: a full sweep includes parked canaries, and
-        # must_run means a heartbeat in flight defers it instead of eating it.
+        # must_run means a sweep in flight defers it instead of eating it.
         if not enqueue_full_sweep("run-all"):
             raise HTTPException(503, detail="scheduler unavailable")
         return {"queued": "*"}

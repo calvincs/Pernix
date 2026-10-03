@@ -56,7 +56,7 @@ def init_scheduler():
     """Initialize the scheduler on the main event loop (call from app startup).
 
     The grader hold-out installs itself here rather than from a second call
-    in api/app.py: it is transient like the canary heartbeat, derived from
+    in api/app.py: it is transient, derived from
     settings each boot, and idempotent (replace_existing), so there is no
     state for a caller to get wrong.
     """
@@ -770,14 +770,14 @@ async def _init_scheduler_async():
 
 
 # ---------------------------------------------------------------------------
-# Canary triggers: scheduled (heartbeat) / manual / full
+# Canary triggers: manual / full
 # ---------------------------------------------------------------------------
 
 # One sweep at a time. A second trigger firing mid-sweep skips rather than
 # queues — canaries measure, they don't backlog. The exception is a sweep
 # whose meta says must_run (full sweeps after a model swap or deploy, and
 # coverage-triggered sweeps): those reschedule themselves instead of being
-# silently eaten by a heartbeat that happened to be in flight.
+# silently eaten by a sweep that happened to be in flight.
 _canary_sweep_lock = asyncio.Lock()
 
 # must_run lock-retry cap: ~20 minutes of 2-minute retries.
@@ -818,7 +818,7 @@ async def _execute_canary_sweep_job(meta: dict):
             from core.canary import run_sweep
 
             await run_sweep(
-                trigger=meta.get("trigger", "scheduled"),
+                trigger=meta.get("trigger", "manual"),
                 batch_id=meta.get("batch_id"),
                 names=meta.get("names"),
             )
@@ -848,7 +848,7 @@ def enqueue_targeted_sweep(names: list[str], reason: str) -> bool:
 
     One job, not one per name: enqueue_manual_canary calls landing at the
     same instant would race the skip-not-queue sweep lock and all but the
-    first would be silently dropped. must_run so a heartbeat in flight
+    first would be silently dropped. must_run so a sweep in flight
     defers rather than eats the probe.
     """
     names = [n for n in names if n]
@@ -911,31 +911,6 @@ def enqueue_full_sweep(reason: str, delay_s: int = 0) -> bool:
     return True
 
 
-def ensure_canary_schedule() -> None:
-    """Install the nightly heartbeat job from settings (config is the truth —
-    the job is transient, recreated each boot, never persisted to JSON)."""
-    if not settings.canary_enabled:
-        return
-    scheduler = _get_scheduler()
-    if not scheduler:
-        return
-    try:
-        from apscheduler.triggers.cron import CronTrigger
-
-        scheduler.add_job(
-            _execute_canary_sweep_job,
-            trigger=CronTrigger.from_crontab(settings.canary_schedule, timezone="UTC"),
-            id="_canary_sweep",
-            replace_existing=True,
-            coalesce=True,
-            misfire_grace_time=3600,
-            kwargs={"meta": {"kind": "canary", "transient": True, "trigger": "scheduled"}},
-        )
-        logger.info("Canary heartbeat scheduled: %s", settings.canary_schedule)
-    except Exception as e:
-        logger.warning("Failed to schedule canary sweep: %s", e)
-
-
 # ---------------------------------------------------------------------------
 # Grader hold-out: nightly scoring of the reflect grader against known answers
 # ---------------------------------------------------------------------------
@@ -967,8 +942,8 @@ async def _execute_grader_holdout_job(meta: dict):
 
 
 def ensure_grader_holdout_schedule() -> None:
-    """Install the nightly hold-out job from settings (transient, like the
-    canary heartbeat above — config is the truth, never persisted to JSON)."""
+    """Install the nightly hold-out job from settings (transient — config is
+    the truth, never persisted to JSON)."""
     if not settings.grader_holdout_enabled:
         return
     scheduler = _get_scheduler()

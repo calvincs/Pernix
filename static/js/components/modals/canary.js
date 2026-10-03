@@ -160,12 +160,11 @@ export async function renderCanaryTab(container) {
         + '\u2014 the suite that catches it quietly getting worse.',
     ));
 
-    // Two status chips and up to four buttons in one row that wraps on a
-    // narrow panel (E2) — chips first so a wrapped line never strands one
+    // A status chip and up to four buttons in one row that wraps on a
+    // narrow panel (E2) — the chip first so a wrapped line never strands it
     // under the controls it describes.
     const head = el('div', { class: 'adaptive-head' }, [
         badge(suite.enabled ? 'enabled' : 'disabled', suite.enabled ? 'ok' : 'off'),
-        badge(`heartbeat ${suite.heartbeat_per_night || 2}/night · ${suite.schedule}`),
         el('button', {
             class: 'adaptive-btn',
             title: 'Reload the suite and its recent runs',
@@ -306,5 +305,5 @@ export async function renderCanaryTab(container) {
         row.appendChild(detail);
         container.appendChild(row);
     }
-    if (!runs.length) container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No runs yet — self-checks fire on change (a skill edit, a deploy, a model swap) plus a small nightly heartbeat.')]));
+    if (!runs.length) container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No runs yet — self-checks run after a deploy or model change, or when you press Run.')]));
 }

@@ -232,14 +232,12 @@ The long-running-autonomy substrate: deterministic gates Reflect cannot overrule
 
 ## Canary Suite
 
-Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — plus a small nightly heartbeat that keeps every active canary's history warm. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Self-tuning → Self-checks tab. How it works: [internals/canary.md](internals/canary.md).
+Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — never on a schedule. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Self-tuning → Self-checks tab. How it works: [internals/canary.md](internals/canary.md).
 
 | Setting | Default | Description |
 |---|---|---|
 | `canary_enabled` | `false` | Master switch for the suite: sweeps, the `canary_run` / `canary_status` tools, and the API. |
 | `canaries_dir` | `data/canaries` | Directory scanned for `<name>/CANARY.md` task definitions. |
-| `canary_schedule` | `0 3 * * *` | Cron expression for the nightly heartbeat (default: 03:00). |
-| `canary_heartbeat_per_night` | `2` | How many least-recently-run active (non-parked) canaries each heartbeat runs. |
 | `canary_retention_days` | `30` | Age after which Snooze prunes `canary_runs` rows and their sessions. |
 | `canary_auto_admit` | `true` | Auto-admit machine-proposed canaries whose gate commands pass an allowlist proof plus the vetting runs; specs the machine can't prove safe are logged and dropped. |
 | `canary_auto_maintain` | `true` | Maintenance sweep: promotes vetted canaries, tags flapping ones flaky, parks long-green ones, syncs skill verify blocks, retires exhausted probes. A canary whose latest run failed is never auto-mutated — except that a red run un-parks. |

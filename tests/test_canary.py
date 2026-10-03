@@ -550,25 +550,15 @@ async def test_sweeps_never_confirm_rerun(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_ensure_canary_schedule(monkeypatch):
+def test_no_nightly_canary_schedule():
+    """The nightly heartbeat was retired in 3.2: nothing installs a cron job
+    for the suite, and its settings are gone."""
     import core.extensions.scheduling as sched
+    from config import Settings
 
-    jobs = {}
-
-    class _S:
-        def add_job(self, func, trigger=None, id=None, kwargs=None, **opts):
-            jobs[id] = SimpleNamespace(func=func, trigger=trigger, kwargs=kwargs)
-
-    monkeypatch.setattr(sched, "_scheduler", _S())
-    monkeypatch.setattr("config.settings.canary_enabled", True)
-    sched.ensure_canary_schedule()
-    assert "_canary_sweep" in jobs
-    assert jobs["_canary_sweep"].kwargs["meta"]["transient"] is True
-
-    jobs.clear()
-    monkeypatch.setattr("config.settings.canary_enabled", False)
-    sched.ensure_canary_schedule()
-    assert jobs == {}
+    assert not hasattr(sched, "ensure_canary_schedule")
+    keys = Settings.__dataclass_fields__
+    assert "canary_schedule" not in keys and "canary_heartbeat_per_night" not in keys
 
 
 def test_enqueue_helpers(monkeypatch):
@@ -614,7 +604,7 @@ def test_enqueue_targeted_and_full_sweeps(monkeypatch):
 
 
 async def test_must_run_sweep_defers_on_a_held_lock(monkeypatch):
-    """The lock is skip-not-queue for heartbeats, but a must_run sweep (model
+    """The lock is skip-not-queue for plain sweeps, but a must_run sweep (model
     swap, deploy, coverage trigger) reschedules instead of being eaten."""
     import core.extensions.scheduling as sched
 
@@ -629,47 +619,38 @@ async def test_must_run_sweep_defers_on_a_held_lock(monkeypatch):
 
     async with sched._canary_sweep_lock:
         # Plain sweep: silently skipped, nothing queued.
-        await sched._execute_canary_sweep_job({"trigger": "scheduled"})
+        await sched._execute_canary_sweep_job({"trigger": "manual"})
         assert jobs == {}
         # must_run sweep: reschedules itself under its own job id.
         await sched._execute_canary_sweep_job({"trigger": "full", "must_run": True, "job_id": "_canary_full_deploy"})
         assert jobs["_canary_full_deploy"].kwargs["meta"]["lock_attempts"] == 1
 
 
-async def test_heartbeat_picks_least_recently_run(monkeypatch):
-    """The nightly heartbeat runs the k least-recently-run active canaries —
-    never-run first, parked never."""
+async def test_sweep_without_names_runs_every_canary(monkeypatch):
+    """No heartbeat selection any more: a sweep with no names runs the whole
+    suite, parked canaries included, whatever its trigger label."""
     from core.canary import runner as runner_mod
     from core.canary.parser import CanaryDef
 
     gate = [{"name": "g", "command": "true", "watch_paths": []}]
-    fresh = CanaryDef(name="ran-today", prompt="x", gates=gate)
-    stale = CanaryDef(name="ran-long-ago", prompt="x", gates=gate)
-    never = CanaryDef(name="never-ran", prompt="x", gates=gate)
-    parked = CanaryDef(name="parked-never-ran", prompt="x", gates=gate, parked=True)
-
-    db.add_canary_run("ran-today", "scheduled", None, "[]", True, outcome="pass")
-    db.add_canary_run("ran-long-ago", "scheduled", None, "[]", True, outcome="pass")
-    from db.database import connect_sessions
-
-    with connect_sessions() as conn:
-        conn.execute("UPDATE canary_runs SET created_at = '2026-01-01T00:00:00+00:00' WHERE task = 'ran-long-ago'")
-
+    defs = [
+        CanaryDef(name="a", prompt="x", gates=gate),
+        CanaryDef(name="b", prompt="x", gates=gate, parked=True),
+    ]
     ran = []
 
     async def _fake_run(c, trigger="manual", batch_id=None):
-        ran.append(c.name)
+        ran.append((c.name, trigger))
         from core.canary.runner import CanaryRunResult
 
         return CanaryRunResult(task=c.name, passed=True, trigger=trigger)
 
     monkeypatch.setattr(runner_mod, "run_canary", _fake_run)
-    monkeypatch.setattr(runner_mod, "scan_canaries", lambda *a, **k: [fresh, stale, never, parked])
+    monkeypatch.setattr(runner_mod, "scan_canaries", lambda *a, **k: defs)
     monkeypatch.setattr("config.settings.canary_enabled", True)
-    monkeypatch.setattr("config.settings.canary_heartbeat_per_night", 2)
 
-    await runner_mod.run_sweep(trigger="scheduled")
-    assert ran == ["never-ran", "ran-long-ago"]
+    await runner_mod.run_sweep(trigger="deploy")
+    assert ran == [("a", "deploy"), ("b", "deploy")]
 
 
 # ---------------------------------------------------------------------------
