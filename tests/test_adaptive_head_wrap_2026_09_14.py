@@ -10,7 +10,7 @@ line that could not wrap, and overlapped. The rule is unconditional now.
 
 Whether two boxes overlap is a question for a layout engine, so the real
 check is a new ui-gate pass, `adaptive_head_wrap` — it opens the docked
-Explorer at 1280px on the Self-checks, Learning and Goals tabs and asserts
+Explorer at 1280px on the Self-checks, and Learning tabs and asserts
 every `.adaptive-head` computes `flex-wrap: wrap`, that no two children
 intersect, and that none of them runs past the head's right edge. What is
 pinned here is the shape of the rule that produces it: a stylesheet that grows
@@ -62,7 +62,7 @@ def test_no_tier_gated_copy_of_the_rule_is_left():
 
 
 def test_every_self_tuning_head_uses_the_class():
-    """Learning, Self-checks, Goals and Trust all build their toolbar this
-    way, so one rule fixes and one rule breaks all four."""
+    """Learning, Self-checks and Trust all build their toolbar this
+    way, so one rule fixes and one rule breaks all three."""
     used = {p.name for p in MODALS.glob("*.js") if "class: 'adaptive-head'" in p.read_text()}
-    assert used == {"adaptive.js", "canary.js", "telos.js", "trust.js"}
+    assert used == {"adaptive.js", "canary.js", "trust.js"}

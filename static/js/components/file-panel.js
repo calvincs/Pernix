@@ -17,7 +17,6 @@ import {
 } from './modals/jobs.js';
 import { renderAdaptiveTab } from './modals/adaptive.js';
 import { renderCanaryTab } from './modals/canary.js';
-import { renderTelosTab } from './modals/telos.js';
 import { renderTrustTab } from './modals/trust.js';
 
 // ---------------------------------------------------------------------------
@@ -208,7 +207,7 @@ const DEFAULT_WIDTH = 360;
 //
 // The Explorer carried nine peer tabs in one wrapping strip. At any panel
 // width worth using they took two rows of ten-point uppercase, and nothing
-// said that "Telos" and "Workspace" are different KINDS of thing — a file
+// said that "Canary" and "Workspace" are different KINDS of thing — a file
 // browser sat beside a governance surface as equals.
 //
 // Five groups, each with its own sub-tabs, puts the nine leaves one level
@@ -249,8 +248,7 @@ export const EXPLORER_GROUPS = [
         tabs: [
             { key: 'adaptive', label: 'Learning', term: 'Adaptive' },
             { key: 'canary', label: 'Self-checks', term: 'Canary' },
-            { key: 'telos', label: 'Goals', term: 'Telos' },
-            // Last, and deliberately so: it reads across the other three
+            // Last, and deliberately so: it reads across the other two
             // rather than governing a subsystem of its own.
             { key: 'trust', label: 'Trust' },
         ],
@@ -635,7 +633,6 @@ function buildPanelDOM() {
     const mcpContent = el('div', { class: 'fp-tab-content', 'data-tab': 'mcp', id: 'fp-mcp' });
     const adaptiveContent = el('div', { class: 'fp-tab-content', 'data-tab': 'adaptive', id: 'fp-adaptive' });
     const canaryContent = el('div', { class: 'fp-tab-content', 'data-tab': 'canary', id: 'fp-canary' });
-    const telosContent = el('div', { class: 'fp-tab-content', 'data-tab': 'telos', id: 'fp-telos' });
     const trustContent = el('div', { class: 'fp-tab-content', 'data-tab': 'trust', id: 'fp-trust' });
 
     _panel.appendChild(handle);
@@ -649,7 +646,6 @@ function buildPanelDOM() {
     _panel.appendChild(jobsContent);
     _panel.appendChild(adaptiveContent);
     _panel.appendChild(canaryContent);
-    _panel.appendChild(telosContent);
     _panel.appendChild(trustContent);
 
     renderTabs();
@@ -848,7 +844,6 @@ async function loadTabData() {
     else if (_state.tab === 'jobs') await loadJobs();
     else if (_state.tab === 'adaptive') await renderAdaptiveTab(document.getElementById('fp-adaptive'));
     else if (_state.tab === 'canary') await renderCanaryTab(document.getElementById('fp-canary'));
-    else if (_state.tab === 'telos') await renderTelosTab(document.getElementById('fp-telos'));
     else if (_state.tab === 'trust') await renderTrustTab(document.getElementById('fp-trust'));
 }
 

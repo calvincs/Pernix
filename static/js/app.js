@@ -6690,13 +6690,13 @@ let _closePaletteOverlay = null;   // teardown from a11y.js openOverlay()
 // lists do: it mixed group names with tab names ("Capabilities" for the
 // Skills tab, "Automation" for Jobs) and offered three panes under the
 // internal names the Explorer stopped showing when the interface pass
-// renamed them — MCP is Servers, Canary is Self-checks, Telos is Goals,
+// renamed them — MCP is Servers, Canary is Self-checks,
 // Adaptive is Learning. It is derived from the Explorer's own group/tab
 // table now: one entry per real tab, named the way the panel names it.
 //
 // The words those panes used to answer to are still how people look for
 // them, so each entry carries them as aliases. The tab KEY rides along
-// automatically, which is what keeps "canary", "telos", "mcp" and
+// automatically, which is what keeps "canary", "mcp" and
 // "adaptive" — the names the docs, the settings and the agent's own logs
 // still use — landing on the pane that was renamed.
 const PALETTE_TAB_ALIASES = {
@@ -6704,7 +6704,6 @@ const PALETTE_TAB_ALIASES = {
     memory: 'notes recall remember',
     jobs: 'cron schedule',
     canary: 'tests',
-    telos: 'purpose',
 };
 
 function _paletteExplorerTabs() {
