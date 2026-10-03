@@ -20,7 +20,7 @@ data/
   certs/               # TLS certs for network mode — NOT wiped on rebuild
   sessions.db          # SQLite: sessions, messages, token usage
   settings.json        # User settings (persists across rebuilds)
-  tools.json           # Custom tools created by the agent (toolmaker)
+  tools.json           # Disabled tools + safety-level overrides (Tools panel)
   logs/                # Application logs
 ```
 

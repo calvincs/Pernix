@@ -74,7 +74,7 @@ Generated from `core/notices.py`. *Session types* lists where a category's tier 
 | `system.fallback_burn` | interrupt | the fallback model is carrying the load |
 | `system.embeddings_down`, `system.mcp_down` | bell | coalesce; resolve when the service is back |
 | `system.embeddings_switched`, `system.embeddings_recovered` | log | |
-| `system.tavily_key`, `system.tavily_limit`, `system.tool_quarantined`, `system.memory_oversized`, `system.push_rejected` | bell | |
+| `system.tavily_key`, `system.tavily_limit`, `system.memory_oversized`, `system.push_rejected` | bell | |
 
 ## For contributors
 

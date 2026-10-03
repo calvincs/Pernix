@@ -40,7 +40,6 @@ def _log_rows(category: str) -> list[dict]:
         ("system.mcp_down", "bell"),
         ("system.tavily_key", "bell"),
         ("system.tavily_limit", "bell"),
-        ("system.tool_quarantined", "bell"),
         ("system.memory_oversized", "bell"),
         ("system.push_rejected", "bell"),
         ("skills.rolled_back", "log"),
@@ -216,24 +215,6 @@ def test_tavily_alerts_raise_their_own_categories(monkeypatch):
     monkeypatch.setattr(web, "_tavily_search", lambda *a, **kw: (_ for _ in ()).throw(web._TavilyLimitError("x")))
     web.search_web("q")
     assert [n["category"] for n in db.get_notifications()] == ["system.tavily_limit"]
-
-
-def test_quarantined_tool_keeps_its_dedup_key(tmp_path):
-    from core.tools.builtin import _quarantine_custom_module
-
-    class _Pkg:
-        __path__ = [str(tmp_path)]
-
-    (tmp_path / "custom_bad.py").write_text("raise RuntimeError\n")
-    db.set_snooze_state(_today_marker("custom-tool-broken:custom_bad"), "1")  # announced before the deploy
-    _quarantine_custom_module(_Pkg(), "custom_bad", RuntimeError("boom"))
-    assert db.get_notifications() == [], "a marker written before the registry still suppresses the repeat"
-
-    (tmp_path / "custom_other.py").write_text("raise RuntimeError\n")
-    _quarantine_custom_module(_Pkg(), "custom_other", RuntimeError("boom"))
-    (n,) = db.get_notifications()
-    assert (n["category"], n["subject"]) == ("system.tool_quarantined", "custom_other")
-    assert db.get_snooze_state(_today_marker("custom-tool-broken:custom_other"))
 
 
 def test_oversized_memory_file_keeps_its_dedup_key(tmp_path):

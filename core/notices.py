@@ -129,7 +129,6 @@ CATEGORIES: dict[str, Category] = {
     "system.mcp_down": Category("bell", coalesce=True),
     "system.tavily_key": Category("bell"),
     "system.tavily_limit": Category("bell"),
-    "system.tool_quarantined": Category("bell"),
     "system.memory_oversized": Category("bell"),
     "system.push_rejected": Category("bell"),
 }

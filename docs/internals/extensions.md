@@ -4,7 +4,7 @@ Pernix loads its non-core capability through an **extension** layer. Each extens
 
 This page is the inventory: what extensions exist, what each registers, and how each is gated.
 
-For per-feature usage, see the relevant guide. For tool authoring, see [../authoring/custom-tools.md](../authoring/custom-tools.md).
+For per-feature usage, see the relevant guide.
 
 ---
 
@@ -16,7 +16,7 @@ If a setting that gates an extension changes (e.g., turning `browser_enabled`, `
 
 ---
 
-## The thirteen extensions
+## The bundled extensions
 
 ### `web`
 
@@ -109,21 +109,6 @@ Always enabled. Skill authoring without leaving the chat.
 Deleting a skill is a human action: use the Explorer → Capabilities → Skills panel or `DELETE /api/skills/{name}` (the agent-side `delete_skill` tool was removed 2026-09 — never used, and the UI path already covered it).
 
 See [../authoring/writing-skills.md](../authoring/writing-skills.md).
-
-### `toolmaker`
-
-`core/extensions/toolmaker/__init__.py`
-
-Always enabled. Custom Python tool authoring.
-
-| Tool | Safety | What |
-|---|---|---|
-| `create_tool` | dangerous | Author a new tool: name, description, Python body (with a `register(reg)` function) |
-| `update_tool` | dangerous | Modify an existing custom tool |
-| `list_custom_tools` | safe | List user-authored vs builtin tools |
-| `restore_tool_packages` | caution | Reinstall after a venv wipe |
-
-Custom tools install packages into the workspace venv (`data/workspace/.venv/`), kept separate from the project venv. See [../authoring/custom-tools.md](../authoring/custom-tools.md).
 
 ### `packages`
 
@@ -225,7 +210,6 @@ The teleological layer's agent surface (off by default): read the drive state, a
 | scheduling | on | none |
 | session_tools | on | none |
 | skillmaker | on | none |
-| toolmaker | on | none |
 | packages | on | none |
 | evaluation | `evaluate` on; auto-eval and gate tools off | `eval_auto`, `gates_enabled` |
 | model_mgmt | on | none |
@@ -240,9 +224,9 @@ The total number of registered tools varies by configuration. With a minimal ins
 
 ## Adding a new extension
 
-If the existing extensions don't cover what you need, two options:
+If the existing extensions don't cover what you need, three options:
 
-1. **Custom tool** via `toolmaker` — for one-off tools, no Pernix code change. See [../authoring/custom-tools.md](../authoring/custom-tools.md).
+1. **Skill with a script** — for one-off capabilities, no Pernix code change. See [../authoring/writing-skills.md](../authoring/writing-skills.md).
 2. **New extension module** — for a coherent group of related tools. Drop a directory under `core/extensions/yourmodule/` with an `__init__.py` exposing `register()`, **and add its module path to `BUNDLED_EXTENSIONS` in `core/extensions/__init__.py`** — the list is literal; there is no directory scan. It loads on the next start.
 3. **MCP server** — if the capability already exists as a Model Context Protocol server (or you'd rather build one out-of-process, in any language), configure it in the Explorer → Capabilities → Servers (MCP) tab or `data/mcp_servers.json` instead of writing an extension. See [../mcp.md](../mcp.md).
 
