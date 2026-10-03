@@ -121,10 +121,21 @@ Always enabled. Custom Python tool authoring.
 | `create_tool` | dangerous | Author a new tool: name, description, Python body (with a `register(reg)` function) |
 | `update_tool` | dangerous | Modify an existing custom tool |
 | `list_custom_tools` | safe | List user-authored vs builtin tools |
-| `install_package` | caution | pip install into `data/workspace/.venv/` |
 | `restore_tool_packages` | caution | Reinstall after a venv wipe |
 
 Custom tools install packages into the workspace venv (`data/workspace/.venv/`), kept separate from the project venv. See [../authoring/custom-tools.md](../authoring/custom-tools.md).
+
+### `packages`
+
+`core/extensions/packages/__init__.py`
+
+Always enabled.
+
+| Tool | Safety | What |
+|---|---|---|
+| `install_package` | safe | pip install into the workspace venv (`data/workspace/.venv/`), importable from bash, the Python REPL and skill scripts |
+
+The server's own project venv (`.venv/` at the repo root) is never touched.
 
 ### `evaluation`
 
@@ -215,6 +226,7 @@ The teleological layer's agent surface (off by default): read the drive state, a
 | session_tools | on | none |
 | skillmaker | on | none |
 | toolmaker | on | none |
+| packages | on | none |
 | evaluation | `evaluate` on; auto-eval and gate tools off | `eval_auto`, `gates_enabled` |
 | model_mgmt | on | none |
 | candor | off | `candor_enabled` (tool registration restart-gated) |
