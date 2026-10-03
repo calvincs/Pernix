@@ -22,11 +22,9 @@ BUNDLED_EXTENSIONS = [
     "core.extensions.orchestration",
     "core.extensions.evaluation",
     "core.extensions.scheduling",
-    "core.extensions.toolmaker",
+    "core.extensions.packages",
     "core.extensions.model_mgmt",
     "core.extensions.session_tools",
-    "core.extensions.planning",
-    "core.extensions.skillmaker",
     "core.extensions.rlm",
     "core.extensions.mcp",
 ]

@@ -174,10 +174,11 @@ def test_system_prompt_catalog_excludes_disabled_skills(tmp_path, monkeypatch):
     assert "hidden-skill" not in block
 
 
-def test_create_skill_clears_stale_disabled_flag(tmp_path, monkeypatch):
-    """Re-creating a skill with the same name as a previously-disabled one
-    must come back enabled — otherwise create_skill silently lands in a
-    disabled state because .disabled.json kept the old name."""
+def test_file_authored_skill_clears_stale_disabled_flag(tmp_path, monkeypatch):
+    """Re-authoring a skill (as a SKILL.md file) with the same name as a
+    previously-disabled, since-deleted one must come back enabled once a
+    rescan has seen the deletion — otherwise .disabled.json would silently
+    re-disable the new skill."""
     import shutil
 
     monkeypatch.setattr("config.settings.skills_dir", str(tmp_path))
@@ -188,20 +189,14 @@ def test_create_skill_clears_stale_disabled_flag(tmp_path, monkeypatch):
     reg.scan(tmp_path)
     reg.disable("ghost")
     assert reg.is_disabled("ghost")
-    # Simulate a manual rm -rf — the on-disk .disabled.json still has "ghost".
+    # A manual rm -rf; the on-disk .disabled.json still has "ghost".
     shutil.rmtree(tmp_path / "ghost")
-    monkeypatch.setattr("core.skills.registry._skill_registry", reg)
-    from core.extensions.skillmaker import create_skill
-
-    # No `approved` argument: authorization moved to the executor's
-    # server-side dangerous gate, which the direct function call bypasses.
-    result = create_skill(
-        name="ghost",
-        description="brand new skill, totally different",
-        instructions="# fresh body\nDo new things, in detail and with care.",
-    )
-    assert "created" in result.lower()
-    assert not reg.is_disabled("ghost")  # stale disabled flag cleared
+    reg.rescan(tmp_path)  # any listing / load_skill miss rescans
+    # The agent (via bash) or a human writes a fresh SKILL.md by hand.
+    _make_skill_in_tmp(tmp_path, "ghost", "# fresh body\nDo new things, in detail and with care.")
+    reg.rescan(tmp_path)
+    assert reg.exists("ghost")
+    assert not reg.is_disabled("ghost")  # stale disabled flag pruned
 
 
 async def test_e2e_patch_disables_skill_then_load_skill_returns_error(tmp_path, monkeypatch):
@@ -372,118 +367,6 @@ async def test_llm_registry_populate_with_models():
     await reg.populate(mock_ollama, mock_openrouter)
     assert reg._populated is True
     assert "llama3" in reg._models
-
-
-# ===========================================================================
-# More hooks: _maybe_evaluate (no registry.json → skip)
-# ===========================================================================
-
-
-async def test_maybe_evaluate_no_registry(monkeypatch):
-    from db import models as db
-    from sessions.hooks import _maybe_evaluate
-    from sessions.state import AgentSession
-
-    monkeypatch.setattr("config.settings.eval_auto", True)
-    monkeypatch.setattr("config.settings.eval_max_retries", 1)
-
-    sid = db.create_session(title="Eval Test")
-    session = db.get_session(sid)
-    session_obj = AgentSession(session_id=sid)
-
-    # No registry.json → should skip silently
-    await _maybe_evaluate(sid, session, session_obj=session_obj)
-    assert not session_obj.turn.eval_retry_requested
-
-
-# ===========================================================================
-# _maybe_evaluate: registry is global, evaluation must be session-scoped
-# ===========================================================================
-
-
-def _write_registry(tmp_path, monkeypatch, features):
-    """Point _maybe_evaluate's registry lookup at a temp file."""
-    import os
-
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "data").mkdir(exist_ok=True)
-    (tmp_path / "data" / "registry.json").write_text(json.dumps(features))
-    return os.path.join(str(tmp_path), "data", "registry.json")
-
-
-async def test_maybe_evaluate_ignores_other_sessions_features(monkeypatch, tmp_path):
-    """Regression: data/registry.json is one global file, so an unfiltered
-    read made every session evaluate every other session's pending features
-    against its own unrelated transcript — failing by construction and
-    re-running forever. (Observed: a 'Neo Flappy Bird' feature registered by
-    session 505639e37185 evaluating inside an unrelated weather session.)"""
-    from db import models as db
-    from sessions.hooks import _maybe_evaluate
-    from sessions.state import AgentSession
-
-    monkeypatch.setattr("config.settings.eval_auto", True)
-    monkeypatch.setattr("config.settings.eval_max_retries", 1)
-
-    sid = db.create_session(title="Weather Session")
-    session = db.get_session(sid)
-    session_obj = AgentSession(session_id=sid)
-
-    _write_registry(
-        tmp_path,
-        monkeypatch,
-        [{"id": "0de63fc0", "title": "Neo Flappy Bird", "passes": False, "session_id": "505639e37185"}],
-    )
-
-    called = []
-
-    async def _spy(feat, session_id):
-        called.append(feat["id"])
-        return {"passed": False, "feedback": "nope"}
-
-    monkeypatch.setattr("core.extensions.evaluation.evaluate_single_async", _spy)
-
-    await _maybe_evaluate(sid, session, session_obj=session_obj)
-
-    assert called == [], "must not evaluate another session's feature"
-    assert not session_obj.turn.eval_retry_requested
-
-
-async def test_maybe_evaluate_runs_own_and_legacy_features(monkeypatch, tmp_path):
-    """Own features still evaluate; pre-filter rows with no session_id are
-    adopted rather than stranded pending forever."""
-    from db import models as db
-    from sessions.hooks import _maybe_evaluate
-    from sessions.state import AgentSession
-
-    monkeypatch.setattr("config.settings.eval_auto", True)
-    monkeypatch.setattr("config.settings.eval_max_retries", 2)
-
-    sid = db.create_session(title="Owner Session")
-    session = db.get_session(sid)
-    session_obj = AgentSession(session_id=sid)
-
-    _write_registry(
-        tmp_path,
-        monkeypatch,
-        [
-            {"id": "mine", "title": "Mine", "passes": False, "session_id": sid},
-            {"id": "legacy", "title": "Legacy", "passes": False},
-            {"id": "theirs", "title": "Theirs", "passes": False, "session_id": "someone-else"},
-            {"id": "done", "title": "Done", "passes": True, "session_id": sid},
-        ],
-    )
-
-    called = []
-
-    async def _spy(feat, session_id):
-        called.append(feat["id"])
-        return {"passed": True, "feedback": ""}
-
-    monkeypatch.setattr("core.extensions.evaluation.evaluate_single_async", _spy)
-
-    await _maybe_evaluate(sid, session, session_obj=session_obj)
-
-    assert sorted(called) == ["legacy", "mine"], f"unexpected evaluation set: {called}"
 
 
 # ===========================================================================

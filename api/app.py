@@ -362,7 +362,7 @@ async def lifespan(app: FastAPI):
     _mgr.close_admission()
 
     # Stop the scheduling producer BEFORE collecting tasks, not last. APScheduler
-    # kept firing cron jobs and heartbeats straight through the drain.
+    # kept firing cron jobs straight through the drain.
     try:
         from core.extensions.scheduling import _get_scheduler
 

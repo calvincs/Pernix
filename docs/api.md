@@ -994,7 +994,7 @@ GET    /api/jobs/events       SSE stream of job events
 
 ---
 
-## Goals, Gates & Heartbeats
+## Goals & Gates
 
 Read-side surfaces for the [autonomy substrate](internals/autonomy.md). Goals and gates are created by the agent's tools (`goal_create`, `add_gate`, …) when `goals_enabled` / `gates_enabled` are on; these endpoints let clients inspect them.
 
@@ -1009,25 +1009,6 @@ Returns `{"goal": null}` when the session has no active goal, otherwise the goal
 GET /api/sessions/{session_id}/gates
 ```
 Returns the deterministic gates registered on the session: name, command, watch paths, scope, enabled state.
-
-### User Heartbeat
-One heartbeat per session, owned by **you** — the agent's `set_heartbeat`/`clear_heartbeat` tools operate on a separate `agent` namespace and can never see or modify this one. Requires `heartbeats_enabled`.
-
-```
-GET    /api/sessions/{session_id}/heartbeat    Read the user heartbeat (null when unset)
-PUT    /api/sessions/{session_id}/heartbeat    Set/replace it
-DELETE /api/sessions/{session_id}/heartbeat    Clear it
-```
-
-`PUT` body:
-```json
-{
-  "instruction": "Report progress and stay on the migration task.",
-  "every": "5m",
-  "delivery": "steer"
-}
-```
-`instruction` is required. `every` accepts durations (`30s`, `5m`, `2h`) or a 5-field cron expression (default `5m`). `delivery` is `steer` (inject into the running turn at the next round boundary — the default) or `follow_up` (queue as a prompt for the next idle moment); a parked session (awaiting workers/user) degrades `steer` to `follow_up`. Returns `{"ok": true, "job_id": ...}` or `{"error": ...}`.
 
 ---
 

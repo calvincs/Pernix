@@ -306,7 +306,6 @@ async def test_auto_title_never_fires_for_a_canary_session(monkeypatch):
     monkeypatch.setattr("config.settings.memory_recall", False)
     monkeypatch.setattr("config.settings.gates_enabled", False)
     monkeypatch.setattr("config.settings.reflect_enabled", False)
-    monkeypatch.setattr("config.settings.eval_auto", False)
 
     sid = db.create_session(title="Canary: gen-file-create", session_type="canary")
     await hooks.run_post_task_hooks(sid)

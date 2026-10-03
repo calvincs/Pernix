@@ -374,34 +374,21 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'Evaluation',
-        tab: 'agent',
-        description: 'Feature-level QA against acceptance criteria in the feature registry (data/registry.json). When auto-evaluate is enabled, runs after each task to score registered features. Browser screenshots provide visual verification evidence.',
-        fields: [
-            { key: 'eval_auto', label: 'Auto-Evaluate', type: 'bool' },
-            { key: 'eval_threshold', label: 'Pass Threshold (0–1 fraction)', type: 'number', step: 0.1 },
-            { key: 'eval_max_retries', label: 'Max Retries', type: 'number' },
-            { key: 'eval_browser_verify', label: 'Browser Screenshots', type: 'bool' },
-        ],
-    },
-    {
         title: 'Orchestration',
         tab: 'agent',
-        description: 'Controls for multi-worker task decomposition. Max workers limits parallel sub-agents. Stall threshold detects stuck workers. Plan review timeout is how long you have to approve a generated plan before it auto-proceeds.',
+        description: 'Controls for multi-worker task decomposition. Max workers limits parallel sub-agents.',
         fields: [
             { key: 'max_concurrent_workers', label: 'Max Workers', type: 'number' },
-            { key: 'plan_review_timeout', label: 'Plan Review Timeout (seconds)', type: 'number' },
         ],
     },
     {
         title: 'Autonomy',
         tab: 'autonomy',
-        term: 'Internal names: gates, goals, heartbeats, session kernel.',
-        description: 'Long-running autonomous task substrate. Gates: deterministic shell checks Reflect cannot overrule. Goals: persistent objectives with budgets and auto-continuations. Heartbeats: recurring instructions steered into running work. Session kernel: a persistent per-session Python REPL whose variables survive turns and restarts.',
+        term: 'Internal names: gates, goals, session kernel.',
+        description: 'Long-running autonomous task substrate. Gates: deterministic shell checks Reflect cannot overrule. Goals: persistent objectives with budgets and auto-continuations. Session kernel: a persistent per-session Python REPL whose variables survive turns and restarts.',
         fields: [
             { key: 'gates_enabled', label: 'Deterministic Gates', type: 'bool' },
             { key: 'goals_enabled', label: 'Persistent Goals', type: 'bool' },
-            { key: 'heartbeats_enabled', label: 'Heartbeats', type: 'bool' },
             { key: 'session_kernel_enabled', label: 'Session Kernel (REPL)', type: 'bool', risk: 'autonomy', restart: RESTART_TOOLS },
         ],
     },

@@ -121,6 +121,13 @@ These are the upgrade points where something the user might have set up needs at
 
 - **Telos** (the operational question loop) is gone: the `telos_status` and `telos_ask` tools, `/api/telos/*`, the Explorer's Self-tuning → Goals tab, the Settings section, snooze Activity 16, the daily slow-loop job, the post-task hook and the `[TELOS]` line in the agent's current-state block. Every `telos_*` setting is removed; an old `data/settings.json` that still carries them loads fine (unknown keys are ignored). `data/telos/` is no longer read or written; move it aside or delete it. Old adaptive entries with `source: telos` stay in the store and age out normally.
 - **Candor** (calibrated operational memory) is gone: the `predict_reliability`, `why_reliability` and `reliability_questions` tools, scout's `[OPERATIONAL INTEL]` brief, turn-end and memory-store emission, snooze Activity 12b and its adaptive routing-hint producer, dream's Candor evidence and `tool_pattern` hypotheses (a pending one expires with `method: candor_retired`), and the vendored wheel (`vendor/` is gone; `pip install -r requirements.txt` no longer installs `candor`). `http_get` no longer refuses domains with a poor logged fetch rate, and its `force` argument is gone (an old call that passes it still works; the argument is dropped). Settings removed: `candor_enabled`, `candor_scout_brief`, `candor_max_obs_per_turn`, `candor_store_dir`, `fetch_routing_enabled`, `fetch_routing_min_obs`, `fetch_routing_threshold`. `data/candor/` is no longer read or written; move it aside or delete it. Per-tool success and failure logging is unchanged: tool-message metadata, `post_mortems.tool_summary` and the scout's tool signals never went through Candor.
+- **Toolmaker.** `create_tool`, `update_tool`, `list_custom_tools` and `restore_tool_packages` are removed. Leftover agent-written tool files (`core/tools/builtin/custom_*.py`, gitignored, so a pull leaves them in place) are **not loaded**: the server logs `legacy custom tool <name> ignored` and skips each one. Delete them when convenient. `install_package` still exists.
+- **Skillmaker.** The six skill-authoring tools are removed. Skills are files: edit them in Explorer → Capabilities → Skills, or let the agent write `data/skills/<name>/SKILL.md` with `bash`. Your existing skills load as before.
+- **Planning and feature evaluation.** `add_feature`, `mark_feature_passed`, `list_features` and `evaluate` are removed, along with the `eval_auto` hook. `data/registry.json` is no longer read or written; delete it if you like (`--rebuild` still cleans it up).
+- **Heartbeats.** The heartbeat tools, the `/api/sessions/{id}/heartbeat` endpoints and `heartbeats_enabled` are removed. Heartbeat entries in `data/cron_jobs.json` are dropped and the file rewritten on the first start; your cron jobs are kept.
+- **Stale settings are ignored.** `eval_auto`, `eval_threshold`, `eval_max_retries`, `eval_browser_verify`, `plan_review_timeout` and `heartbeats_enabled` may remain in `data/settings.json`; `Settings.load()` ignores unknown keys, and the next save drops them.
+- **Your own `RULES.md`.** The shipped `data/agent/RULES.md` no longer mentions `create_tool` or `restore_tool_packages`, but a deployment with an edited copy may still tell the agent to use them. Remove those lines; the agent gets a "not found" hint if it tries.
+- **`/api/health`** no longer reports `database.artifacts`.
 
 ### 2026-09-03 — v3.1.0
 
@@ -166,7 +173,7 @@ The structural reason is that a workflow is a step graph you have to declare *be
 
 | You want | Do this |
 |---|---|
-| A reusable multi-step procedure | Write it as a **skill** (`create_skill`) whose instructions list the steps in order. This is the durable, shareable artifact — same role `WORKFLOW.md` played, but the agent can deviate when a step surprises it. |
+| A reusable multi-step procedure | Write it as a **skill** (`data/skills/<name>/SKILL.md`) whose instructions list the steps in order. This is the durable, shareable artifact — same role `WORKFLOW.md` played, but the agent can deviate when a step surprises it. |
 | Steps that must not pollute the main context | `spawn_worker(task, ...)` per step. Each worker gets its own context and its own scout, exactly as workflow steps did. |
 | Steps that can run at the same time | Spawn them together and collect with `await_workers`. That is precisely what a workflow "wave" was. |
 | Data passed between steps | Have each step write its output to the workspace and give the next step the path — the same `output_file` discipline, without the manifest. |
@@ -286,7 +293,6 @@ After any upgrade, a couple of things are worth checking:
 - **Did the server start cleanly?** Watch the startup logs — migration failures or schema mismatches show up there.
 - **Is your model still accessible?** `GET /api/health/detailed` (localhost-only) shows provider connectivity.
 - **Did your skills survive?** `data/skills/` is preserved across `--rebuild` and across normal upgrades, so they should be fine. If a skill stops loading, check the YAML frontmatter — syntax errors silently skip the skill (the error is logged).
-- **Are your custom tools still present?** Custom tool files (`core/tools/builtin/custom_*.py`) are preserved. If a tool depended on a Python package that's no longer in `data/workspace/.venv/` (e.g. after `--rebuild` wiped the workspace venv), run the agent's `restore_tool_packages` to reinstall.
 
 ---
 
