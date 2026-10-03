@@ -711,8 +711,7 @@ def _record_followup_outcome(session: AgentSession, session_id: str, acted: bool
     scout_signals (signal_type="forced_followup", subject="global") —
     successes = the agent acted, failures = it re-idled anyway. A week of
     live traffic answers "is this feature earning its keep" with one query,
-    and a rising failure share is the adaptive layer's cue to narrow the
-    trigger. Runs in a thread (DB write); never blocks the turn.
+    and a rising failure share is the cue to narrow the trigger. Runs in a thread (DB write); never blocks the turn.
     """
     try:
         db.upsert_signal(
@@ -968,7 +967,7 @@ class _ToolCallGate:
 
         action ∈ aliased | coerced | stripped_params | rejected. Rejections
         also emit the usual tool.call error event (via _reject); this event is
-        the gate-level signal the UI/adaptive layer can aggregate."""
+        the gate-level signal the UI can aggregate."""
         self._session.emit_event(
             {
                 "type": "tool.call.intercepted",

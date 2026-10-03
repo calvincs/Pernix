@@ -54,7 +54,7 @@ _POLL_INTERVAL_S = 1.0
 # Three names were REMOVED by the 2026-09-04 trust-loop hardening (W5):
 #
 #   recall / deep_recall — memory reads. The suite's job is to measure the
-#     pipeline under the treatment (adaptive entries, skills), and "eval data
+#     pipeline under the treatment (skills, tools), and "eval data
 #     stays out of memory, memory stays out of eval" is only half true while
 #     a canary can look its own answer up. The scout's preload recall is
 #     fenced at the same time (scout.runner.memory_recall_denied); memory
@@ -104,8 +104,8 @@ class CanaryRunResult:
     seed: int | None = None
     # Post-run contamination findings (W5). Non-empty disqualifies the run:
     # `passed` stays exactly as the gates scored it, `outcome` becomes
-    # 'contaminated', and the tripwire drops the row from both testimony and
-    # baselines. See core/canary/contamination.py.
+    # 'contaminated', and the row is counted apart from passes and failures.
+    # See core/canary/contamination.py.
     contamination: list[str] = field(default_factory=list)
 
     @property
@@ -113,7 +113,7 @@ class CanaryRunResult:
         """contaminated | pass | gate_fail | timeout | error | noop — the
         honest failure taxonomy. Only gate_fail means "the agent ran and the
         work was wrong"; the others are wall-clock or harness trouble and
-        must never feed the per-task tripwire.
+        must never count as a regression.
 
         'contaminated' outranks every other value, pass included: a run that
         broke isolation measured something other than the pipeline, so it can

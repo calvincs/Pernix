@@ -419,11 +419,9 @@ def _is_noop_run(row: dict) -> bool:
 def check_suite_health(canaries: list[CanaryDef]) -> dict:
     """Absolute health of the measurement substrate itself.
 
-    Every other signal in this subsystem is RELATIVE — the adaptive tripwire
-    asks whether a batch made the pass rate worse than baseline. None of them
-    can see a suite that is uniformly broken, because a broken suite moves
-    the baseline down with it: with baseline 0%, `base - now` can never reach
-    the regression delta and the tripwire is silently disarmed.
+    Every other signal in this subsystem is RELATIVE — a run compared with the
+    same task's earlier runs. None of them can see a suite that is uniformly
+    broken, because a broken suite moves the baseline down with it.
 
     So this asks the absolute question instead. It never mutates a canary —
     it only reports, because a failing canary is doing its job.
@@ -474,17 +472,15 @@ def _report_suite_health(health: dict) -> None:
             f"{len(noop)} canary task(s) scored without executing the agent — zero tokens, "
             f"sub-second runs, every gate failing on missing files: {', '.join(sorted(noop))}. "
             "This is a harness failure, not a quality regression; the gates are being scored "
-            "against the seeded fixtures. Until it is fixed the suite measures nothing and the "
-            "adaptive tripwire is disarmed."
+            "against the seeded fixtures. Until it is fixed the suite measures nothing."
         )
         category = "canary.suite_unhealthy"
     elif health.get("blackout"):
         title = "Canary suite: every scored canary is failing"
         body = (
             f"All {len(chronic)} non-flaky canaries failed their last {_HEALTH_WINDOW} scheduled "
-            "sweeps. A uniformly failing suite drags the tripwire baseline to 0%, and a baseline "
-            "of 0% can never register a regression — so the adaptive layer is applying batches "
-            "with no working safety net. Investigate before trusting further auto-applies."
+            "sweeps. A uniformly failing suite cannot register a regression, so a change that "
+            "breaks the agent would go unnoticed. Investigate before trusting the suite again."
         )
         category = "canary.suite_unhealthy"
     else:

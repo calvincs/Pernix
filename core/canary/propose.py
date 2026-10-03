@@ -384,7 +384,7 @@ def materialize_canary(spec: dict, base: Path | None = None, vetting: bool = Fal
     Returns (name, "") on success or (None, error).
 
     vetting=True (auto-admission) stamps flaky:true plus auto-admitted/
-    vetting tags: the canary informs but cannot trip the tripwire until the
+    vetting tags: the canary informs but cannot count as a failure until the
     maintenance sweep promotes it on consistent runs.
     """
     from core.canary.parser import canaries_dir

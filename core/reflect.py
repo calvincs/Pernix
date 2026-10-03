@@ -416,7 +416,7 @@ _PER_TOOL_RESULT_CHAR_CAP = 5000
 
 _GROUNDING_ID_PATTERNS = (
     re.compile(r"#\d{2,}"),  # proposal / issue / message numbers
-    re.compile(r"\bab-[0-9a-f]{12}\b"),  # adaptive batch ids
+    re.compile(r"\bab-[0-9a-f]{12}\b"),  # adaptive batch ids (pre-3.2 rows still cite them)
     re.compile(r"(?<![\w-])[0-9a-f]{12}(?![\w-])"),  # session / hypothesis ids (not a batch id's tail)
 )
 _GROUNDING_SLUG_PATTERN = re.compile(r"`([^`\n]{6,80})`")  # backticked names

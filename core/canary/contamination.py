@@ -19,9 +19,8 @@ So every canary run is read back afterwards and asked three questions:
 
 A hit sets ``canary_runs.outcome = 'contaminated'``. The scored `passed`
 value is preserved exactly as the gates returned it — the run is not
-rewritten, it is disqualified: the tripwire drops contaminated rows from both
-testimony and baselines, so a compromised run can neither flag a batch nor
-vouch for one. One notification per contaminated run; silence is how the last
+rewritten, it is disqualified: it is counted apart from passes and failures,
+so a compromised run cannot vouch for the pipeline. One notification per contaminated run; silence is how the last
 version of this failure lasted for the life of the feature.
 
 This is detection, not prevention. Bash is on the canary allowlist because
@@ -187,8 +186,8 @@ def notify(canary_name: str, session_id: str, findings: list[str]) -> None:
             f"Canary run contaminated: {canary_name}",
             (
                 f"Session {session_id[:12]} broke canary isolation, so the run was "
-                f"recorded as outcome='contaminated' and is excluded from tripwire "
-                f"testimony and baselines. Findings: {'; '.join(findings)[:400]}. "
+                f"recorded as outcome='contaminated' and is counted apart from passes "
+                f"and failures. Findings: {'; '.join(findings)[:400]}. "
                 "The scored gate result is kept as-is — check whether a tool lost its "
                 "canary denial, or whether a skill body is steering the agent out of "
                 "its workspace."
