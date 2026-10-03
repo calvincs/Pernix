@@ -13,7 +13,7 @@ the authoritative order). They fall into a few clusters:
 - Retention sweeps — expiring post-mortems, RLM runs, canary
   runs, and old cron runs/sessions.
 - Self-modification — refine (authoring improvements) and applying approved
-  adaptive-policy edits.
+  skill proposals.
 - Introspection add-ons — dream.
 
 This module owns lifecycle, the idle gate, and the ladder. The work itself
@@ -44,9 +44,6 @@ from core.pools import run_background
 
 logger = logging.getLogger("pernix.snooze")
 
-# Where the adaptive-layer notices send their "open" button.
-_LEARNING_TAB = {"kind": "tab", "tab": "learning"}
-
 # Activity 13c bound: max pending memory_stale hypotheses the skill-change
 # sweep may hold open at once (its own origin only — deliberately NOT the
 # global dream_max_pending, see _sweep_skill_content_changes).
@@ -65,8 +62,8 @@ def snooze_transparent(session) -> bool:
 
     Canary sessions by type, plus any session currently driven by goal
     auto-continuations (audit P5): a multi-hour autonomous goal used to
-    starve the entire self-improvement ladder — adaptive apply and
-    dream — for its whole duration. The LLM semaphore's priority tiers
+    starve the entire self-improvement ladder — refine and dream — for
+    its whole duration. The LLM semaphore's priority tiers
     keep snooze's background calls from contending with the goal's own.
     """
     return getattr(session, "session_type", "") in SNOOZE_TRANSPARENT_TYPES or bool(
@@ -79,9 +76,9 @@ def _mutation_blocked() -> bool:
     turn) is mid-flight. Read-only/LLM review activities run fine alongside
     an autonomous goal — the semaphore's background priority handles
     contention — but activities that MUTATE shared state the live turn
-    depends on (global adaptive applies, memory-store surgery) must wait
-    for genuine idle: a mid-turn prompt or memory mutation changes the very
-    turn the tripwire would then attribute the batch to."""
+    depends on (memory-store surgery, skill-file applies) must wait for
+    genuine idle: a mid-turn memory mutation changes the very turn that is
+    reading it."""
     try:
         from sessions.manager import get_manager
 
@@ -428,7 +425,7 @@ class SnoozeRunner:
         an exception in an early rung — a permissions error on one RLM run
         dir, a corrupt FTS row, one hand-created memory file with a space in
         its name — ended the whole coroutine. Everything after it (refine,
-        skill auto-apply, dream, adaptive) was then skipped on EVERY
+        skill auto-apply, dream) was then skipped on EVERY
         cycle for as long as the fault persisted, and the only sign was a
         single "Snooze cycle error" line.
         """
@@ -588,11 +585,18 @@ class SnoozeRunner:
 
         # Activity 13b: Skill proposal veto-window auto-apply (no LLM).
         # Pending SKILL.md proposals older than the veto window are
-        # machine-validated and applied with a timestamped backup — the
-        # skill-file counterpart of adaptive's auto_approve_stale_proposals.
+        # machine-validated and applied with a timestamped backup.
         if not self._is_cancelled() and settings.skill_proposal_auto_apply_after_hours > 0:
             _announce(bus, "skill_auto_apply", "Applying skill proposals past the veto window")
             await self._rung("auto_apply_skill_proposals", self._auto_apply_skill_proposals())
+
+        # Activity 13b': review.pending rollup (no LLM, read-only). After the
+        # veto window has applied what it will, the one bell row counting
+        # the skill proposals only a human can decide. Unconditional: a
+        # decision made since the last pass should clear the bell even when
+        # auto-apply is off.
+        if not self._is_cancelled():
+            await self._rung("refresh_review_pending", self._refresh_review_pending())
 
         # Activity 13c: Skill content-change sweep (no LLM). When a skill's
         # SKILL.md/scripts change (proposal apply, agent edit, human edit),
@@ -627,15 +631,6 @@ class SnoozeRunner:
         if not self._is_cancelled() and settings.distill_audit_enabled and self._llm_ready():
             _announce(bus, "distill_audit", "Auditing distillation coverage against a raw transcript")
             await self._rung("distill_audit", self._distill_audit())
-
-        # Activity 15: Adaptive layer — drain pending auto-applies, enqueue
-        # post-batch canary sweeps, evaluate the tripwire (plan §6c). Runs
-        # inside the idle window by construction, which is what makes
-        # global-scope applies safe (no session's cached prefix is mid-turn).
-        # No LLM — pure store work.
-        if not self._is_cancelled() and settings.adaptive_enabled:
-            _announce(bus, "adaptive_apply", "Applying pending adaptive edits and evaluating the tripwire")
-            await self._rung("adaptive_step", self._adaptive_step())
 
         # Activity 17: fallback-burn watch — pure store read + at most one
         # notification/day. Encodes the 2026-08-19 silent-reroute incident
@@ -1578,217 +1573,10 @@ Output valid JSON only. No markdown fences. /no_think"""
         except Exception as e:
             logger.warning("Snooze synthesis failed: %s", e)
 
-    # ------------------------------------------------------------------
-    # Activity 15: Adaptive layer drain + tripwire (plan §6c)
-    # ------------------------------------------------------------------
-
-    async def _adaptive_step(self) -> None:
-        """Auto-approve ripe proposals → drain pending auto-applies → enqueue
-        post-batch sweeps → evaluate the tripwire. Each stage guarded; a
-        failure never kills the cycle."""
-        if _mutation_blocked():
-            # Global prompt/policy mutations wait for genuine idle — but the
-            # review rollup only reads, and a human decision made since the
-            # last pass should still clear the bell.
-            await self._refresh_review_pending()
-            return
-        # Veto-window drain first: proposals older than the window apply
-        # themselves (same engine as a human approval; approve_proposal
-        # enqueues its own post-batch sweeps). Runs before drain_pending so a
-        # cycle that has budget for both applies the older, human-visible
-        # decisions first.
-        try:
-            from core.adaptive import auto_approve_stale_proposals
-
-            auto = await asyncio.to_thread(auto_approve_stale_proposals)
-            if auto.get("approved"):
-                ids = auto["approved"]
-                self._bump("adaptive_proposals_auto_approved", len(ids))
-
-                # One line per proposal: what it was, where it landed, how to
-                # undo it. Bare ids sent the reader (and the agent asked to
-                # explain them) hunting — and the old text promised a batch
-                # rollback that memory corrections never have.
-                lines = auto.get("summaries") or [f"#{i}" for i in ids]
-                results = auto.get("results") or []
-                any_batch = any(r.get("batch_id") for r in results)
-                any_correction = any(r.get("corrections_written") is not None for r in results)
-                tail = []
-                if any_batch:
-                    tail.append(
-                        "Tripwire + canary sweeps watch the applied batch(es); roll one back in the Adaptive panel if you disagree."
-                    )
-                if any_correction:
-                    tail.append(
-                        "Memory corrections create no batch — the Adaptive panel has nothing to roll back for them; undo by deleting the tagged memory entry."
-                    )
-                notices.notify(
-                    "adaptive.auto_approved",
-                    "Adaptive layer: proposals auto-approved",
-                    (
-                        f"{len(ids)} proposal(s) past the "
-                        f"{settings.adaptive_auto_approve_after_hours}h veto window applied at idle "
-                        f"({', '.join(f'#{i}' for i in ids)}).\n"
-                        + "\n".join(f"• {line}" for line in lines)
-                        + ("\n" + " ".join(tail) if tail else "")
-                    ),
-                    link=_LEARNING_TAB,
-                )
-        except Exception as e:
-            logger.warning("Adaptive auto-approve failed: %s", e)
-
-        if self._is_cancelled():
-            return
-        try:
-            from core.adaptive import drain_pending
-
-            out = await asyncio.to_thread(drain_pending)
-            # A batch whose edits were ALL refused lands terminal-'rejected'
-            # and changed nothing: nothing to announce, and no state change
-            # for a post-batch sweep to measure against.
-            landed = [r for r in (out.get("results") or []) if r.get("applied")]
-            if landed:
-                edits_n = sum(len(r["applied"]) for r in landed)
-                self._bump("adaptive_batches_applied", len(landed))
-
-                notices.notify(
-                    "adaptive.edits_applied",
-                    "Adaptive layer: edits auto-applied",
-                    f"{edits_n} edit(s) across {len(landed)} batch(es) applied at idle — review in the Adaptive panel.",
-                    link=_LEARNING_TAB,
-                )
-        except Exception as e:
-            logger.warning("Adaptive drain failed: %s", e)
-
-        if self._is_cancelled():
-            return
-        # Lapse pending proposals nobody got to. A proposal is a snapshot of
-        # evidence; weeks later approving it blind is worse than letting the
-        # producer re-raise it from current evidence. Without this the queue
-        # only ever grows, because producers write and only a human drains.
-        try:
-            from db import models as db
-
-            expired = await asyncio.to_thread(db.adaptive_expire_stale_proposals, settings.adaptive_proposal_ttl_days)
-            if expired:
-                logger.info("Adaptive: expired %d stale pending proposal(s)", expired)
-        except Exception as e:
-            logger.warning("Adaptive proposal expiry failed: %s", e)
-
-        if self._is_cancelled():
-            return
-        # The usage sweep (v3.1): entries that rendered into prompts for the
-        # whole retire window without one recorded use go. Soft-deletes,
-        # journaled, one aggregated once-a-day notification with the undo.
-        try:
-            from core.adaptive.retire import retire_unused_entries
-
-            swept = await asyncio.to_thread(retire_unused_entries)
-            if swept["retired"]:
-                self._bump("adaptive_unused_retired", len(swept["retired"]))
-                lines = [f"• {eid} — {swept['reasons'].get(eid, '')}" for eid in swept["retired"][:12]]
-                await asyncio.to_thread(
-                    notices.notify,
-                    "adaptive.value_sweep",
-                    "Adaptive: value sweep retired entries",
-                    (
-                        "Retired by the value sweep — unused for the whole retire window, "
-                        "past a prompt_note TTL, or failure-dominated in attributed "
-                        "outcomes (the per-entry reason is listed). Each deletion is "
-                        "journaled — roll any back from the Adaptive tab.\n"
-                        + "\n".join(lines)
-                        + (f"\n(+{len(swept['retired']) - 12} more)" if len(swept["retired"]) > 12 else "")
-                    ),
-                    dedup_key="adaptive_usage_sweep",
-                    link=_LEARNING_TAB,
-                )
-        except Exception as e:
-            logger.warning("Adaptive usage sweep failed: %s", e)
-
-        if self._is_cancelled():
-            return
-        # The retro-lint sweep: re-examine the standing population whenever
-        # the content lint changes (watermarked on LINT_VERSION — a no-op on
-        # every cycle in between). The v3.1 lint only gated new mints, so
-        # narrative entries minted before it sat in the rendered slots
-        # indefinitely.
-        try:
-            from core.adaptive.retire import retire_lint_failures
-
-            linted = await asyncio.to_thread(retire_lint_failures)
-            if linted["retired"]:
-                self._bump("adaptive_lint_retired", len(linted["retired"]))
-                lines = [f"• {eid} — {linted['reasons'].get(eid, '')}" for eid in linted["retired"][:12]]
-                await asyncio.to_thread(
-                    notices.notify,
-                    "adaptive.lint_sweep",
-                    "Adaptive: lint sweep retired entries",
-                    (
-                        "Retired by the retro content-lint sweep — machine-authored "
-                        "entries whose content fails the current actionability floor "
-                        "(narrative findings, bare negative claims). Each deletion is "
-                        "journaled — roll any back from the Adaptive tab.\n"
-                        + "\n".join(lines)
-                        + (f"\n(+{len(linted['retired']) - 12} more)" if len(linted["retired"]) > 12 else "")
-                    ),
-                    dedup_key="adaptive_lint_sweep",
-                    link=_LEARNING_TAB,
-                )
-        except Exception as e:
-            logger.warning("Adaptive lint sweep failed: %s", e)
-
-        if self._is_cancelled():
-            return
-        # The trial sweep (W6): entries rendering on half the turns are
-        # promoted, retired, or left running on the measured difference
-        # between the halves — the only channel here that decides an entry's
-        # fate on an outcome rather than on a clock or a counter.
-        try:
-            from core.adaptive.trial import sweep_trials
-
-            trials = await asyncio.to_thread(sweep_trials)
-            settled = trials["promoted"] + trials["retired"]
-            if settled:
-                self._bump("adaptive_trials_promoted", len(trials["promoted"]))
-                self._bump("adaptive_trials_retired", len(trials["retired"]))
-                lines = [
-                    f"• {eid} — {'promoted' if eid in trials['promoted'] else 'retired'}: "
-                    f"{trials['reasons'].get(eid, '')}"
-                    for eid in settled[:12]
-                ]
-                await asyncio.to_thread(
-                    notices.notify,
-                    "adaptive.trial_sweep",
-                    "Adaptive: trial arms settled",
-                    (
-                        "Entries that had been rendering on half the turns are now decided on "
-                        "their measured treated-vs-control outcomes. Every decision is "
-                        "journaled with its counts and p-value — roll any back from the "
-                        "Adaptive tab, or read the arms in the Trust tab.\n" + "\n".join(lines)
-                    ),
-                    dedup_key="adaptive_trial_sweep",
-                    link=_LEARNING_TAB,
-                )
-        except Exception as e:
-            logger.warning("Adaptive trial sweep failed: %s", e)
-
-        try:
-            from core.adaptive.tripwire import evaluate_tripwire
-
-            actions = await asyncio.to_thread(evaluate_tripwire)
-            for a in actions:
-                logger.info("Adaptive tripwire: %s %s (%s)", a["action"], a["batch_id"], a.get("detail", ""))
-        except Exception as e:
-            logger.warning("Adaptive tripwire failed: %s", e)
-
-        # Last, after every stage above has approved, held or expired what it
-        # will: the one bell row counting what only a human can decide.
-        await self._refresh_review_pending()
-
     async def _refresh_review_pending(self) -> None:
-        """Recount the never-auto-apply proposals into review.pending. Never raises."""
+        """Recount the never-auto-apply skill proposals into review.pending. Never raises."""
         try:
-            from core.adaptive.review import refresh_review_pending
+            from core.skills.review import refresh_review_pending
 
             await asyncio.to_thread(refresh_review_pending)
         except Exception as e:
