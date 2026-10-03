@@ -434,22 +434,22 @@ async def test_feedback_rejects_what_it_cannot_be_a_verdict_on():
 
 
 # ---------------------------------------------------------------------------
-# Thumbs correcting the credit a verdict handed out
+# Thumbs stamp the grade (the adaptive credit correction retired in 3.2)
 # ---------------------------------------------------------------------------
 
 
-def _graded_turn_citing(entry_id: str, verdict: str, hint_id: str = "") -> tuple[str, int, str]:
-    """A graded turn whose outcome was attributed to `entry_id`."""
+def _graded_turn(verdict: str) -> tuple[str, int]:
+    """A graded, already-synthesized turn whose payload still carries the
+    pre-3.2 used_hints / cited_policies keys."""
     sid, uid, last = _turn()
     aid = [m["id"] for m in db.get_messages(sid) if m["role"] == "assistant"][0]
     payload = {
         "verdict": verdict,
         "outcome_source": "llm",
         "turn_user_msg_id": uid,
-        "cited_policies": [entry_id],
+        "cited_policies": ["pol-old"],
+        "scout_summary": {"used_hints": ["hint-old"]},
     }
-    if hint_id:
-        payload["scout_summary"] = {"used_hints": [hint_id]}
     pm_id = db.add_post_mortem(
         session_id=sid,
         attempt=1,
@@ -462,101 +462,31 @@ def _graded_turn_citing(entry_id: str, verdict: str, hint_id: str = "") -> tuple
         execution_mode=None,
         payload_json=json.dumps(payload),
     )
-    # The counters these tests pre-seed are the credit synthesis handed out
-    # for this grade; a thumb corrects credit only once it exists.
     db.mark_post_mortems_synthesized([pm_id])
-    return sid, aid, entry_id
+    return sid, aid
 
 
-def _counters(entry_id: str) -> tuple[int, int, int]:
-    row = db.get_signal("adaptive_entry", entry_id) or {}
-    return int(row.get("successes") or 0), int(row.get("failures") or 0), int(row.get("reinforcements") or 0)
-
-
-def test_thumbs_up_on_a_non_pass_gives_the_credit_back():
+def test_a_thumb_stamps_the_grade_and_touches_no_entry_counters():
     from core.feedback import apply_user_signal
 
-    db.upsert_signal("adaptive_entry", "pol-1", delta_failures=1)
-    sid, aid, entry = _graded_turn_citing("pol-1", "retry", hint_id="hint-1")
+    db.delete_signal("adaptive_entry", "pol-old")
+    db.delete_signal("adaptive_entry", "hint-old")
+    sid, aid = _graded_turn("pass")
 
-    apply_user_signal(sid, aid, "up")
+    report = apply_user_signal(sid, aid, "down")
 
-    assert _counters("pol-1") == (1, 0, 1), "the failure it was blamed for is taken back"
-    assert _counters("hint-1") == (1, 0, 0), "a use is not re-counted; only the outcome moves"
     pm = db.list_post_mortems(session_id=sid)[0]
-    assert pm["user_signal"] == "up"
+    assert report["post_mortem_id"] == pm["id"]
+    assert report["applied"] == {} and report["entries"] == []
+    assert pm["user_signal"] == "down"
     assert pm["outcome_source"] == "user"
-
-
-def test_thumbs_down_on_a_pass_takes_the_credit_away():
-    from core.feedback import apply_user_signal
-
-    db.upsert_signal("adaptive_entry", "pol-2", delta_successes=1)
-    sid, aid, entry = _graded_turn_citing("pol-2", "pass")
-
-    apply_user_signal(sid, aid, "down")
-
-    assert _counters("pol-2") == (0, 1, 1)
-
-
-def test_an_agreeing_thumb_moves_nothing():
-    """The forward attribution already recorded agreement; applying it again
-    would count one observation twice."""
-    from core.feedback import apply_user_signal
-
-    db.upsert_signal("adaptive_entry", "pol-3", delta_successes=1)
-    sid, aid, entry = _graded_turn_citing("pol-3", "pass")
-
-    report = apply_user_signal(sid, aid, "up")
-
-    assert report["applied"] == {}
-    assert _counters("pol-3") == (1, 0, 1)
-    assert db.list_post_mortems(session_id=sid)[0]["outcome_source"] == "user"
-
-
-def test_the_same_thumb_twice_is_not_two_corrections():
-    from core.feedback import apply_user_signal
-
-    db.upsert_signal("adaptive_entry", "pol-4", delta_successes=1)
-    sid, aid, entry = _graded_turn_citing("pol-4", "pass")
-
-    apply_user_signal(sid, aid, "down")
-    apply_user_signal(sid, aid, "down")
-
-    assert _counters("pol-4") == (0, 1, 1)
-
-
-def test_flipping_and_withdrawing_a_thumb_reverses_exactly_what_it_applied():
-    from core.feedback import apply_user_signal
-
-    db.upsert_signal("adaptive_entry", "pol-5", delta_successes=1)
-    sid, aid, entry = _graded_turn_citing("pol-5", "pass")
-    before = _counters("pol-5")
-
-    apply_user_signal(sid, aid, "down")
-    assert _counters("pol-5") == (0, 1, 1)
-
-    apply_user_signal(sid, aid, "up")  # agrees with the pass — nothing to correct
-    assert _counters("pol-5") == before
+    assert db.get_signal("adaptive_entry", "pol-old") is None
+    assert db.get_signal("adaptive_entry", "hint-old") is None
 
     apply_user_signal(sid, aid, None)
-    assert _counters("pol-5") == before
     pm = db.list_post_mortems(session_id=sid)[0]
     assert pm["user_signal"] is None
     assert pm["outcome_source"] == "llm", "withdrawing a thumb restores the grade's own source"
-
-
-def test_a_correction_never_drives_a_counter_negative():
-    """scout_signals counters are cumulative evidence. A take-back of a
-    failure that was never recorded would corrupt every ratio read from it."""
-    from core.feedback import apply_user_signal
-
-    sid, aid, entry = _graded_turn_citing("pol-6", "retry")  # no prior signal row at all
-
-    apply_user_signal(sid, aid, "up")
-
-    successes, failures, _ = _counters("pol-6")
-    assert (successes, failures) == (1, 0)
 
 
 def test_a_thumb_on_an_ungraded_turn_is_still_recorded():
@@ -603,7 +533,7 @@ async def test_trust_answers_with_zeros_over_empty_tables():
 async def test_trust_reports_the_outcome_mix_and_the_graders_report_card():
     from core.feedback import apply_user_signal
 
-    sid, aid, entry = _graded_turn_citing("pol-7", "pass")
+    sid, aid = _graded_turn("pass")
     apply_user_signal(sid, aid, "down")  # the user disagrees with the grader
     db.add_post_mortem(
         session_id=sid,
@@ -684,21 +614,22 @@ def test_attribution_takes_the_thumb_over_the_grade():
         "confidence": 0.9,
         "scout_viability": None,
         "execution_mode": None,
-        "payload_json": json.dumps({"cited_policies": ["pol-x"], "scout_summary": {"used_hints": ["hint-x"]}}),
+        "payload_json": json.dumps({"agent_model": "m1", "task_category": "coding"}),
     }
+    route = "m1|coding"
     down_on_pass = attribute({**base, "verdict": "pass", "failure_cause": "none", "user_signal": "down"})
-    assert any(a.subject == "pol-x" and a.delta_failures == 1 for a in down_on_pass)
-    assert not any(a.subject == "pol-x" and a.delta_successes for a in down_on_pass)
+    assert any(a.subject == route and a.delta_failures == 1 for a in down_on_pass)
+    assert not any(a.subject == route and a.delta_successes for a in down_on_pass)
 
     up_on_low_confidence_retry = attribute(
         {**base, "verdict": "retry", "failure_cause": "agent", "confidence": 0.2, "user_signal": "up"}
     )
     assert any(
-        a.subject == "pol-x" and a.delta_successes == 1 for a in up_on_low_confidence_retry
+        a.subject == route and a.delta_successes == 1 for a in up_on_low_confidence_retry
     ), "the confidence floor guards the model's guess, not the user's"
 
     untouched = attribute({**base, "verdict": "pass", "failure_cause": "none", "user_signal": None})
-    assert any(a.subject == "pol-x" and a.delta_successes == 1 for a in untouched)
+    assert any(a.subject == route and a.delta_successes == 1 for a in untouched)
 
 
 def test_a_thumb_before_synthesis_waits_for_synthesis():
@@ -724,9 +655,6 @@ def test_a_thumb_before_synthesis_waits_for_synthesis():
     report = apply_user_signal(sid, aid, "down")
 
     assert report["applied"] == {}
-    assert db.get_signal("adaptive_entry", "pol-y") in (None, {}) or not (
-        db.get_signal("adaptive_entry", "pol-y") or {}
-    ).get("failures")
     pm = db.list_post_mortems(session_id=sid)[0]
     assert pm["user_signal"] == "down" and pm["outcome_source"] == "user", "the stamp is what synthesis will read"
 
