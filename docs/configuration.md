@@ -88,7 +88,7 @@ Context is **auto-managed by default** (`context_auto`): the harness reads each 
 | `compaction_keep_tokens` | `51000` | How many tokens to preserve verbatim after compaction. Recent messages and tool results are kept. |
 | `context_critical_threshold` | `0.85` | Show a visual warning in the UI when context fills to this fraction. |
 | `max_inline_attach_bytes` | `33554432` (32 MB) | Ceiling on the total base64 attachment bytes inlined into a single compile. Past it, the oldest attachments fall back to text markers. 32 MB fits audio (a 19 MB WAV expands to ~25 MB base64). |
-| `turn_ledger_enabled` | `true` | The `[SINCE YOUR LAST TURN]` block in the volatile tail: a delta of what changed since the agent's previous turn — finished workers/jobs/RLM runs, its last reflect verdict + lesson, adaptive changes, canary regressions, platform restarts/updates. Normal and cron sessions only (canaries excluded by isolation, workers stay lean). Renders nothing when nothing changed; `false` makes the tail byte-identical to the pre-ledger shape. |
+| `turn_ledger_enabled` | `true` | The `[SINCE YOUR LAST TURN]` block in the volatile tail: a delta of what changed since the agent's previous turn — finished workers/jobs/RLM runs, its last reflect verdict + lesson, open questions, canary regressions, platform restarts/updates. Normal and cron sessions only (canaries excluded by isolation, workers stay lean). Renders nothing when nothing changed; `false` makes the tail byte-identical to the pre-ledger shape. |
 
 ### View pruning
 
@@ -232,7 +232,7 @@ The long-running-autonomy substrate: deterministic gates Reflect cannot overrule
 
 ## Canary Suite
 
-Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — an adaptive batch (a targeted post-batch probe), a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — plus a small nightly heartbeat that keeps every active canary's history warm. The Adaptive Layer's tripwire reads the post-batch results per task. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Self-tuning → Self-checks tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — plus a small nightly heartbeat that keeps every active canary's history warm. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Self-tuning → Self-checks tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -240,53 +240,19 @@ Golden-task canaries: canned tasks with deterministic gates, run headlessly thro
 | `canaries_dir` | `data/canaries` | Directory scanned for `<name>/CANARY.md` task definitions. |
 | `canary_schedule` | `0 3 * * *` | Cron expression for the nightly heartbeat (default: 03:00). |
 | `canary_heartbeat_per_night` | `2` | How many least-recently-run active (non-parked) canaries each heartbeat runs. |
-| `canary_post_batch_max` | `4` | Cap on canaries per post-batch probe: the ones covering the batch's edit kinds first, `sentinel`-tagged ones riding along. |
 | `canary_retention_days` | `30` | Age after which Snooze prunes `canary_runs` rows and their sessions. |
-| `canary_baseline_runs` | `5` | The green precondition: a canary may testify against a batch only when this many trailing runs before the apply all passed. |
-| `canary_regression_delta` | `0.15` | Drift threshold for the **passive** post-mortem signal only (the canary signal is per-task, not a rate delta). |
-| `canary_auto_admit` | `true` | Auto-admit machine-proposed canaries whose gate commands pass an allowlist proof plus the vetting runs; specs the machine can't prove safe still queue for human review. |
+| `canary_auto_admit` | `true` | Auto-admit machine-proposed canaries whose gate commands pass an allowlist proof plus the vetting runs; specs the machine can't prove safe are logged and dropped. |
 | `canary_auto_maintain` | `true` | Maintenance sweep: promotes vetted canaries, tags flapping ones flaky, parks long-green ones, syncs skill verify blocks, retires exhausted probes. A canary whose latest run failed is never auto-mutated — except that a red run un-parks. |
 | `canary_vetting_runs` | `3` | Consistent runs required to promote a canary out of vetting. |
 | `canary_park_after_passes` | `25` | Consecutive passes before a canary is parked (off the heartbeat, still in the suite; any red run un-parks it). Replaces `canary_retire_after_passes`. |
 | `canary_purge_after_days` | `30` | Retired canaries (DELETE API, exhausted probes) sit in `.retired/` this long before deletion — the undo window. |
-| `canary_max_suite` | `24` | Auto-admission stops at this suite size (the human path stays open). |
-
----
-
-## Adaptive Layer
-
-A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies that route through the proposal queue: a **veto window**, not an approval gate. Content is gated at the mouth (v3.1): every machine edit passes an actionability lint (instructions in, narrative out), per-entry usage is measured (scout and reflect citations), unused entries retire on their own, and both you and the agent have direct authorship paths. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Autonomy & idle work → Adaptive Layer; entries, events, and proposals surface in the Explorer's Self-tuning → Learning tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
-
-| Setting | Default | Description |
-|---|---|---|
-| `adaptive_enabled` | `false` | Master switch for the store, the producers, and the compiler/scout consumption. |
-| `adaptive_auto_apply` | `true` | Auto-apply low-risk kinds (`routing_hint`, `prompt_note`) during idle windows; high-risk kinds always route through the proposal queue. Run the canary suite for at least a week before relying on this. |
-| `adaptive_auto_rollback` | `false` | Promote a canary-regression tripwire hit to automatic rollback. Off until the metric earns trust — a hit otherwise only flags the batch `suspect`. |
-| `adaptive_pm_drift_rollback` | `false` | The tripwire's second, stricter rollback trigger: a two-proportion z-test on per-turn outcomes (the user's thumbs where there is one, else reflect's verdict) between up to 100 graded turns before the apply and the graded turns after it, minimum 30 each side. `p<0.05` flags the batch `suspect`; `p<0.01` rolls it back through the journal and notifies — and only when `adaptive_auto_rollback` is also on. Replaces the old 20-turn ratio, which could not tell a real regression from eight coin flips. |
-| `adaptive_max_entries_per_kind` | `24` | Cap on active entries per kind. |
-| `adaptive_trial_enabled` | `false` | Every adaptation is an experiment: a producer-minted `policy`/`prompt_note`/`routing_hint` enters status `trial` instead of `active` and renders on a deterministic half of the turns (`sha1(session:turn + entry id)`, identical for the scout prompt and the compiled prompt). Each turn's post-mortem records which trial entries it saw and which it held out, and the idle sweep promotes or retires them on the measured difference. Entries you author yourself are never trialled. |
-| `adaptive_trial_min_arm` | `40` | Graded turns needed in **each** arm before a trial can be decided early (promote at `p<0.05` better, retire at `p<0.01` worse). Below it the test cannot separate an effect from the coin flip that assigned the arms. |
-| `adaptive_trial_ttl_days` | `28` | A trial that has not separated by this age is promoted anyway and tagged `unproven` in the journal — an experiment that cannot conclude must not hold the entry in half-rendered limbo forever. |
-| `adaptive_max_auto_applies_per_day` | `24` | Cap on auto-applied batches per day. |
-| `adaptive_edit_cooldown_hours` | `24` | Minimum hours between machine edits to the same entry. |
-| `adaptive_tripwire_window_turns` | `20` | Organic turns after a batch over which post-mortem retry drift is watched (the passive tripwire; canary-stamped post-mortems excluded). |
-| `adaptive_max_pending_proposals` | `200` | Review-queue cap; at the cap new proposals are refused (the producer re-raises once the queue drains). `0` = unbounded. |
-| `adaptive_max_pending_per_producer` | `60` | One producer's share of the queue, so a chatty producer cannot silence the quieter ones. `0` = unbounded. |
-| `adaptive_proposal_ttl_days` | `30` | Pending proposals lapse (`expired`) after this — a proposal is a snapshot of evidence, and the producer re-raises it from current evidence if it still holds. `0` = never. |
-| `adaptive_auto_approve_after_hours` | `24` | The veto window. A proposal still pending after this many hours is approved by the system itself — same apply path as a human approval, journaled, swept, rollback-able, resolved as `auto_approved` for the audit trail. Canary-suite proposals are excluded (they keep their human gate; `canary_auto_admit` is their autonomy path), and a proposal whose evidence resolves to nothing recorded is held for a human — unless it only removes entries. Each card in the Learning tab says which of the three it is and when. `0` = human approval only. |
-| `adaptive_max_auto_approvals_per_day` | `40` | Cap on veto-window auto-approvals per rolling 24h. |
-| `adaptive_usage_retire_days` | `45` | Entries with zero recorded uses over this many *instrumented* days (counted from the usage epoch, stamped on the sweep's first run) are retired — journaled soft-deletes, one aggregate notification, one-click rollback. Candor-owned and human-authored entries exempt. `0` disables. |
-| `adaptive_prompt_note_ttl_days` | `90` | Backstop TTL for `prompt_note` (the kind with no producer-side retirement loop). `0` = keep forever. |
-| `adaptive_harmful_retire_min_uses` | `5` | Failure-dominated retirement: an entry needs at least this many attributed outcomes (successes + failures, written by synthesis) before its success share is trusted enough to retire it. `0` disables the branch. |
-| `adaptive_harmful_retire_max_success` | `0.3` | Below this success share (0–1), a sufficiently-observed entry retires even though it is used — usage alone used to keep a provably harmful hint alive forever while an uncited good one died at the usage-retire window. Journaled soft-delete, one-click rollback; Candor- and user-authored entries are exempt. |
-| `adaptive_suspect_ttl_days` | `7` | A suspect flag raised by the passive post-mortem signal alone can never self-clear (its windows are frozen at the apply); it auto-clears with an annotation after this many days. Canary-confirmed flags are exempt. `0` = flags wait for your dismiss. |
-| `adaptive_agent_notes_enabled` | `false` | The `adaptive_note` tool: the live agent may mint `prompt_note`/`routing_hint` edits the moment it learns something — content lint applies, 2/day, normal pipeline + tripwire, never `policy`. Registration needs a restart. (The read-side `adaptive_proposals` and the user-instructed `adaptive_proposal_decide` tools need only `adaptive_enabled`.) |
+| `canary_max_suite` | `24` | Auto-admission stops at this suite size. |
 
 ---
 
 ## Skill Self-Healing
 
-When a skill fails and the session running it finds a workaround, refine can fold that fix back into the skill's `SKILL.md` — the same veto-window contract as the Adaptive Layer's auto-approve: a pending proposal older than the window is machine-validated (skill exists and is enabled, change bounded, frontmatter preserved) and applied with a timestamped backup under `data/skill_backups/<skill>/`. Reject any proposal from the Explorer's Capabilities → Skills tab inside the window. The window and the daily cap have no Settings UI control; set them via `POST /api/settings` or `data/settings.json`. The rollback toggle does: Settings → Autonomy & idle work → **Skill Self-healing**.
+When a skill fails and the session running it finds a workaround, refine can fold that fix back into the skill's `SKILL.md` — a veto window, not an approval gate: a pending proposal older than the window is machine-validated (skill exists and is enabled, change bounded, frontmatter preserved) and applied with a timestamped backup under `data/skill_backups/<skill>/`. Reject any proposal from the Explorer's Capabilities → Skills tab inside the window. The window and the daily cap have no Settings UI control; set them via `POST /api/settings` or `data/settings.json`. The rollback toggle does: Settings → Autonomy & idle work → **Skill Self-healing**.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -449,7 +415,7 @@ Esc cancels a recording without transcribing.
 | `vapid_public_key` | *(auto-generated)* | VAPID public key shared with service worker subscriptions. |
 | `vapid_subject` | `mailto:admin@localhost` | VAPID subject identifying the push sender. Must be a real contact: a `mailto:` address or an `https:` URL. Not localhost — Apple's push service rejects placeholder subjects, so the default silently breaks push to iPhones and iPads. |
 | `notify_tiers_enabled` | `true` | Tiered notifications. Every notice has a category, and each category one tier: `interrupt` (bell badge + phone push), `bell` (quiet item, never a buzz), `log` (activity log only), `drop` (not recorded). `false` is the kill switch: every notice goes back to the old bell with its old urgency and channels. |
-| `notify_tier_overrides` | `{}` | Per-area or per-category tier: `{"canary": "drop", "jobs.test_failed": "interrupt"}`. Keys are an area (`agent`, `external`, `sessions`, `jobs`, `canary`, `skills`, `adaptive`, `review`, `dream`, `spaces`, `system`) or a full category name from `core/notices.py`; values are `interrupt`, `bell`, `log` or `drop`. A category override beats its area's. The API rejects (HTTP 400) unknown keys and tiers; `""` or `"default"` removes an entry. Empty = registry defaults, no tuning needed. Settings → Integrations → Notification tiers has one row per area. |
+| `notify_tier_overrides` | `{}` | Per-area or per-category tier: `{"canary": "drop", "jobs.test_failed": "interrupt"}`. Keys are an area (`agent`, `external`, `sessions`, `jobs`, `canary`, `skills`, `review`, `dream`, `spaces`, `system`) or a full category name from `core/notices.py`; values are `interrupt`, `bell`, `log` or `drop`. A category override beats its area's. The API rejects (HTTP 400) unknown keys and tiers, except that a key in a retired area (`adaptive`) is dropped silently; `""` or `"default"` removes an entry. Empty = registry defaults, no tuning needed. Settings → Integrations → Notification tiers has one row per area. |
 | `push_urgency_floor` | `normal` | Web Push floor: only notifications at or above this urgency (`low`, `normal`, `high`, `urgent`) reach a phone. Agent questions always push. The in-app bell still shows everything. |
 | `notification_retention_days` | `30` | Notifications older than this are pruned (snooze Activity 11 + the maintenance 24h tier) — the bell is a recent-events surface, not an archive. `0` = keep forever. |
 

@@ -187,7 +187,7 @@ class Settings:
     # Turn-boundary ledger (agent-ergonomics plan, Tier 1): a delta block in
     # the volatile tail telling the agent what changed since its previous
     # turn — finished workers/jobs/RLM runs, its last reflect verdict,
-    # adaptive changes, canary regressions, platform restarts. Composition
+    # open questions, canary regressions, platform restarts. Composition
     # over existing tables; renders nothing when nothing changed. Off = the
     # tail is byte-identical to the pre-ledger shape.
     turn_ledger_enabled: bool = True
@@ -351,11 +351,11 @@ class Settings:
 
     # --- Golden-task canary suite (plan 3.5, off by default) ---
     # Canned tasks + deterministic gates run headlessly through the full
-    # pipeline in session_type="canary" sessions. The tripwire's primary
-    # signal. Zero rows, zero behavior change while off.
+    # pipeline in session_type="canary" sessions. Zero rows, zero behavior
+    # change while off.
     #
     # Canaries are CHANGE-DRIVEN: they run when something they cover changes
-    # (an adaptive batch, a skill edit, a model swap, a deploy), not on a
+    # (a skill edit, a model swap, a deploy), not on a
     # wall clock. The only standing schedule is a small heartbeat — the
     # canary_heartbeat_per_night least-recently-run active canaries per
     # night — which keeps every canary's history warm enough that a failure
@@ -365,20 +365,10 @@ class Settings:
     canary_schedule: str = "0 3 * * *"  # heartbeat cron expression
     canary_heartbeat_per_night: int = 2
     canary_retention_days: int = 30
-    # Per-task tripwire (core/adaptive/tripwire.py): a canary may testify
-    # against a batch only when its trailing canary_baseline_runs runs before
-    # the apply were all green. canary_regression_delta now feeds only the
-    # PASSIVE post-mortem drift signal.
-    canary_baseline_runs: int = 5
-    canary_regression_delta: float = 0.15
-    # The post-batch probe: covering canaries (matched via `covers:`) plus
-    # the sentinel-tagged ones, capped here. Sentinels are the cheap, broad
-    # tasks that ride along on every probe.
-    canary_post_batch_max: int = 4
     # Graduated autonomy (suite self-management, active only under
     # canary_enabled). Auto-admission replaces the human approval click with
     # mechanical gates: an allowlist proof over the gate commands plus vetting
-    # runs; specs the machine can't prove safe still queue for human review.
+    # runs; specs the machine can't prove safe are logged and dropped.
     # The maintenance sweep promotes vetted canaries, tags flapping ones
     # flaky, PARKS long-green ones (off the heartbeat, still coverage-run,
     # auto-unparked by a red run), retires exhausted probes, and purges the
@@ -390,117 +380,13 @@ class Settings:
     canary_vetting_runs: int = 3  # consistent runs required to promote out of vetting
     canary_park_after_passes: int = 25  # consecutive passes before auto-parking
     canary_purge_after_days: int = 30  # retired canaries older than this are deleted
-    canary_max_suite: int = 24  # auto-admission stops at this suite size (human path stays open)
-
-    # --- Adaptive Layer (plan §6, off by default) ---
-    # Governed machine-editable policy store. While off: zero rows, compiler
-    # output byte-identical, no producer emits edits.
-    adaptive_enabled: bool = False
-    # ON by default (takes effect only once adaptive_enabled): low-risk kinds
-    # (routing_hint, prompt_note) auto-apply at idle, subject to the per-day
-    # and cooldown caps below; high-risk kinds are always proposal-gated.
-    # Set False to route every edit — low-risk included — through proposals,
-    # e.g. while building canary baselines.
-    adaptive_auto_apply: bool = True
-    # Promote a canary-regression tripwire hit to automatic rollback. Off
-    # until the metric earns trust; a hit only flags the batch 'suspect'.
-    adaptive_auto_rollback: bool = False
-    # The SECOND rollback trigger, gated separately: the passive post-mortem
-    # drift test (two-proportion z over graded turns before/after the apply)
-    # rolling a batch back at p<0.01. Needs adaptive_auto_rollback ON as
-    # well — this flag only widens that permission to the passive channel,
-    # which has never rolled anything back and has to earn it on its own.
-    adaptive_pm_drift_rollback: bool = False
-    # Every adaptation is an experiment (hardening W6). With this on, an entry
-    # a PRODUCER minted (policy/prompt_note/routing_hint, whether it
-    # auto-applied or a human declined to veto it) lands as `trial` instead of
-    # `active`: it renders on a deterministic half of the turns — the coin is
-    # sha1(session:turn + entry id), so the scout prompt and the compiled
-    # prompt always agree — and the idle sweep promotes or retires it on the
-    # measured difference between the halves rather than on the clock. Entries
-    # a human wrote are never trialled; the author is the evidence.
-    adaptive_trial_enabled: bool = False
-    # Graded turns required IN EACH ARM before a trial may be decided early.
-    # Below this the two-proportion test cannot separate a real effect from
-    # the coin flip that assigned the arms.
-    adaptive_trial_min_arm: int = 40
-    # A trial that has not separated by this age is promoted anyway, tagged
-    # `unproven` in the journal. Most entries will never reach significance
-    # (their effect is small and the traffic is thin), and an experiment that
-    # cannot conclude must not hold the entry in half-rendered limbo forever.
-    adaptive_trial_ttl_days: int = 28
-    adaptive_max_entries_per_kind: int = 24
-    adaptive_max_auto_applies_per_day: int = 24
-    adaptive_edit_cooldown_hours: int = 24
-    # Passive tripwire: the MAXIMUM graded organic turns taken into each
-    # comparison window (before the apply, after the apply) for the
-    # post-mortem drift test; canary-stamped post-mortems are excluded.
-    # A window is never smaller than 30 turns whatever this says — below
-    # that the two-proportion test cannot separate drift from noise, which
-    # is exactly what the old 20-turn ratio kept doing.
-    adaptive_tripwire_window_turns: int = 100
-    # Active tripwire: how long a batch may wait for a canary verdict. Past
-    # this many hours from the APPLY with no task able to testify, the batch
-    # is settled as unjudged instead of being re-derived (and re-warned
-    # about) on every maintenance tick forever — two candor batches applied
-    # 2026-08-13 logged the same WARNING 164 times in three days, and their
-    # canary suite had been retired in the meantime, so no run could ever
-    # have judged them. Rollback stays available to a human.
-    adaptive_tripwire_window_hours: int = 72
-    adaptive_max_pending_proposals: int = 200  # review queue cap (0 = unbounded)
-    adaptive_max_pending_per_producer: int = 60  # one producer's share of it (0 = unbounded)
-    adaptive_proposal_ttl_days: int = 30  # pending proposals lapse after this (0 = never)
-    # Value-based retirement (v3.1): an entry that rendered into prompts for
-    # this many INSTRUMENTED days (counted from the usage epoch, stamped on
-    # the sweep's first run) without one recorded use — scout's used_hints,
-    # reflect's cited_policies — is retired. Journaled soft-deletes, one
-    # aggregate notification, one-click rollback. 0 disables. Candor-owned
-    # and human-authored entries are exempt.
-    adaptive_usage_retire_days: int = 45
-    # prompt_note has no producer-side retirement loop at all; this TTL is
-    # its backstop (0 = never). A still-useful note re-mints cheaply.
-    adaptive_prompt_note_ttl_days: int = 90
-    # Failure-dominated retirement: an entry whose attributed OUTCOMES are
-    # mostly failures retires even though it is used — before this, usage
-    # alone kept a provably harmful hint alive forever while an uncited good
-    # one died at the retire window. Needs at least min_uses attributed
-    # outcomes (successes+failures, written by synthesis) before the share
-    # is trusted; retires when the success share is below max_success.
-    # min_uses=0 disables the branch.
-    adaptive_harmful_retire_min_uses: int = 5
-    adaptive_harmful_retire_max_success: float = 0.3
-    # A suspect flag raised by the PASSIVE post-mortem signal alone can never
-    # self-clear (its comparison windows are frozen at the apply). After this
-    # many days it auto-clears with an annotation; canary-confirmed flags are
-    # exempt. 0 = flags persist until human dismiss (the pre-v3.1 behavior).
-    adaptive_suspect_ttl_days: int = 7
-    # The agent's own authorship valve: the adaptive_note tool lets the live
-    # agent mint prompt_note/routing_hint edits the moment it learns
-    # something, instead of hoping refine distills it later. Full guardrails:
-    # the content lint applies, the normal batch pipeline + tripwire watch
-    # it, 2 mints/day, never policy/worker_spec. Off by default per house
-    # convention (flip on where wanted).
-    adaptive_agent_notes_enabled: bool = False
-    # The review queue is a VETO WINDOW, not an approval gate: a pending
-    # proposal older than this many hours is approved by the system itself —
-    # same apply path as a human approval, journaled, post-batch-swept and
-    # rollback-able, resolved as 'auto_approved' so the audit trail tells the
-    # two apart. Validation happens AFTER application, over time (tripwire,
-    # canary sweeps), which is the only validation that measures anything
-    # real; a proposal parked until a human clicks it is a lesson lost to a
-    # backlog. Reject anything you disagree with inside the window; 0 turns
-    # the gate back on (human approval only, TTL lapse). Canary-suite
-    # proposals never auto-approve — admitting a new canary has its own
-    # graduated-autonomy path (canary_auto_admit) and a human invariant (I6).
-    adaptive_auto_approve_after_hours: int = 24
-    adaptive_max_auto_approvals_per_day: int = 40
+    canary_max_suite: int = 24  # auto-admission stops at this suite size
 
     # --- Skill self-healing (refine skill proposals, veto-window apply) ---
-    # Same veto-window contract as adaptive_auto_approve_after_hours, for
-    # SKILL.md improvement proposals: a pending proposal older than the
-    # window is machine-validated (skill exists + enabled, change bounded,
-    # frontmatter preserved) and applied with a timestamped backup under
-    # data/skill_backups/. A human can reject anything in the Skills tab
+    # A veto window for SKILL.md improvement proposals: a pending proposal
+    # older than the window is machine-validated (skill exists + enabled,
+    # change bounded, frontmatter preserved) and applied with a timestamped
+    # backup under data/skill_backups/. A human can reject anything in the Skills tab
     # inside the window; 0 disables auto-apply (manual Apply only).
     skill_proposal_auto_apply_after_hours: int = 24
     skill_proposal_max_auto_applies_per_day: int = 5
@@ -508,8 +394,8 @@ class Settings:
     # `verify:` canary failing within 7 days of an auto-apply is the closest
     # thing to a measured regression this surface has, so with this on the
     # backup taken at apply time is restored automatically and the proposal
-    # is marked 'rolled_back'. Off by default, like adaptive_auto_rollback:
-    # the signal earns trust first. Manual rollback (the Skills tab, POST
+    # is marked 'rolled_back'. Off by default: the signal earns trust first.
+    # Manual rollback (the Skills tab, POST
     # /api/skills/proposals/{id}/rollback) works either way.
     skill_proposal_auto_rollback: bool = False
 
