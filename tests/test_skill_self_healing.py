@@ -6,7 +6,7 @@ Covers the 2026-08-31 fixes (session 83dc931a8596 post-mortem):
   2. Re-armable refine watermarks (max message id, awaiting_user excluded).
   3. Failure-arc evidence extraction + machine signal in the refine prompt.
   4. Proposal dedupe across re-refines.
-  5. Veto-window auto-apply with machine validation, backups, and day cap.
+  5. Proposals are suggestions (manual apply with backup; no auto-apply).
   6. Skill content-change sweep → memory_stale dream hypotheses.
   7. Migration v32 watermark conversion.
 """
@@ -355,7 +355,7 @@ async def test_refine_dedupes_repeat_proposal(mock_llm_client, monkeypatch, tmp_
 
 
 # ---------------------------------------------------------------------------
-# 5. Veto-window auto-apply
+# 5. Proposals are suggestions: manual apply only
 # ---------------------------------------------------------------------------
 
 
@@ -380,140 +380,40 @@ def _pending_proposal(skill_name, change="Add: on GPU OOM use --device cpu.", co
     return pid
 
 
-@pytest.fixture
-def quiet_manager(monkeypatch):
-    monkeypatch.setattr(
-        "sessions.manager.get_manager",
-        lambda: SimpleNamespace(has_active_work=lambda strict=False: False),
-    )
-
-
-def test_auto_apply_applies_ripe_proposal_with_backup(tmp_path, monkeypatch, quiet_manager):
-    from core.skills.proposals import auto_apply_ripe_proposals
+def test_manual_apply_writes_change_with_backup(tmp_path, monkeypatch):
+    from core.skills.proposals import apply_proposal
     from db import models as db
 
     skill = _make_skill_dir(tmp_path, "heal-me")
     _patch_registry(monkeypatch, FakeSkillRegistry({"heal-me": skill}))
     monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
-    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
 
     pid = _pending_proposal("heal-me", age_hours=48)
-    out = auto_apply_ripe_proposals()
+    apply_proposal(pid)
 
-    assert out["applied"] == [pid]
     body = (skill.path / "SKILL.md").read_text(encoding="utf-8")
     assert "--device cpu" in body
-    assert db.get_skill_proposal(pid)["status"] == "auto_applied"
+    assert db.get_skill_proposal(pid)["status"] == "applied"
     backups = list((tmp_path / "skill_backups" / "heal-me").glob("SKILL.md.*"))
     assert len(backups) == 1
     assert "--device cpu" not in backups[0].read_text(encoding="utf-8")
 
 
-def test_auto_apply_respects_veto_window(tmp_path, monkeypatch, quiet_manager):
-    from core.skills.proposals import auto_apply_ripe_proposals
-    from db import models as db
+def test_nothing_applies_a_proposal_on_its_own():
+    """The 3.1 veto-window sweep is gone: no auto-apply entry point, no
+    snooze rung, no settings for it (2026-10 surface prune)."""
+    import dataclasses
+    import inspect
 
-    skill = _make_skill_dir(tmp_path, "too-fresh")
-    _patch_registry(monkeypatch, FakeSkillRegistry({"too-fresh": skill}))
-    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
-    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
+    import core.skills.proposals as proposals
+    from config import Settings
+    from core.snooze import SnoozeRunner
 
-    pid = _pending_proposal("too-fresh", age_hours=0)  # inside the window
-    out = auto_apply_ripe_proposals()
-
-    assert out["applied"] == []
-    assert db.get_skill_proposal(pid)["status"] == "pending"
-
-
-def test_auto_apply_disabled_when_window_zero(tmp_path, monkeypatch, quiet_manager):
-    from core.skills.proposals import auto_apply_ripe_proposals
-    from db import models as db
-
-    skill = _make_skill_dir(tmp_path, "gated-off")
-    _patch_registry(monkeypatch, FakeSkillRegistry({"gated-off": skill}))
-    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
-    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 0)
-
-    pid = _pending_proposal("gated-off", age_hours=48)
-    out = auto_apply_ripe_proposals()
-
-    assert out["applied"] == []
-    assert db.get_skill_proposal(pid)["status"] == "pending"
-
-
-def test_auto_apply_archives_proposal_for_missing_skill(tmp_path, monkeypatch, quiet_manager):
-    from core.skills.proposals import auto_apply_ripe_proposals
-    from db import models as db
-
-    _patch_registry(monkeypatch, FakeSkillRegistry({}))
-    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
-    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
-
-    pid = _pending_proposal("deleted-skill", age_hours=48)
-    out = auto_apply_ripe_proposals()
-
-    assert pid in out["archived"]
-    assert db.get_skill_proposal(pid)["status"] == "archived"
-
-
-def test_auto_apply_skips_disabled_skill(tmp_path, monkeypatch, quiet_manager):
-    from core.skills.proposals import auto_apply_ripe_proposals
-    from db import models as db
-
-    skill = _make_skill_dir(tmp_path, "off-skill")
-    _patch_registry(monkeypatch, FakeSkillRegistry({"off-skill": skill}, disabled={"off-skill"}))
-    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
-    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
-
-    pid = _pending_proposal("off-skill", age_hours=48)
-    out = auto_apply_ripe_proposals()
-
-    assert out["applied"] == []
-    assert out["skipped"] == 1
-    assert db.get_skill_proposal(pid)["status"] == "pending"
-
-
-def test_auto_apply_honors_day_cap(tmp_path, monkeypatch, quiet_manager):
-    from core.skills.proposals import auto_apply_ripe_proposals
-    from db import models as db
-
-    skills = {}
-    for i in range(3):
-        s = _make_skill_dir(tmp_path, f"cap-skill-{i}")
-        skills[s.name] = s
-    _patch_registry(monkeypatch, FakeSkillRegistry(skills))
-    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
-    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
-    monkeypatch.setattr("config.settings.skill_proposal_max_auto_applies_per_day", 2)
-
-    pids = [_pending_proposal(f"cap-skill-{i}", change=f"Change {i}: add note.", age_hours=48) for i in range(3)]
-    out = auto_apply_ripe_proposals()
-
-    assert len(out["applied"]) == 2
-    statuses = [db.get_skill_proposal(p)["status"] for p in pids]
-    assert statuses.count("auto_applied") == 2
-    assert statuses.count("pending") == 1
-
-
-def test_auto_apply_defers_when_sessions_active(tmp_path, monkeypatch):
-    from core.skills.proposals import auto_apply_ripe_proposals
-    from db import models as db
-
-    skill = _make_skill_dir(tmp_path, "busy-box")
-    _patch_registry(monkeypatch, FakeSkillRegistry({"busy-box": skill}))
-    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
-    monkeypatch.setattr("config.settings.skill_proposal_auto_apply_after_hours", 24)
-    monkeypatch.setattr(
-        "sessions.manager.get_manager",
-        lambda: SimpleNamespace(has_active_work=lambda strict=False: True),
-    )
-
-    pid = _pending_proposal("busy-box", age_hours=48)
-    out = auto_apply_ripe_proposals()
-
-    assert out["applied"] == []
-    assert out["deferred"] >= 1
-    assert db.get_skill_proposal(pid)["status"] == "pending"
+    assert not hasattr(proposals, "auto_apply_ripe_proposals")
+    assert "auto_apply" not in inspect.getsource(SnoozeRunner)
+    fields = {f.name for f in dataclasses.fields(Settings)}
+    assert "skill_proposal_auto_apply_after_hours" not in fields
+    assert "skill_proposal_max_auto_applies_per_day" not in fields
 
 
 # ---------------------------------------------------------------------------

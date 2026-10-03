@@ -98,7 +98,6 @@ CATEGORIES: dict[str, Category] = {
     "skills.verify_unsafe": Category("bell"),
     "skills.auto_rolled_back": Category("bell", legacy_urgency="high"),
     "skills.rolled_back": Category("log"),
-    "skills.proposals_auto_applied": Category("log"),
     # One computed row: "N skill proposals wait for your decision"
     # (core/skills/review.py). Replaces a bell item per proposal; resolved
     # when the count reaches zero.

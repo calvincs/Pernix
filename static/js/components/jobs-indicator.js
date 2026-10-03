@@ -181,7 +181,7 @@ function _handleEvent(type, data) {
         _status.snooze = { ..._status.snooze, running: true, activity: null, detail: null };
     } else if (type === 'snooze.activity') {
         // Live per-activity detail ("Pruning old RLM run directories",
-        // "Applying skill proposals past the veto window", …) — an activity always
+        // "Checking skills for content changes", …) — an activity always
         // implies a running cycle, even if snooze.start was missed.
         _status.snooze = {
             ..._status.snooze,
