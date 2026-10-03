@@ -81,10 +81,10 @@ class ToolExecutionResult:
 # Policy refusals — a disabled tool, a retry exclusion, a scheduled job's
 # allow-list, a session type that may not use the tool, the approval gate —
 # are errors for the MODEL (it must stop calling) but say nothing about the
-# TOOL. They are tagged so the turn summary, reflect, candor and telos count
+# TOOL. They are tagged so the turn summary, reflect and synthesis count
 # them apart from failures: on the live box 15 charter refusals in one week
-# were graded as tool failures, dragging candor's tool_ok for bash/glob down
-# and minting telos hypotheses about tools that never ran.
+# were graded as tool failures and skewed every reliability reading for
+# bash/glob.
 REFUSAL_MARKER = "refused"
 _REFUSAL_CONTENT_HINTS = (
     "is not permitted in this scheduled run",
@@ -125,7 +125,7 @@ def _refusal(name: str, content: str) -> ToolExecutionResult:
 # does not exist (a skill, a resource path, a memory entry) — the agent asked
 # for the wrong thing, the tool did not fail. The agent still sees an error
 # so it corrects course, but reliability accounting (tool_summary failures,
-# candor tool_ok, scout_signals) must not read it as an unreliable tool: on
+# scout_signals) must not read it as an unreliable tool: on
 # the live box four such misses minted a "read_skill_resource degraded —
 # prefer an alternative" routing hint. A tool signals it by prefixing its
 # returned error string with MISS_PREFIX.

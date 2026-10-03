@@ -3070,8 +3070,8 @@ async function renderJobs() {
     ));
 
     // Live snooze activity line — fed by snooze.activity SSE events (which
-    // previously reached the browser and were discarded). Surfaces Candor
-    // maintenance, RLM run cleanup, and the other idle-time activities.
+    // previously reached the browser and were discarded). Surfaces dream,
+    // RLM run cleanup, and the other idle-time activities.
     if (_lastSnoozeActivity && _lastSnoozeActivity.detail) {
         container.appendChild(el('div', { class: 'fp-snooze-activity' }, [
             el('span', { class: 'fp-snooze-activity-icon' }, [icon('moon', { size: 12 })]),

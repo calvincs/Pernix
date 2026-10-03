@@ -98,23 +98,3 @@ def test_reflect_sees_refusals_as_refusals_and_the_rubric_says_so():
     assert "ERROR:" not in evidence
     assert "REFUSALS ARE NOT FAILURES" in REFLECT_PROMPT
     assert "A REQUIREMENT ATTRIBUTED TO THE USER MUST QUOTE THE USER" in REFLECT_PROMPT
-
-
-def test_candor_never_sees_a_refusal_as_tool_ok_false():
-    from core.extensions.candor.emit import build_turn_observations
-
-    summary = {"bash": {"calls": 3, "failures": 1, "refusals": 2, "errors": ["exit 1"], "total_latency_ms": 5}}
-    obs, _ = build_turn_observations(
-        tool_summary=summary,
-        already_emitted={},
-        termination_reason="complete",
-        reflect_verdict="pass",
-        failure_cause="none",
-        model="m",
-        session_kind="cron",
-        is_retry=False,
-        ts_ms=1,
-    )
-    bash_ok = [o for o in obs if o["pred"] == "tool_ok" and o["args"] == ["bash"]]
-    assert [o["outcome"] for o in bash_ok].count(False) == 1  # the real failure
-    assert [o["outcome"] for o in bash_ok].count(True) == 2  # calls minus failures — refusals are not successes either

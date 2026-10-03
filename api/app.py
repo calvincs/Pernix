@@ -423,14 +423,6 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     try:
-        # Releases the Candor store's writer flock. No-op if the bridge was
-        # never created (candor_enabled=false or unused).
-        from core.extensions.candor.bridge import shutdown_candor_bridge
-
-        await shutdown_candor_bridge()
-    except Exception:
-        pass
-    try:
         task = getattr(app.state, "dream_journal_task", None)
         if task is not None:
             task.cancel()
