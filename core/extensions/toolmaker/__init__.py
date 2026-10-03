@@ -13,6 +13,7 @@ from config import settings
 
 logger = logging.getLogger("pernix.ext.toolmaker")
 
+from core.extensions.packages import install_package
 from core.tools.paths import ensure_workspace_venv_on_path
 
 CUSTOM_TOOLS_DIR = Path("core/tools/builtin")
@@ -278,49 +279,6 @@ def restore_tool_packages(name: str, _context: dict | None = None) -> str:
     return f"Restored {ok}/{len(pkgs)} packages for '{name}': {', '.join(pkgs)}"
 
 
-def install_package(package: str, _context: dict | None = None) -> str:
-    """Install a Python package via pip in the workspace virtual environment."""
-    # Basic validation
-    if not re.match(r"^[a-zA-Z0-9._-]+([=<>!]+[a-zA-Z0-9._-]+)?$", package):
-        return f"Error: Invalid package name: {package}"
-
-    # Block flag injection via package name
-    if "--" in package:
-        return f"Error: Invalid package name (flags not allowed): {package}"
-
-    # Always use workspace venv python, never system python
-    workspace_venv_python = Path(settings.workspace_dir).resolve() / ".venv" / "bin" / "python"
-
-    # Auto-create workspace venv if missing
-    if not workspace_venv_python.exists():
-        venv_dir = Path(settings.workspace_dir).resolve() / ".venv"
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_dir)],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        except Exception as e:
-            return f"Error: Failed to create workspace venv: {e}"
-        if not workspace_venv_python.exists():
-            return "Error: Failed to create workspace venv"
-
-    try:
-        result = subprocess.run(
-            [str(workspace_venv_python), "-m", "pip", "install", package],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        output = (result.stdout + result.stderr).strip()
-        if result.returncode == 0:
-            return f"Installed: {package}\n{output[-200:]}"
-        return f"Error installing {package}:\n{output[-500:]}"
-    except subprocess.TimeoutExpired:
-        return "Error: pip install timed out after 120s"
-
-
 def register(reg) -> None:
     common = {"category": "toolmaker", "source": "extension"}
     tags = ["tool", "create", "custom", "make", "code", "extend", "plugin"]
@@ -416,27 +374,6 @@ def register(reg) -> None:
         },
         tags=["tool", "restore", "repair", "requirements", "venv", "recovery", "dependencies"],
         timeout=180,
-        parallel_safe=False,
-        safety_level="safe",
-        **common,
-    )
-    reg.register(
-        name="install_package",
-        func=install_package,
-        description=(
-            "Install a Python package into the workspace venv (data/workspace/.venv). "
-            "Available to custom tools (source='custom'). "
-            "Core built-in tools use the project venv instead."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "package": {"type": "string", "description": "Package name (e.g. 'requests' or 'pandas==2.0')"}
-            },
-            "required": ["package"],
-        },
-        tags=["pip", "install", "package", "dependency", "library"],
-        timeout=120,
         parallel_safe=False,
         safety_level="safe",
         **common,
