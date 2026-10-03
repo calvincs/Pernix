@@ -323,13 +323,11 @@ whole window). Nothing mutates the suite on its own: the auto-admission,
 vetting, flap tagging, parking, one-off probe retirement, suite-health
 alerts and the 90-day staleness nudge were retired in 3.2.
 
-**Skill verify blocks** (`core/canary/skill_verify.py`). A skill may embed a
-`verify:` block in its SKILL.md frontmatter, which the canary maintenance
-sweep used to materialise as a managed canary `skill--<name>`. That sweep is
-gone, so nothing syncs verify blocks any more; the module stays until the
-skill self-healing prune removes it together with the automatic rollback it
-fed. Manual skill rollback (`POST /api/skills/proposals/{id}/rollback`, the
-Skills tab) is unaffected.
+**Skill verify blocks.** A skill's `verify:` frontmatter block used to be
+materialised as a managed canary `skill--<name>` and fed the automatic skill
+rollback. Both were removed in 3.2 (with `core/canary/skill_verify.py`); the
+block is ignored. Manual skill rollback (`POST
+/api/skills/proposals/{id}/rollback`, the Skills tab) is unaffected.
 
 ---
 
