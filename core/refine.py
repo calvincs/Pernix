@@ -331,44 +331,12 @@ def _latest_reflect_verdict(messages: list[dict]) -> dict | None:
     return None
 
 
-_RECEIPT_PM_LIMIT = 5
-
-
-def _stamp_post_mortem_receipts(edits: list[dict], session_id: str) -> list[dict]:
-    """Prefix each edit's evidence with `pm:` refs for the turns refine read.
-
-    Refine reads the session's graded turns (the reflect verdicts in the
-    transcript are the post-mortem payloads), but it emitted only the model's
-    own prose as evidence — which resolves to nothing, so the edit could
-    never be grounded (core/adaptive/receipts.py) and would sit waiting for a
-    human forever. The receipts go FIRST and the model's sentences stay
-    after them: a reviewer wants the pointer before the story.
-    """
-    try:
-        rows = db.list_post_mortems(session_id=session_id, limit=_RECEIPT_PM_LIMIT)
-    except Exception as e:
-        logger.debug("refine: post-mortem receipts unavailable for %s: %s", session_id, e)
-        return edits
-    receipts = [f"pm:{r['id']}" for r in rows if r.get("id")]
-    if not receipts:
-        return edits
-    stamped = []
-    for e in edits:
-        if not isinstance(e, dict):
-            continue
-        e = dict(e)
-        raw_evidence = e.get("evidence")
-        existing = [str(r) for r in raw_evidence] if isinstance(raw_evidence, list) else []
-        e["evidence"] = receipts + [r for r in existing if r not in receipts]
-        stamped.append(e)
-    return stamped
-
-
-def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], list[dict], bool]:
-    """Parse the LLM JSON into (proposals, lessons, adaptive_edits,
-    canary_proposals, nothing_actionable). Tolerates fences. adaptive_edits
-    (plan 4d) and canary_proposals (§12.2) ride the same call and the same
-    parse — empty arrays while their features are off or nothing qualifies."""
+def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], bool]:
+    """Parse the LLM JSON into (proposals, lessons, canary_proposals,
+    nothing_actionable). Tolerates fences. canary_proposals (§12.2) ride the
+    same call and the same parse — an empty array while canaries are off or
+    nothing qualifies. A stray `adaptive_edits` key (the contract retired in
+    3.2) is ignored."""
     text = (raw or "").strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -377,39 +345,20 @@ def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], 
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning("refine: could not parse LLM output as JSON: %s\n%s", e, text[:500])
-        return [], [], [], [], False
+        return [], [], [], False
     if not isinstance(data, dict):
-        return [], [], [], [], False
+        return [], [], [], False
     proposals = data.get("proposals", []) or []
     lessons = data.get("lessons", []) or []
-    adaptive_edits = data.get("adaptive_edits", []) or []
     canary_proposals = data.get("canary_proposals", []) or []
     if not isinstance(proposals, list):
         proposals = []
     if not isinstance(lessons, list):
         lessons = []
-    if not isinstance(adaptive_edits, list):
-        adaptive_edits = []
     if not isinstance(canary_proposals, list):
         canary_proposals = []
-    # The contract's confidence floor and 2-edit cap, enforced mechanically —
-    # prompt prose alone held neither. Edits without a confidence field
-    # (older outputs) pass; an explicit low confidence does not.
-    kept = []
-    for e in adaptive_edits:
-        if not isinstance(e, dict):
-            continue
-        try:
-            conf = float(e["confidence"]) if "confidence" in e else None
-        except (TypeError, ValueError):
-            conf = None
-        if conf is not None and conf < PROPOSAL_CONFIDENCE_FLOOR:
-            logger.info("refine: adaptive edit below confidence floor (%.2f) dropped", conf)
-            continue
-        kept.append(e)
-    adaptive_edits = kept[:2]
     nothing_actionable = bool(data.get("nothing_actionable"))
-    return proposals, lessons, adaptive_edits, canary_proposals, nothing_actionable
+    return proposals, lessons, canary_proposals, nothing_actionable
 
 
 def _build_user_content(
@@ -570,10 +519,6 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
     client = get_llm_client()
 
     system_prompt = REFINE_PROMPT
-    if settings.adaptive_enabled:
-        from core.adaptive.contract import ADAPTIVE_EDITS_PROMPT
-
-        system_prompt = system_prompt + ADAPTIVE_EDITS_PROMPT
     if settings.canary_enabled:
         from core.canary.propose import CANARY_PROPOSALS_PROMPT
 
@@ -594,21 +539,8 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
         stats["skipped_reason"] = f"llm_error:{type(e).__name__}"
         return stats
 
-    proposals, lessons, adaptive_edits, canary_proposals, nothing_actionable = _parse_refine_output(raw)
+    proposals, lessons, canary_proposals, nothing_actionable = _parse_refine_output(raw)
     stats["nothing_actionable"] = nothing_actionable
-
-    if adaptive_edits:
-        from core.adaptive.contract import queue_producer_edits
-
-        adaptive_edits = _stamp_post_mortem_receipts(adaptive_edits, session_id)
-        q = queue_producer_edits(
-            adaptive_edits,
-            "refine",
-            session_id=session_id,
-            rationale=f"refine pass on session {session_id[:12]} ({session.get('title', '?')[:40]})",
-        )
-        stats["adaptive_queued"] = q["queued"]
-        stats["adaptive_gated"] = q["gated"]
 
     if canary_proposals and settings.canary_enabled:
         try:

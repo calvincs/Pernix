@@ -43,7 +43,7 @@ def test_refine_parse_carries_canary_proposals():
     from core.refine import _parse_refine_output
 
     raw = json.dumps({"proposals": [], "lessons": [], "canary_proposals": [_SPEC]})
-    _, _, _, canaries, _ = _parse_refine_output(raw)
+    _, _, canaries, _ = _parse_refine_output(raw)
     assert canaries and canaries[0]["name"] == "regression-pin"
 
 

@@ -127,7 +127,7 @@ def test_parse_refine_output_handles_fences():
     from core.refine import _parse_refine_output
 
     fenced = "```json\n" + json.dumps({"nothing_actionable": False, "proposals": [], "lessons": []}) + "\n```"
-    proposals, lessons, edits, canaries, na = _parse_refine_output(fenced)
+    proposals, lessons, canaries, na = _parse_refine_output(fenced)
     assert proposals == []
     assert lessons == []
     assert na is False
@@ -137,39 +137,35 @@ def test_parse_refine_output_nothing_actionable_flag():
     from core.refine import _parse_refine_output
 
     raw = json.dumps({"nothing_actionable": True, "proposals": [], "lessons": []})
-    _, _, _, _, na = _parse_refine_output(raw)
+    _, _, _, na = _parse_refine_output(raw)
     assert na is True
 
 
 def test_parse_refine_output_malformed_returns_empty():
     from core.refine import _parse_refine_output
 
-    proposals, lessons, edits, canaries, na = _parse_refine_output("not json at all")
+    proposals, lessons, canaries, na = _parse_refine_output("not json at all")
     assert proposals == []
     assert lessons == []
     assert na is False
 
 
-def test_parse_refine_output_enforces_confidence_floor_and_edit_cap():
-    """The contract's 'skip below 0.6' and 'at most 2 edits' were prompt
-    prose only — now mechanical. Edits without a confidence field (older
-    model outputs) pass; an explicit low confidence does not."""
-    from core.refine import _parse_refine_output
+def test_parse_refine_output_ignores_retired_adaptive_edits():
+    """adaptive_edits left the refine contract in 3.2: a model that still
+    emits the key gets a 4-tuple back and nothing queued anywhere."""
+    from core.refine import REFINE_PROMPT, _parse_refine_output
 
     raw = json.dumps(
         {
             "proposals": [],
             "lessons": [],
-            "adaptive_edits": [
-                {"action": "create", "kind": "prompt_note", "title": "low", "content": "x", "confidence": 0.4},
-                {"action": "create", "kind": "prompt_note", "title": "a", "content": "x", "confidence": 0.9},
-                {"action": "create", "kind": "prompt_note", "title": "legacy-no-conf", "content": "x"},
-                {"action": "create", "kind": "prompt_note", "title": "capped-out", "content": "x", "confidence": 0.8},
-            ],
+            "adaptive_edits": [{"action": "create", "kind": "prompt_note", "title": "a", "content": "x"}],
         }
     )
-    _, _, edits, _, _ = _parse_refine_output(raw)
-    assert [e["title"] for e in edits] == ["a", "legacy-no-conf"]  # floor dropped 'low', cap dropped the 4th
+    out = _parse_refine_output(raw)
+    assert len(out) == 4
+    assert out[0] == [] and out[1] == [] and out[2] == []
+    assert "adaptive_edits" not in REFINE_PROMPT
 
 
 # ---------------------------------------------------------------------------

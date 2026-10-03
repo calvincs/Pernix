@@ -39,21 +39,6 @@ def _apply_hint(title="use rg", content="prefer rg over grep", producer="refine"
 # ---------------------------------------------------------------------------
 
 
-def test_refine_parse_carries_adaptive_edits():
-    from core.refine import _parse_refine_output
-
-    raw = json.dumps(
-        {
-            "nothing_actionable": False,
-            "proposals": [],
-            "lessons": [],
-            "adaptive_edits": [{"action": "create", "kind": "prompt_note", "title": "t", "content": "c"}],
-        }
-    )
-    _, _, edits, _, _ = _parse_refine_output(raw)
-    assert edits and edits[0]["kind"] == "prompt_note"
-
-
 def test_queue_producer_edits_stamps_session_evidence():
     from core.adaptive.contract import queue_producer_edits
 
