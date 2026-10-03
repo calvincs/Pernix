@@ -1,6 +1,6 @@
 # Surface prune — October 2026
 
-Status: in progress (2026-10-02). Branch: `next-3.2-testing`.
+Status: implemented 2026-10-02 on `next-3.2-testing` (check.sh: 4188 passed + the known killed_job env failure, coverage 79%; ui-gate 374/374).
 
 ## Why
 
