@@ -395,24 +395,19 @@ def ingest_document_sync(
     return asyncio.run(ingest_document(text, source_name, min_section_length, use_llm))
 
 
-def correction_preamble(kind: str, approved_by: str = "human", source_ref: str = "") -> str:
+def correction_preamble(kind: str, approved_by: str = "dream", source_ref: str = "") -> str:
     """The provenance stamp on a corrective memory entry.
 
-    `approved_by` is "human" for a click in the Adaptive panel and "auto" for
-    the veto-window drain. Entries used to say "human-approved" for both,
-    which misattributed every auto-approved correction to the operator.
+    `approved_by` is "dream" for a correction written when its finding
+    validated, and "human" for one a person asked for. The `dream:<hex>` tag
+    in `source_ref` is what scripts/dream_fix_audit.py traces back to the
+    hypothesis, so keep it in the stamp.
     """
-    from config import settings
-
     label = "STALE-INFO CORRECTION" if kind == "memory_stale" else "CONTRADICTION RESOLVED"
-    if approved_by == "auto":
-        provenance = (
-            f"auto-approved after the {settings.adaptive_auto_approve_after_hours}h veto window, adaptive review"
-        )
-    elif approved_by == "dream":
-        provenance = "auto-applied on validation — dream finding, no veto window; adaptive review"
+    if approved_by == "dream":
+        provenance = "auto-applied on validation — dream finding"
     else:
-        provenance = "human-approved via adaptive review"
+        provenance = "human-approved"
     ref = f", {source_ref}" if source_ref else ""
     return f"{label} ({provenance}{ref})"
 
@@ -422,11 +417,11 @@ def apply_memory_correction(
     statement: str,
     source_ref: str = "",
     kind: str = "contradiction",
-    approved_by: str = "human",
+    approved_by: str = "dream",
 ) -> list[str]:
     """Write a corrective entry into each cited memory file (audit P5).
 
-    The mechanical effector for approved dream contradiction/stale findings:
+    The mechanical effector for validated dream contradiction/stale findings:
     additive and non-destructive — the disputed entries stay, and recall now
     surfaces the correction next to them, which is what changes behavior.
     Returns the file names that received a corrective entry.
