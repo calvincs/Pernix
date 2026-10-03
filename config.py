@@ -364,18 +364,6 @@ class Settings:
     # retention deletes it for good after canary_purge_after_days.
     canary_purge_after_days: int = 30  # retired canaries older than this are deleted
 
-    # --- Skill self-healing (refine skill proposals) ---
-    # Refine writes SKILL.md improvement proposals; they are suggestions and
-    # apply only when a human clicks Apply (backup under data/skill_backups/).
-    # Every channel needs an undo (trust-loop hardening W5). A skill's own
-    # `verify:` canary failing within 7 days of an auto-apply is the closest
-    # thing to a measured regression this surface has, so with this on the
-    # backup taken at apply time is restored automatically and the proposal
-    # is marked 'rolled_back'. Off by default: the signal earns trust first.
-    # Manual rollback (the Skills tab, POST
-    # /api/skills/proposals/{id}/rollback) works either way.
-    skill_proposal_auto_rollback: bool = False
-
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
     # namespace survives tool rounds, turns, and compaction (I1), and — via

@@ -1,4 +1,4 @@
-"""Canary and skill-verify producers go through core/notices.py (2026-10).
+"""Canary producers go through core/notices.py (2026-10).
 
 Before the registry these sites wrote bell rows directly, each picking its own
 urgency. Suite auto-maintenance (park, probe retirement, suite health,
@@ -33,17 +33,6 @@ def _bell(category: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def test_an_unsafe_verify_block_is_a_bell_item_once_per_content():
-    from core.canary.skill_verify import _notify_unsafe_once
-
-    _notify_unsafe_once("my-skill", "d1", "gate command uses a pipe")
-    _notify_unsafe_once("my-skill", "d1", "gate command uses a pipe")
-    rows = _bell("skills.verify_unsafe")
-    assert len(rows) == 1 and rows[0]["subject"] == "my-skill"
-    _notify_unsafe_once("my-skill", "d2", "gate command uses a pipe")
-    assert len(_rows("skills.verify_unsafe")) == 2
-
-
 def test_retired_canary_categories_are_gone_from_the_registry():
     from core.notices import CATEGORIES
 
@@ -56,5 +45,10 @@ def test_retired_canary_categories_are_gone_from_the_registry():
         "canary.stale",
         "canary.auto_admitted",
         "canary.contaminated",
+        # skill self-healing became suggestions only (3.2): no verify-block
+        # sync, no automatic rollback, no auto-apply.
+        "skills.verify_unsafe",
+        "skills.auto_rolled_back",
+        "skills.proposals_auto_applied",
     ):
         assert gone not in CATEGORIES, gone

@@ -402,22 +402,6 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'Skill Self-healing',
-        tab: 'autonomy',
-        description: 'When a skill fails and the session running it finds a workaround, refine can fold that fix back into the skill\'s SKILL.md — a veto window, not an approval gate, with a timestamped backup kept under data/skill_backups/. The window and the daily cap have no control here; set them through the API or data/settings.json. This is the undo.',
-        fields: [
-            {
-                key: 'skill_proposal_auto_rollback',
-                label: 'Auto-rollback on Verify Failure',
-                type: 'bool',
-                risk: 'autonomy',
-                hint: 'A skill whose verify canary fails within 7 days of an auto-apply is restored from the '
-                    + 'backup taken before that apply, and you are notified. Off, a bad auto-apply stays until '
-                    + 'you roll it back from the Explorer’s Capabilities → Skills tab.',
-            },
-        ],
-    },
-    {
         // `name` is how buildStorageTab finds this one again: it is the only
         // declarative section on the tab that has to land in a particular
         // place (directly under the sessions ledger whose Archived row it

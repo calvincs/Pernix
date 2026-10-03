@@ -55,7 +55,6 @@ PENDING_ROUTES = ("/feedback", "/api/trust")
 # 3.2 backend adds. Same rule — until the server publishes them, they do not
 # render at all.
 PENDING_SETTINGS = (
-    "skill_proposal_auto_rollback",
     "reflect_next_turn_grading",
     "grader_holdout_enabled",
     "grader_holdout_schedule",

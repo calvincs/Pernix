@@ -95,8 +95,6 @@ CATEGORIES: dict[str, Category] = {
     "canary.sweep_failed": Category("bell", coalesce=True),
     "canary.sweep_result": Category("log"),
     # --- skills --------------------------------------------------------------
-    "skills.verify_unsafe": Category("bell"),
-    "skills.auto_rolled_back": Category("bell", legacy_urgency="high"),
     "skills.rolled_back": Category("log"),
     # One computed row: "N skill proposals wait for your decision"
     # (core/skills/review.py). Replaces a bell item per proposal; resolved

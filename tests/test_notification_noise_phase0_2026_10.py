@@ -7,7 +7,6 @@ test runs the Canary tab already records). Pinned here:
 
 - canary and worker sessions raise no reflect / timeout / stream-error alert
   (a normal session still does)
-- a skill-verify rollback leaves ONE bell item, not two
 - a maintenance sweep whose only change is `skills_changed` stays silent
   (the skill apply already announced it)
 - ask_user statements never reach the event bus (no push / webhook)
@@ -62,16 +61,6 @@ def test_reflect_alert_still_fires_for_a_normal_session(wired):
     rows = db.get_notifications()
     assert len(rows) == 1 and rows[0]["urgency"] == "high"
     assert len(rec.broadcasts) == 1 and len(bus.emits) == 1
-
-
-def test_skill_verify_rollback_leaves_one_notice(tmp_path, monkeypatch):
-    from core.skills.proposals import restore_skill_backup
-
-    _skill_env(tmp_path, monkeypatch)
-    pid = _auto_applied("heal-me")
-    restore_skill_backup(pid, actor="skill-verify")
-    # The log view holds every row, so this proves none was written at all.
-    assert not [n for n in db.list_notifications("log") if "rolled back" in n["title"].lower()]
 
 
 def test_user_rollback_still_notifies(tmp_path, monkeypatch):
