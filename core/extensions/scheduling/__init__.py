@@ -280,7 +280,7 @@ def _schedule_coalesced_catchup(job_entries: list[dict]) -> None:
             continue
         # Only jobs whose callable IS _execute_cron_job — every job added
         # through _add_job_internal. What this excludes are the jobs on other
-        # callables: heartbeats, canary sweeps/batches, telos slow ticks.
+        # callables: heartbeats, canary sweeps/batches.
         # Those own their own cadence and must not be catch-up dispatched
         # through the prompt path.
         if job.func is not _execute_cron_job:
@@ -1351,72 +1351,6 @@ def enqueue_grader_holdout() -> bool:
         id="_grader_holdout_manual",
         replace_existing=True,
         kwargs={"meta": {"kind": "grader_holdout", "transient": True, "trigger": "manual"}},
-    )
-    return True
-
-
-# ---------------------------------------------------------------------------
-# TELOS slow loops: daily retirement sweeps, weekly entropy control
-# ---------------------------------------------------------------------------
-
-_telos_slow_lock = asyncio.Lock()
-
-
-async def _execute_telos_slow_job(meta: dict):
-    """Daily TELOS slow-loop executor. Never raises."""
-    if not settings.telos_enabled:
-        return
-    if _telos_slow_lock.locked():
-        logger.info("TELOS slow loops skipped: another pass is running")
-        return
-    async with _telos_slow_lock:
-        try:
-            from core.telos import run_slow_loops
-
-            stats = await run_slow_loops(force_weekly=bool(meta.get("force_weekly")))
-            logger.info("TELOS slow loops done: %s", {k: v for k, v in stats.items() if v})
-        except Exception as e:
-            logger.error("TELOS slow loops failed: %s", e)
-
-
-def ensure_telos_schedule() -> None:
-    """Install the daily slow-loop job from settings (config is the truth —
-    transient, recreated each boot, never persisted to JSON)."""
-    if not settings.telos_enabled:
-        return
-    scheduler = _get_scheduler()
-    if not scheduler:
-        return
-    try:
-        from apscheduler.triggers.cron import CronTrigger
-
-        scheduler.add_job(
-            _execute_telos_slow_job,
-            trigger=CronTrigger.from_crontab(settings.telos_schedule, timezone="UTC"),
-            id="_telos_slow",
-            replace_existing=True,
-            coalesce=True,
-            misfire_grace_time=3600,
-            kwargs={"meta": {"kind": "telos", "transient": True}},
-        )
-        logger.info("TELOS slow loops scheduled: %s", settings.telos_schedule)
-    except Exception as e:
-        logger.warning("Failed to schedule TELOS slow loops: %s", e)
-
-
-def enqueue_manual_telos(force_weekly: bool = False) -> bool:
-    """Fire the slow-loop pass ASAP without blocking the caller's turn."""
-    scheduler = _get_scheduler()
-    if not scheduler:
-        return False
-    from apscheduler.triggers.date import DateTrigger
-
-    scheduler.add_job(
-        _execute_telos_slow_job,
-        trigger=DateTrigger(run_date=datetime.now(timezone.utc)),
-        id="_telos_manual",
-        replace_existing=True,
-        kwargs={"meta": {"kind": "telos", "transient": True, "force_weekly": force_weekly}},
     )
     return True
 

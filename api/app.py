@@ -226,15 +226,12 @@ async def lifespan(app: FastAPI):
 
     # 4. Scheduler (must init on main event loop before worker threads call it)
     try:
-        from core.extensions.scheduling import ensure_canary_schedule, ensure_telos_schedule, init_scheduler
+        from core.extensions.scheduling import ensure_canary_schedule, init_scheduler
 
         init_scheduler()
         # Canary nightly heartbeat: derived from settings each boot, never
         # persisted — a no-op while canary_enabled is off.
         ensure_canary_schedule()
-        # TELOS daily slow loops (ordo/binding + weekly audits): same
-        # transient pattern — a no-op while telos_enabled is off.
-        ensure_telos_schedule()
     except Exception as e:
         logger.warning("Scheduler init failed: %s", e)
 

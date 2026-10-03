@@ -113,7 +113,6 @@ def roots_for_context(workspace_override: str | None, workspace_home_dir: str | 
 HARNESS_DATA_DIRS = frozenset(
     {
         "adaptive",
-        "telos",
         "memories",
         "canaries",
         "kernels",
@@ -139,7 +138,7 @@ def root_mismatch_hint(path: str) -> str:
     """Suffix explaining a workspace-root failure caused by a harness-data path.
 
     glob/grep/file_read/file_write resolve relative paths under the workspace
-    root, so `data/telos` silently becomes <workspace>/data/telos and fails
+    root, so `data/memories` silently becomes <workspace>/data/memories and fails
     with an error that reads as "wrong path" when the real fault is "wrong
     root". Returns "" unless the path is one of those cases — an ordinary
     workspace typo must keep its clean error.
@@ -185,10 +184,10 @@ def root_mismatch_hint(path: str) -> str:
             return ""
 
     return (
-        f" — resolved against workspace root ({ws}). Harness data (telos ledgers, memory "
-        f"files, canary state) lives outside the workspace at {data}; use bash with an "
-        f"absolute path (e.g. ls {data}/telos/questions/) or purpose-built tools "
-        f"(telos_status, recall, search_sessions)."
+        f" — resolved against workspace root ({ws}). Harness data (memory files, canary "
+        f"state, session kernels) lives outside the workspace at {data}; use bash with an "
+        f"absolute path (e.g. ls {data}/memories/) or purpose-built tools "
+        f"(recall, search_sessions)."
     )
 
 

@@ -15,7 +15,7 @@ the authoritative order). They fall into a few clusters:
   runs, and old cron runs/sessions.
 - Self-modification — refine (authoring improvements) and applying approved
   adaptive-policy edits.
-- Introspection add-ons — dream and the telos slow loop.
+- Introspection add-ons — dream.
 
 This module owns lifecycle, the idle gate, and the ladder. The work itself
 lives next to the store it touches: memory-store surgery in
@@ -98,8 +98,8 @@ def snooze_transparent(session) -> bool:
 
     Canary sessions by type, plus any session currently driven by goal
     auto-continuations (audit P5): a multi-hour autonomous goal used to
-    starve the entire self-improvement ladder — adaptive apply, dream,
-    telos — for its whole duration. The LLM semaphore's priority tiers
+    starve the entire self-improvement ladder — adaptive apply and
+    dream — for its whole duration. The LLM semaphore's priority tiers
     keep snooze's background calls from contending with the goal's own.
     """
     return getattr(session, "session_type", "") in SNOOZE_TRANSPARENT_TYPES or bool(
@@ -461,7 +461,7 @@ class SnoozeRunner:
         an exception in an early rung — a permissions error on one RLM run
         dir, a corrupt FTS row, one hand-created memory file with a space in
         its name — ended the whole coroutine. Everything after it (refine,
-        skill auto-apply, dream, telos, adaptive) was then skipped on EVERY
+        skill auto-apply, dream, adaptive) was then skipped on EVERY
         cycle for as long as the fault persisted, and the only sign was a
         single "Snooze cycle error" line.
         """
@@ -669,15 +669,6 @@ class SnoozeRunner:
         if not self._is_cancelled() and settings.distill_audit_enabled and self._llm_ready():
             _announce(bus, "distill_audit", "Auditing distillation coverage against a raw transcript")
             await self._rung("distill_audit", self._distill_audit())
-
-        # Activity 16 (runs before 15's store work so its LLM call sits in
-        # the same cancellation window as dream's): TELOS fast loop — one
-        # bounded unit per cycle: evaluate a gated hypothesis OR generate
-        # SOUP hypotheses for the next scheduled question (85% goal-linked /
-        # 15% serendipity). Gated on telos_enabled — fully absent when off.
-        if not self._is_cancelled() and settings.telos_enabled and self._llm_ready():
-            _announce(bus, "telos", "TELOS: generating or evaluating hypotheses for open questions")
-            await self._rung("telos_step", self._telos_step())
 
         # Activity 15: Adaptive layer — drain pending auto-applies, enqueue
         # post-batch canary sweeps, evaluate the tripwire (plan §6c). Runs
@@ -2068,25 +2059,8 @@ Output valid JSON only. No markdown fences. /no_think"""
             logger.warning("Fallback-burn watch failed: %s", e)
 
     # ------------------------------------------------------------------
-    # Activities 14/16: Dream + TELOS steps
+    # Activities 14/14b: distillation audit + Dream step
     # ------------------------------------------------------------------
-
-    async def _telos_step(self) -> None:
-        """One bounded TELOS fast-loop unit (core/telos). Never raises."""
-        try:
-            from core.telos import run_step
-
-            result = await run_step(self._is_cancelled)
-            for key in (
-                "telos_hypotheses",
-                "telos_gated",
-                "telos_souped",
-                "telos_evaluated",
-                "telos_claims",
-            ):
-                self._bump(key, result.get(key, 0))
-        except Exception as e:
-            logger.warning("Snooze TELOS step failed: %s", e)
 
     async def _distill_audit(self) -> None:
         """Activity 14b — one distillation-coverage audit unit. Never raises."""

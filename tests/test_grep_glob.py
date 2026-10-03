@@ -117,11 +117,11 @@ def test_glob_not_a_directory(tmp_path, monkeypatch):
 
 def test_glob_harness_data_path_explains_the_root(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
-    result = glob_search("*.md", path="data/telos")
-    assert "Not a directory: data/telos" in result
+    result = glob_search("*.md", path="data/memories")
+    assert "Not a directory: data/memories" in result
     assert "resolved against workspace root" in result
     assert "use bash with an absolute path" in result
-    assert "telos_status" in result
+    assert "recall" in result
 
 
 def test_grep_harness_data_path_explains_the_root(tmp_path, monkeypatch):
@@ -143,8 +143,8 @@ def test_root_hint_ignores_real_workspace_paths(tmp_path, monkeypatch):
 
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "telos").mkdir()
-    assert root_mismatch_hint("data/telos") == ""
+    (tmp_path / "data" / "memories").mkdir()
+    assert root_mismatch_hint("data/memories") == ""
     assert root_mismatch_hint("notes/todo.md") == ""
     assert root_mismatch_hint("") == ""
 
@@ -154,13 +154,13 @@ def test_root_hint_fires_on_bare_harness_dirs_and_absolute_data_paths(tmp_path, 
     from core.tools.paths import root_mismatch_hint
 
     data = tmp_path / "data"
-    (data / "telos").mkdir(parents=True)
+    (data / "memories").mkdir(parents=True)
     (data / "workspace").mkdir()
     monkeypatch.setattr(config, "DATA_DIR", data)
     monkeypatch.setattr("config.settings.workspace_dir", str(data / "workspace"))
 
-    assert "resolved against workspace root" in root_mismatch_hint("telos/questions")
-    assert "resolved against workspace root" in root_mismatch_hint(str(data / "telos"))
+    assert "resolved against workspace root" in root_mismatch_hint("memories/notes.md")
+    assert "resolved against workspace root" in root_mismatch_hint(str(data / "memories"))
     # data/workspace/... is the workspace under its full name, not harness data.
     assert root_mismatch_hint("data/workspace/notes.md") == ""
     # An absolute path inside the workspace is not a root mistake either.

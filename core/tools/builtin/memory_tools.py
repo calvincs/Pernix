@@ -126,27 +126,6 @@ def _federated_sections(query: str) -> str:
     except Exception:
         pass
 
-    # Telos claims — validated beliefs with epistemic-class caps.
-    try:
-        from config import settings as _s
-
-        if _s.telos_enabled:
-            from core.telos.store import TelosStore
-
-            store = TelosStore.open()
-            hits = 0
-            for c in store.list("claim"):
-                text = str(c.get("text") or c.get("statement") or c.get("content") or "")
-                if any(w in text.lower() for w in words):
-                    conf = c.get("confidence")
-                    tag = f" (conf {float(conf):.2f})" if conf is not None else ""
-                    sections.append(f"[telos claim{tag}] {' '.join(text.split())[:_FED_SNIPPET_CHARS]}")
-                    hits += 1
-                    if hits >= 2:
-                        break
-    except Exception:
-        pass
-
     # Skills — procedural knowledge that may already cover the topic.
     try:
         from core.skills.registry import get_skill_registry
@@ -826,7 +805,7 @@ def register(reg) -> None:
         description=(
             "LLM-backed memory search with synthesis, FEDERATED across every knowledge "
             "store: long-term memory (FTS5 + ripgrep, query reformulation, attributed "
-            "answer) plus provenance-tagged hits from adaptive entries, telos claims, "
+            "answer) plus provenance-tagged hits from adaptive entries, "
             "skills, and session transcripts — one query instead of guessing which store "
             "to ask. Use when: recall() returns empty/weak results, the query is complex, "
             "or cross-file synthesis is needed. Pass context= to focus the search. "

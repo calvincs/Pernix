@@ -566,21 +566,6 @@ def test_dream_stamps_hypothesis_and_the_evidence_it_pinned():
     assert grade(refs) == GROUNDED
 
 
-def test_telos_pulls_receipts_out_of_its_evidence_blob():
-    from core.telos.evaluate import _receipts_from_evidence
-
-    blob = (
-        "[memory:pernix.ops@1756] the box runs docker compose\n"
-        '[trace:2026-09-01] {"event": "spend"}\n'
-        "[candor] - tool_ok(browse_web): 41% success over 61 obs (CI 30%-53%)\n"
-        "- fetch_ok(*): 49% success over 200 obs\n"
-        "quoted pm:3f2a91bb0c4d in the trace\n"
-    )
-    refs = _receipts_from_evidence(blob)
-    assert refs == ["candor:tool_ok(browse_web)", "candor:fetch_ok(*)", "pm:3f2a91bb0c4d"]
-    assert _receipts_from_evidence("[memory:x@1] nothing structured here") == []
-
-
 # ---------------------------------------------------------------------------
 # Grader hold-out
 # ---------------------------------------------------------------------------

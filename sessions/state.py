@@ -79,7 +79,7 @@ class TurnState:
     turn boundary is one assignment: `session.turn = TurnState()`.
 
     Four of these fields were not fields at all: core/gates.py, sessions/hooks.py
-    and core/telos/anomaly.py monkey-patched them onto the AgentSession dataclass
+    and the (since retired) telos anomaly hook monkey-patched them onto the AgentSession dataclass
     from outside its class body, so the object's real shape was invisible from
     its definition. tests/test_state_machine_invariants.py pins that shut.
 
@@ -114,13 +114,13 @@ class TurnState:
     # --- Tool bookkeeping ---
     # Cumulative per-tool execution summary for reflect diagnostic recovery
     # (LogAct-inspired). Accumulated by the agent loop across every attempt of
-    # the turn; read by reflect, Candor and TELOS at turn end.
+    # the turn; read by reflect and Candor at turn end.
     tool_summary: dict = field(default_factory=dict)
     # Per-attempt view of the same calls (C2): list indexed by attempt-1, each
     # a {tool: {"calls": n, "failures": n}} dict. Exists because reflect's
     # scope-sensitive rules (thrashing's distinct-tool count, per-attempt
     # honesty) misgrade when they read multi-attempt totals — the cumulative
-    # dict above stays authoritative for Candor/TELOS and the retry ladder.
+    # dict above stays authoritative for Candor and the retry ladder.
     tool_summary_attempts: list = field(default_factory=list)
 
     # --- Owned by other subsystems, declared here so the shape is visible ---
@@ -137,8 +137,6 @@ class TurnState:
     # Skill-proposal ids injected as trial hints this turn; the post-verdict
     # success bump reads them back.
     injected_trial_proposals: list = field(default_factory=list)
-    # core.telos.anomaly.on_post_task per-turn dedup marker.
-    telos_turn_traced: Any = None
 
     # --- Late edits to this turn's user row ---
     # Bumped by the manager's rapid-fire combiner every time it rewrites the
@@ -153,7 +151,7 @@ class TurnState:
 def turn_state(session_obj) -> TurnState:
     """Read a session-like object's TurnState, tolerating objects that have none.
 
-    The peripheral hooks (TELOS, Candor, the executor's retry-exclusion guard,
+    The peripheral hooks (Candor, the executor's retry-exclusion guard,
     the canary runner) accept duck-typed or partially-built session objects and
     used `getattr(session, "<field>", <default>)` for exactly that reason.
     Returning a throwaway TurnState preserves that forgiveness now that the
