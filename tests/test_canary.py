@@ -514,8 +514,6 @@ async def test_canary_session_runs_under_the_tool_allowlist(monkeypatch):
     assert seen["allowlist"] == runner_mod.CANARY_TOOL_ALLOWLIST
     assert "bash" in seen["allowlist"] and "load_skill" in seen["allowlist"]
     for denied in (
-        "create_skill",
-        "update_skill",
         "spawn_worker",
         "schedule_job",
         "notify_user",

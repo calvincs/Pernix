@@ -159,7 +159,7 @@ The structural reason is that a workflow is a step graph you have to declare *be
 
 | You want | Do this |
 |---|---|
-| A reusable multi-step procedure | Write it as a **skill** (`create_skill`) whose instructions list the steps in order. This is the durable, shareable artifact — same role `WORKFLOW.md` played, but the agent can deviate when a step surprises it. |
+| A reusable multi-step procedure | Write it as a **skill** (`data/skills/<name>/SKILL.md`) whose instructions list the steps in order. This is the durable, shareable artifact — same role `WORKFLOW.md` played, but the agent can deviate when a step surprises it. |
 | Steps that must not pollute the main context | `spawn_worker(task, ...)` per step. Each worker gets its own context and its own scout, exactly as workflow steps did. |
 | Steps that can run at the same time | Spawn them together and collect with `await_workers`. That is precisely what a workflow "wave" was. |
 | Data passed between steps | Have each step write its output to the workspace and give the next step the path — the same `output_file` discipline, without the manifest. |

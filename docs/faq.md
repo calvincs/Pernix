@@ -28,9 +28,9 @@ When both providers offer a model with the same name, **Ollama wins** (local, fr
 
 There used to be a DuckDuckGo fallback; it was removed because it produced unreliable results. The Tavily key is now the gate.
 
-### Why does the agent ask me to confirm things like web searches or creating a skill?
+### Why does the agent ask me to confirm things like web searches?
 
-That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `create_skill`, and any MCP tool whose server marks it destructive) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
+That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `add_gate`, and any MCP tool whose server marks it destructive) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
 
 Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Tools & safety → Remembered Approvals**.
 

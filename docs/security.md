@@ -179,7 +179,6 @@ Tools classified as `dangerous` require explicit per-invocation user confirmatio
 | Tool | Why |
 |---|---|
 | `search_web`, `browse_web` | Outbound traffic and untrusted page content entering the context |
-| `create_skill`, `add_skill_script` | Authors instructions the agent will later load and follow, and scripts `load_skill` then tells it to run under `bash` |
 | `add_gate` | Registers shell that re-runs unattended at every turn end for the life of the session |
 
 You can promote or demote any tool via `POST /api/tools/set-safety` or the Explorer → Capabilities → Tools panel.
@@ -188,7 +187,7 @@ You can promote or demote any tool via `POST /api/tools/set-safety` or the Explo
 
 **The gate surfaces intent. It is not a containment boundary.**
 
-`bash` and `repl` stay at the `caution` level, which does not prompt. That is a deliberate choice, not an oversight: they are the product's core utility, and prompting on every call would make the agent unusable for ordinary work. The consequence has to be stated plainly — **every dangerous-gated action has an ungated equivalent through `bash`.** `create_skill` prompts; `bash` writing the same SKILL.md does not.
+`bash` and `repl` stay at the `caution` level, which does not prompt. That is a deliberate choice, not an oversight: they are the product's core utility, and prompting on every call would make the agent unusable for ordinary work. The consequence has to be stated plainly — **every dangerous-gated action has an ungated equivalent through `bash`.**
 
 So the gate's real job is to make a consequential action *visible and deliberate* at the moment the agent takes it — it stops a careless tool call, not a determined one. **The VM or container Pernix runs in is the actual boundary.** This is the same posture [internals/rlm.md](internals/rlm.md) states for the RLM child sandbox, and the same one the shell denylist below is labeled with.
 
@@ -274,11 +273,7 @@ A gate that policy refuses to run is recorded as a **failure**, not skipped — 
 
 ## Skill Authoring
 
-`create_skill` and `add_skill_script` are `dangerous`. A skill is an instruction package the agent will later load and follow, and `add_skill_script` writes an executable file that `load_skill` then advertises to the agent as `bash <skill>/scripts/<file>` — write-then-run, previously ungated at every step.
-
-These two tools no longer take an `approved` argument. It was a **model-supplied boolean**: the first call posted an `ask_user` question and returned, and the model was told to call again with `approved=true` — but nothing correlated that argument with an actual user response, so the model could simply set it on the first call. Authorization now goes through the executor's server-side gate, which keeps approval state on the session where no argument can reach it.
-
-The remaining skillmaker tools (`update_skill`, `add_skill_reference`, `remove_skill_script`, `remove_skill_reference`) still take `approved`. They edit markdown inside an existing skill, so the prompt is a speed bump rather than a control — but it is an honor-system speed bump, and should be read that way.
+The skillmaker tools (`create_skill`, `update_skill`, `add_skill_script`, …) were removed in 3.2. Skills are plain files: a human edits them in the Explorer → Capabilities → Skills panel (or `PUT /api/skills/{name}`), and the agent writes `data/skills/<name>/SKILL.md` and its `scripts/` with `bash`. Neither path prompts. A skill is an instruction package the agent will later load and follow, and its scripts are what `load_skill` advertises as `bash <skill>/scripts/<file>`, so treat `data/skills/` as code you review, the same as the workspace.
 
 ---
 

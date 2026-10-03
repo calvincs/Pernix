@@ -92,24 +92,6 @@ Always enabled. Lets the agent introspect prior sessions.
 
 Use `list_recent_sessions` for chronological queries ("what did we do today/yesterday?"). Use `search_sessions` (builtin) for topic lookups ("find sessions where we discussed X") — it runs FTS5 keyword search over message content, not timestamp filtering.
 
-### `skillmaker`
-
-`core/extensions/skillmaker/__init__.py`
-
-Always enabled. Skill authoring without leaving the chat.
-
-| Tool | Safety | What |
-|---|---|---|
-| `create_skill` | dangerous | Author a new SKILL.md from inside a chat |
-| `update_skill` | safe | Modify an existing skill |
-| `add_skill_script` | dangerous | Drop a script into a skill's `scripts/` |
-| `add_skill_reference` | safe | Drop a doc into `references/` |
-| `remove_skill_script` / `remove_skill_reference` | safe | Delete a script / reference |
-
-Deleting a skill is a human action: use the Explorer → Capabilities → Skills panel or `DELETE /api/skills/{name}` (the agent-side `delete_skill` tool was removed 2026-09 — never used, and the UI path already covered it).
-
-See [../authoring/writing-skills.md](../authoring/writing-skills.md).
-
 ### `packages`
 
 `core/extensions/packages/__init__.py`
@@ -209,7 +191,6 @@ The teleological layer's agent surface (off by default): read the drive state, a
 | planning | on | none |
 | scheduling | on | none |
 | session_tools | on | none |
-| skillmaker | on | none |
 | packages | on | none |
 | evaluation | `evaluate` on; auto-eval and gate tools off | `eval_auto`, `gates_enabled` |
 | model_mgmt | on | none |

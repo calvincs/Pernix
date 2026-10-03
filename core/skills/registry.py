@@ -292,7 +292,7 @@ class SkillRegistry:
             # Prune stale entries: a name in .disabled.json that no longer
             # corresponds to a skill on disk would otherwise lurk forever and
             # silently re-disable a future skill of the same name (e.g. one
-            # created via create_skill or restored from backup). Persist the
+            # re-authored as a file or restored from backup). Persist the
             # pruned set so disk and memory stay consistent.
             stale = self._disabled - self._skills.keys()
             if stale:
