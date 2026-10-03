@@ -276,6 +276,47 @@ def test_v42_upgrades_a_v41_database_and_old_rows_become_bell_items(tmp_path, mo
     assert (row["id"], row["category"], row["tier"], row["occurrences"]) == ("old1", "legacy", "bell", 1)
 
 
+def test_v43_resolves_open_adaptive_rows_and_nothing_else(tmp_path, monkeypatch):
+    """The adaptive layer is retired (3.2): no producer is left to resolve its
+    open bell rows, so v43 resolves them. Dismissed, already-resolved and
+    other-category rows are untouched, and nothing is deleted."""
+    from db import database
+
+    full = list(database.MIGRATIONS)
+    assert full[-1][0] == 43
+    monkeypatch.setattr("config.settings.db_path", str(tmp_path / "v42.db"))
+    monkeypatch.setattr(database, "MIGRATIONS", [m for m in full if m[0] <= 42])
+    database.init_sessions_db()
+    rows = [
+        ("open", "adaptive.tripwire_suspect", None, None),
+        ("log", "adaptive.edits_applied", None, None),
+        ("dismissed", "adaptive.tripwire_rolled_back", "2026-09-30T01:00:00+00:00", None),
+        ("resolved", "adaptive.tripwire_suspect", None, "2026-09-30T02:00:00+00:00"),
+        ("other", "canary.parked", None, None),
+    ]
+    with connect_sessions() as conn:
+        for nid, cat, dismissed, resolved in rows:
+            conn.execute(
+                "INSERT INTO notifications (id, title, body, urgency, created_at, category, tier, "
+                "dismissed_at, resolved_at) VALUES (?, 't', 'b', 'normal', '2026-09-30T00:00:00+00:00', ?, 'bell', ?, ?)",
+                (nid, cat, dismissed, resolved),
+            )
+
+    monkeypatch.setattr(database, "MIGRATIONS", full)
+    database.init_sessions_db()
+    with connect_sessions() as conn:
+        got = {
+            r["id"]: (r["dismissed_at"], r["resolved_at"])
+            for r in conn.execute("SELECT id, dismissed_at, resolved_at FROM notifications")
+        }
+        assert int(conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]) == 43
+    assert set(got) == {"open", "log", "dismissed", "resolved", "other"}
+    assert got["open"][1] and got["log"][1]
+    assert got["dismissed"] == ("2026-09-30T01:00:00+00:00", None)
+    assert got["resolved"] == (None, "2026-09-30T02:00:00+00:00")
+    assert got["other"] == (None, None)
+
+
 def test_migrations_stay_strictly_ascending():
     from db import database
 

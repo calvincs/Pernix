@@ -1273,6 +1273,19 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_notifications_subject ON notifications(category, subject)",
         ],
     ),
+    (
+        43,
+        "resolve the open adaptive.* bell rows (the adaptive layer is retired)",
+        [
+            # Data only. The adaptive layer and its notice categories were
+            # removed in 3.2, so an open adaptive.tripwire_suspect (or any
+            # other adaptive.*) row would sit in the bell forever with no
+            # producer left to resolve it. Resolved, not dismissed or deleted:
+            # the activity log keeps the history. The adaptive_* tables stay.
+            """UPDATE notifications SET resolved_at = strftime('%Y-%m-%dT%H:%M:%S+00:00','now')
+               WHERE category LIKE 'adaptive.%' AND resolved_at IS NULL AND dismissed_at IS NULL""",
+        ],
+    ),
 ]
 
 
