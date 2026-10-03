@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-from core.canary import contamination
 from db import models as db
 
 
@@ -32,14 +31,6 @@ def _bell(category: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # category + tier per producer
 # ---------------------------------------------------------------------------
-
-
-def test_a_contaminated_run_is_a_log_line_with_its_session():
-    contamination.notify("leaky", "sess-abcdef123456", ["memory tool called: recall"])
-    rows = _rows("canary.contaminated")
-    assert len(rows) == 1 and rows[0]["tier"] == "log"
-    assert rows[0]["subject"] == "leaky" and rows[0]["session_id"] == "sess-abcdef123456"
-    assert _bell("canary.contaminated") == []
 
 
 def test_an_unsafe_verify_block_is_a_bell_item_once_per_content():
@@ -64,5 +55,6 @@ def test_retired_canary_categories_are_gone_from_the_registry():
         "canary.maintenance",
         "canary.stale",
         "canary.auto_admitted",
+        "canary.contaminated",
     ):
         assert gone not in CATEGORIES, gone

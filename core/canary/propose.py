@@ -63,12 +63,7 @@ def isolation_violation(spec: dict, known_canaries: list[str] | None = None) -> 
     the agent, and a task steered out of the workspace by its fixtures is as
     contaminated as one steered by its prompt.
     """
-    from core.canary.contamination import (
-        _ABS_PATH_RE,
-        _SUITE_DIR_RE,
-        SYSTEM_PREFIXES,
-        _other_canary_names,
-    )
+    from core.canary.contamination import _SUITE_DIR_RE, _other_canary_names, _outside_workspace
 
     name = str(spec.get("name") or "")
     fields = {"prompt": str(spec.get("prompt") or "")}
@@ -79,8 +74,9 @@ def isolation_violation(spec: dict, known_canaries: list[str] | None = None) -> 
     for field, text in fields.items():
         if not text:
             continue
-        # Toolchain paths are not knowledge — the runtime scan ignores them too.
-        outside = sorted({p for p in _ABS_PATH_RE.findall(text) if not p.startswith(SYSTEM_PREFIXES)})
+        # The runtime scan's own path rule (toolchain, skills dir and served
+        # fixtures exempt; single-segment tokens are prose).
+        outside = sorted(set(_outside_workspace(text, "")))
         if outside:
             return (
                 f"{field} names absolute path(s) {', '.join(outside[:3])}; a canary task must be "
@@ -93,7 +89,7 @@ def isolation_violation(spec: dict, known_canaries: list[str] | None = None) -> 
             return f"{field} names data/canaries — a canary must not read the suite's own answer key"
         named = sorted({o for o in others if re.search(rf"(?<![\w-]){re.escape(o)}(?![\w-])", text)})
         if named:
-            return f"{field} names other canaries ({', '.join(named[:3])}); every run of it would be contaminated"
+            return f"{field} names other canaries ({', '.join(named[:3])}); a canary must stand on its own task"
     return None
 
 

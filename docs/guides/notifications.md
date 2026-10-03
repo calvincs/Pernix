@@ -65,7 +65,6 @@ Generated from `core/notices.py`. *Session types* lists where a category's tier 
 | `review.pending` | bell | one coalesced row counting the skill proposals only you can decide; opens the Skills tab, resolves at zero |
 | `canary.sweep_failed` | bell | a canary gate-failed in a deploy, model-swap or Run-all sweep; coalesces, resolved by a sweep where every canary passes |
 | `canary.sweep_result` | log | any other finished full sweep (all passed, or only timeouts/errors) |
-| `canary.contaminated` | log | the Canary tab is the surface |
 | `skills.verify_unsafe`, `skills.auto_rolled_back` | bell | |
 | `skills.rolled_back`, `skills.proposals_auto_applied` | log | |
 | `dream.corrections_applied`, `dream.queue_stalled`, `dream.promotion_stalled` | log | |

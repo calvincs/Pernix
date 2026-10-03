@@ -94,7 +94,6 @@ CATEGORIES: dict[str, Category] = {
     # anything else is a log line.
     "canary.sweep_failed": Category("bell", coalesce=True),
     "canary.sweep_result": Category("log"),
-    "canary.contaminated": Category("log"),
     # --- skills --------------------------------------------------------------
     "skills.verify_unsafe": Category("bell"),
     "skills.auto_rolled_back": Category("bell", legacy_urgency="high"),

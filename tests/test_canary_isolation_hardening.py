@@ -843,9 +843,53 @@ def test_scan_catches_a_reference_to_the_suite_directory():
     assert any("data/canaries" in f for f in findings)
 
 
-def test_scan_catches_another_canarys_name_in_the_transcript():
-    findings = _scan([{"role": "assistant", "content": "This is the same task as grep-count, whose answer is 8."}])
-    assert any("names other canaries" in f for f in findings)
+def test_scan_catches_a_path_into_another_canarys_directory():
+    findings = _scan([_msg("", [("bash", '{"command": "cat ../canaries/grep-count/CANARY.md"}')])])
+    assert any("other canaries' directories: grep-count" in f for f in findings)
+
+
+def test_another_canarys_bare_name_is_not_a_finding():
+    """The gen-grep-count false positive: its transcript said "grep-count"
+    (a sibling canary's name) and every such run was disqualified. Naming a
+    task is not reading its answer; only a path to its directory is."""
+    assert _scan([{"role": "assistant", "content": "This is the same task as grep-count, whose answer is 8."}]) == []
+
+
+def test_single_segment_tokens_are_prose_not_paths():
+    """/ERROR, /1000, /512 in agent text were read as absolute paths."""
+    assert (
+        _scan(
+            [
+                _msg(
+                    "Counted lines matching /ERROR/ — 1000/512 ratio.", [("bash", '{"command": "echo /ERROR /1000"}')]
+                ),
+                _msg("", [("bash", '{"command": "ls /archive"}')]),
+            ]
+        )
+        == []
+    )
+
+
+def test_a_single_segment_data_root_still_counts():
+    findings = _scan([_msg("", [("bash", '{"command": "sqlite3 /sessions.db .tables"}')])])
+    assert any("/sessions.db" in f for f in findings)
+
+
+def test_the_skills_dir_and_served_fixtures_are_not_findings(monkeypatch, tmp_path):
+    skills = tmp_path / "skills"
+    monkeypatch.setattr("config.settings.skills_dir", str(skills))
+    served = "/app/data/workspace/.canary-serve/tok123/article.html"
+    assert (
+        _scan(
+            [
+                _msg("", [("file_read", '{"path": "' + str(skills) + '/youtube-whisper/SKILL.md"}')]),
+                _msg("", [("bash", '{"command": "cat ' + served + '"}')]),
+            ]
+        )
+        == []
+    )
+    # A sibling of the skills dir is still outside.
+    assert _scan([_msg("", [("file_read", '{"path": "' + str(tmp_path) + '/memories/user.md"}')])])
 
 
 def test_a_canarys_own_name_is_never_a_finding():
@@ -878,7 +922,7 @@ def test_contamination_outranks_every_other_outcome():
     assert r.outcome == "contaminated"
 
 
-async def test_a_contaminated_run_is_recorded_and_notified(monkeypatch):
+async def test_a_contaminated_run_is_recorded_not_notified(monkeypatch):
     import json as _json
 
     from core.canary.parser import CanaryDef
@@ -915,9 +959,8 @@ async def test_a_contaminated_run_is_recorded_and_notified(monkeypatch):
     stored = _json.loads(row["gate_results_json"])
     assert any(g.get("kind") == "contamination" and not g["passed"] for g in stored)
 
-    # canary.contaminated is log-tier: the activity log has it, the bell does not.
-    notes = db.list_notifications("log")
-    assert len([n for n in notes if "contaminated" in (n.get("title") or "")]) == 1
+    # A record, not an alarm (3.2): no notification anywhere.
+    assert db.list_notifications("log") == []
 
 
 async def test_a_clean_run_is_not_flagged(monkeypatch):

@@ -664,7 +664,7 @@ class Settings:
     # Tiered notifications (core/notices.py). Every notification belongs to a
     # category and each category has ONE tier: interrupt (badge + push), bell
     # (quiet item in the bell), log (activity log only) or drop. Overrides map
-    # an area ("canary") or a category ("canary.contaminated") to a tier; the
+    # an area ("canary") or a category ("canary.sweep_failed") to a tier; the
     # default {} needs no tuning. notify_tiers_enabled=False is the kill
     # switch: every category goes back to a bell row with its legacy urgency.
     notify_tiers_enabled: bool = True

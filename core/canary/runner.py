@@ -339,7 +339,7 @@ async def run_canary(
     # contents — which the finally block has already reclaimed.
     if sid:
         try:
-            from core.canary.contamination import contamination_record, notify, scan_session
+            from core.canary.contamination import contamination_record, scan_session
 
             result.contamination = scan_session(sid, str(tmp), canary.name)
             if result.contamination:
@@ -348,8 +348,8 @@ async def run_canary(
                     canary.name,
                     "; ".join(result.contamination),
                 )
+                # A record on the run row, not an alarm (3.2): no notice.
                 result.gate_results.append(contamination_record(result.contamination))
-                notify(canary.name, sid, result.contamination)
         except Exception as e:
             logger.warning("Contamination scan failed for '%s': %s", canary.name, e)
 
