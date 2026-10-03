@@ -1134,22 +1134,6 @@ Neither the adaptive layer nor the canary suite emits SSE events. Both are polle
 
 ---
 
-## Telos
-
-Surfaces for the teleological layer — see [internals/telos.md](internals/telos.md). Read endpoints work even when `telos_enabled` is off.
-
-```
-GET  /api/telos                          Layer status summary
-GET  /api/telos/questions                Open questions
-GET  /api/telos/hypotheses               SOUP hypotheses
-GET  /api/telos/claims                   Committed claims
-GET  /api/telos/trace                    Append-only trace ledger
-POST /api/telos/run                      Run the telos machinery on demand
-POST /api/telos/alarms/{alarm_id}/ack    Acknowledge an alarm (silences the notification, keeps the ladder's place)
-```
-
----
-
 ## MCP Servers
 
 External tool servers speaking the Model Context Protocol. Config CRUD works

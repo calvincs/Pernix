@@ -258,7 +258,7 @@ _run_agent_safe:                                  (manager.py:1260)
       while True:                                   (manager.py:1564-1617)
         _run_post_hooks()  → gated on state==FINALIZING, queue empty (manager.py:2495)
                               → title, stale-question cleanup, distill, gates,
-                                reflect, eval, candor, telos (sessions/hooks.py:48-102)
+                                reflect, eval (sessions/hooks.py)
         if reflect_retry_requested and count < cap and queue empty and still FINALIZING:
           _run_agent_retry()  → SCOUTING → PROCESSING → FINALIZING again  (manager.py:2008)
           continue
@@ -421,7 +421,7 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 50); when the ca
 ### 2.3 Tool routing (`core/tools/registry.py`, `core/extensions/`)
 
 - ~35 **builtin tools** always registered (`file_read`, `file_write`, `bash`, `ask_user`, etc.); `call_model` is a model_mgmt extension, and `spawn_worker` / `get_worker_result` are orchestration extensions
-- **Extensions** — thirteen modules listed in `BUNDLED_EXTENSIONS` (`core/extensions/__init__.py`): `web`, `orchestration`, `evaluation`, `scheduling`, `toolmaker`, `model_mgmt`, `session_tools`, `planning`, `skillmaker` always register; `candor`, `rlm`, `telos` and `mcp` register conditionally on their own settings (`candor_enabled`, `rlm_enabled`, `telos_enabled`, `mcp_enabled`). Full inventory and gating: [extensions.md](extensions.md)
+- **Extensions** — eleven modules listed in `BUNDLED_EXTENSIONS` (`core/extensions/__init__.py`): `web`, `orchestration`, `evaluation`, `scheduling`, `toolmaker`, `model_mgmt`, `session_tools`, `planning`, `skillmaker` always register; `rlm` and `mcp` register conditionally on their own settings (`rlm_enabled`, `mcp_enabled`). Full inventory and gating: [extensions.md](extensions.md)
 - Agent sees only the schema slice for `active_tools` — scout-picked plus a monotonically-growing allowlist (`_resolve_tool_surface()`, `agent.py:1216`)
 - `discover_tools()` during the loop can expand `active_tools` mid-turn (`agent.py:2269-2270`)
 
@@ -443,8 +443,7 @@ After the agent loop exits, `Manager._run_post_hooks()` (`manager.py:2495`) runs
    - `pass` → done
    - reflect disabled but a gate failed → `_apply_gate_retry_fallback()` requests the retry directly (`hooks.py:83-84`)
 6. **Evaluation** (optional QA) (`hooks.py:87-88`)
-7. **Candor** and **TELOS** hooks, when enabled — mechanical, no LLM (`hooks.py:95-102`)
-8. Back in `_finalize_turn`: restore model override if `switch_model` was called mid-turn (`manager.py:1655-1695`) — done AFTER all retries so retries run on the switched model, then transition FINALIZING→IDLE_READY and emit `turn.complete` (`manager.py:1722-1739`). `post_hooks_complete` is not set explicitly — it reads true the instant the state is IDLE_READY (§0.5).
+7. Back in `_finalize_turn`: restore model override if `switch_model` was called mid-turn (`manager.py:1655-1695`) — done AFTER all retries so retries run on the switched model, then transition FINALIZING→IDLE_READY and emit `turn.complete` (`manager.py:1722-1739`). `post_hooks_complete` is not set explicitly — it reads true the instant the state is IDLE_READY (§0.5).
 
 ### 2.6 Compaction (nod)
 
@@ -479,7 +478,7 @@ The LLM layer is abstracted by `ProviderRouter` (`core/llm/router.py`) sitting b
   | Setting | Role | Consumers |
   |---|---|---|
   | `llm_model` | **Primary** (required) | agent turns; every quality-critical call — compaction summaries, reflect verdicts, eval; RLM root |
-  | `background_model` | **Background** (empty ⇒ Primary) | scout, auto-title, distill/ingest, snooze activities, dream, telos, RLM sub-calls |
+  | `background_model` | **Background** (empty ⇒ Primary) | scout, auto-title, distill/ingest, snooze activities, dream, RLM sub-calls |
   | `fallback_model` | **Backup** (empty ⇒ no backup) | used whenever a Primary *or* Background call fails: stream failover, provider failover, scout's last resort, one-shot retry |
 
   `embedding_model` is not a chat role — it names a local Ollama embedding model and setting it is what switches memory search from lexical to hybrid.

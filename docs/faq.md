@@ -120,7 +120,6 @@ Everything is local:
 | Workspace files | `data/workspace/` |
 | RLM run traces (when enabled) | `data/workspace/rlm/<run_id>/` — auto-purged after 30 days |
 | Dream reports (when enabled) | `data/workspace/dreams/` |
-| Candor evidence ledger (when enabled) | `data/candor/` |
 | Settings | `data/settings.json` |
 | API keys | `.env` |
 | Skills | `data/skills/` |

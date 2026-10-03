@@ -3,7 +3,7 @@
 > **Notifications.** Every "notification" this page mentions goes through `core/notices.py` and lands in the tier its category is registered under — most self-maintenance receipts are *log* tier (the bell's Activity tab, never a badge); only things that need you interrupt. See [guides/notifications.md](../guides/notifications.md) for the full list.
 
 The Dream subsystem (`core/dream/`) gives Pernix an idle-time faculty that
-examines its own memory, Candor evidence, and post-mortems; generates typed
+examines its own memory and post-mortems; generates typed
 hypotheses about itself; and then **tries to falsify them** against recorded
 outcomes. Nothing a dream produces influences live behavior until it has been
 validated — and validated conclusions reach live behavior only through the
@@ -18,17 +18,18 @@ so it only ever spends idle time.
 ## The idea
 
 Memory today is a Polaroid — written once, never falsified. An entry that says
-"X always fails" keeps saying it long after X was fixed. Candor gives the
-inbound mirror (outcomes flow in continuously); dreaming closes the loop by
-asking, offline and unhurried, whether the beliefs still square with the
+"X always fails" keeps saying it long after X was fixed. Post-mortems record
+outcomes continuously; dreaming closes the loop by asking, offline and unhurried, whether the beliefs still square with the
 evidence:
 
-- **Contradictions** between memory entries, or between lessons and Candor's
-  outcome records.
+- **Contradictions** between memory entries.
 - **Stale memory** — claims that recorded outcomes have since overtaken.
 - **Ineffective lessons** — lessons that scout recalls but that demonstrably
   don't change the plan.
-- **Tool patterns** — regularities in operational history worth writing down.
+- **Tool patterns** — no longer generated. They were evidenced and
+  re-checked by Candor, which was retired in 3.2; any still-pending
+  `tool_pattern` row expires on its next validation pass
+  (`method: candor_retired`). The kind stays valid for historical rows.
 
 A hypothesis is not a belief. It sits as a row in a sidecar table
 (`dream_hypotheses`, migration v19) doing nothing until a validation pass
@@ -40,7 +41,7 @@ so the dreamer cannot resurrect an idea that already failed.
 One step per snooze cycle, one bounded background-model call:
 
 1. **Observe** — assemble a small, quoted, delimited evidence pack: new
-   post-mortems and Candor events since the last cursors, one memory file
+   post-mortems since the last cursor, one memory file
    sampled by rotation, recently-recalled lessons with their ages.
 2. **Hypothesize** — ask the model for at most `dream_hypotheses_per_cycle`
    typed hypotheses, each required to cite evidence refs from the pack.
@@ -57,7 +58,7 @@ One step per snooze cycle, one bounded background-model call:
    claims like "the script lacks a CPU flag" get re-judged by the validator
    below instead of contradicting the now-fixed skill for months.
 3. **Validate** (pending hypotheses, oldest first) — the check matches the kind:
-   - *Tool patterns* are re-checked against Candor's numbers directly, no LLM.
+   - *Tool patterns* (historical rows only) expire without a check.
    - *Contradictions / stale memory* get one LLM judge call over the
      re-resolved, content-hash-verified entries; any hedge refutes.
    - *Ineffective lessons* get the strongest test: a **counterfactual scout
@@ -122,13 +123,11 @@ cycle-generated hypotheses — no special write powers.
   in the dream report). The gate exists because this channel shipped raw
   hypothesis statements ("Despite ... the agent repeatedly fails ...") into
   the agent's every-turn prompt; the mechanical adaptive lint backstops it.
-  A tool_pattern restating a live Candor hint is a terminal duplicate.
   With the adaptive layer off, the dream's entire observable output remains
   the journal, the report, and sidecar rows.
 - **No permanent shelf space.** Promoted entries are retired again when
   their evidence stops holding — the originating hypothesis is gone or
-  unpromoted, the cited Candor facts recovered above the degradation line,
-  or the entry outlived its TTL (`core/dream/retire.py`). Minting without
+  unpromoted, or the entry outlived its TTL (`core/dream/retire.py`). Minting without
   retiring silently wedges the per-kind entry cap.
 - **No self-modification.** Skills, prompts, and code are untouched.
 - **Strict write-permission rule.** The dream may write its own tables, files

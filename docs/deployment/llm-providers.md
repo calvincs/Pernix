@@ -118,7 +118,7 @@ Pernix uses **three chat-model roles**. You can assign a different model to each
 | Role | Setting | What it does | Typical choice |
 |---|---|---|---|
 | Primary | `llm_model` | Main agent turns, streaming, tool calls — plus every quality-critical call: compaction summaries, reflect verdicts, eval, and the RLM root | Your strongest model — `qwen3:32b` locally, `anthropic/claude-sonnet-4.6` on OpenRouter |
-| Background | `background_model` | Fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, Snooze activities, Dream, Telos, RLM sub-calls | A fast smaller model — `qwen3:8b`, `anthropic/claude-haiku-4.5` |
+| Background | `background_model` | Fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, Snooze activities, Dream, RLM sub-calls | A fast smaller model — `qwen3:8b`, `anthropic/claude-haiku-4.5` |
 | Backup | `fallback_model` | Used whenever a Primary **or** Background call fails (rate limits, provider errors, stream failures, scout's last resort). Any provider works — same-provider different-model failover is supported | Any reliable model — a local `qwen3:8b`, or a second cloud model |
 
 You don't have to fill all three. If `background_model` is empty, Pernix uses the primary `llm_model` for background work. If `fallback_model` is empty, failover is disabled.

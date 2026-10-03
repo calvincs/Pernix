@@ -354,7 +354,7 @@ on-demand companion for everything the ledger doesn't push automatically:
 one call answers what used to take several separate lookups — work in
 flight (sessions, background jobs, RLM runs), this session's recent Reflect
 verdicts, recent notifications, adaptive-layer counts, recent canary
-gate-fails, cron health, memory-store size, open Telos alarms.
+gate-fails, cron health and memory-store size.
 `data/workspace/SYSTEM-MAP.md` (`core/context/system_map.py`, regenerated at
 every boot) goes deeper still: the real schema of the tables the agent is
 likely to query, the data-directory layout, and the live FastAPI route

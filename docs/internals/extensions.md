@@ -12,11 +12,11 @@ For per-feature usage, see the relevant guide. For tool authoring, see [../autho
 
 Each extension exposes a `register()` function called at server startup. `register()` reads settings + environment + available imports and registers zero or more tools into the global tool registry. Tools registered here behave the same as builtin tools — same safety levels, same execution path, same approval gating.
 
-If a setting that gates an extension changes (e.g., turning `browser_enabled`, `candor_enabled`, or `rlm_enabled` on), Pernix needs a restart to pick up the change. The registry is built once per process.
+If a setting that gates an extension changes (e.g., turning `browser_enabled` or `rlm_enabled` on), Pernix needs a restart to pick up the change. The registry is built once per process.
 
 ---
 
-## The thirteen extensions
+## The eleven extensions
 
 ### `web`
 
@@ -154,18 +154,6 @@ Most users leave auto-evaluation off. Reflect (the always-on quality gate) cover
 
 Internal. Provides tools the agent uses to introspect and switch models. Not user-facing in the typical sense, though `list_available_models` may surface in chats.
 
-### `candor`
-
-`core/extensions/candor/__init__.py`
-
-| Tool | Safety | Gated on |
-|---|---|---|
-| `predict_reliability` | safe | `candor_enabled` |
-| `why_reliability` | safe | `candor_enabled` |
-| `reliability_questions` | safe | `candor_enabled` |
-
-Operational-memory add-on (off by default): calibrated reliability tracking with an auditable evidence ledger. `register()` is a hard off-switch — with `candor_enabled=false` the tools don't exist, so toggling requires a restart; observation capture and the scout intel brief toggle hot. Store at `data/candor/`. Settings: [../configuration.md](../configuration.md#candor-operational-memory-add-on).
-
 ### `rlm`
 
 `core/extensions/rlm/__init__.py`
@@ -174,7 +162,7 @@ Operational-memory add-on (off by default): calibrated reliability tracking with
 |---|---|---|
 | `rlm_process` | caution | `rlm_enabled` |
 
-Recursive long-input processing (off by default): analyzes inputs far beyond the context window in a sandboxed child REPL with brokered, budgeted sub-LLM calls. Same restart-gated registration pattern as candor; the `rlm_*` caps apply hot, and there are no RLM-specific model settings — the root uses Primary, sub-calls use Background. Run residue at `data/workspace/rlm/<run_id>/` (purged by snooze retention); audit rows in the `rlm_runs` table (migration v18). Architecture and security posture: [rlm.md](rlm.md).
+Recursive long-input processing (off by default): analyzes inputs far beyond the context window in a sandboxed child REPL with brokered, budgeted sub-LLM calls. `register()` is a hard off-switch at startup, so toggling requires a restart; the `rlm_*` caps apply hot, and there are no RLM-specific model settings — the root uses Primary, sub-calls use Background. Run residue at `data/workspace/rlm/<run_id>/` (purged by snooze retention); audit rows in the `rlm_runs` table (migration v18). Architecture and security posture: [rlm.md](rlm.md).
 
 ### `mcp`
 
@@ -188,17 +176,6 @@ Recursive long-input processing (off by default): analyzes inputs far beyond the
 | `mcp_reload_server` | caution | `mcp_enabled` |
 
 Native MCP (Model Context Protocol) client (on by default, inert with zero servers configured): the manager (`core/extensions/mcp/manager.py`) connects each server listed in `data/mcp_servers.json` — stdio subprocess, Streamable HTTP, or legacy SSE — and registers its tools as `mcp_<server>_<tool>` with `source="mcp"`, so scout curation, the dangerous-tool gate, health metrics and post-mortems apply unchanged. `register()` is a hard off-switch at startup for the four management tools above (restart to add/remove them after flipping `mcp_enabled`), but every call path re-checks `mcp_enabled` live, so a hot toggle-off degrades to a clear error rather than a stale registration. `mcp_stdio_enabled` (default `true`) is the supply-chain valve — set it `false` for remote-only mode (Streamable HTTP / SSE servers only, no local subprocesses). Canary sessions are denied MCP tools outright. See [../mcp.md](../mcp.md).
-
-### `telos`
-
-`core/extensions/telos/__init__.py`
-
-| Tool | Safety | Gated on |
-|---|---|---|
-| `telos_status` | safe | `telos_enabled` |
-| `telos_ask` | safe | `telos_enabled` |
-
-The teleological layer's agent surface (off by default): read the drive state, and mint Questions into the fast loop. `telos_goal_add` / `telos_goal_complete` are gone — the v3.1 goal-DAG carve removed the machinery that consumed goals (ordo/binding/hevel/reconcile/discharge) along with the tree, which only ever held its root node; see [telos.md](telos.md). Deliberately absent: trace-ledger writes, root re-expression, alarm clearing. Same restart-gated registration pattern as candor; the engine itself (snooze Activity 16, daily cron, post-task hook) gates hot on `telos_enabled`.
 
 ---
 
@@ -217,9 +194,7 @@ The teleological layer's agent surface (off by default): read the drive state, a
 | toolmaker | on | none |
 | evaluation | `evaluate` on; auto-eval and gate tools off | `eval_auto`, `gates_enabled` |
 | model_mgmt | on | none |
-| candor | off | `candor_enabled` (tool registration restart-gated) |
 | rlm — `rlm_process` | off | `rlm_enabled` (tool registration restart-gated) |
-| telos | off | `telos_enabled` (tool registration restart-gated) |
 | mcp — `mcp_list_servers`, `mcp_add_server`, `mcp_remove_server`, `mcp_reload_server` | on (inert with no servers configured) | `mcp_enabled` (hot both ways; management-tool registration restart-gated) |
 
 The total number of registered tools varies by configuration. With a minimal install (no Tavily key, no Chromium binary), the web extension contributes only `http_get`; with a fully-loaded install, it adds `search_web` and `browse_web`.

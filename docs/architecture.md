@@ -113,7 +113,6 @@ When no sessions are actively processing, **Snooze** runs background maintenance
 - **User profile extraction** — pulls preferences and recurring patterns into a profile memory
 - **Post-mortem cleanup** — old failure logs get summarized and archived
 - **Run-directory retention** — old RLM run directories (and their DB rows) are purged past their retention windows
-- **Candor maintenance** — when enabled, runs the admission gate over recorded tool outcomes and checkpoints the operational-memory store
 - **Dream step** — when enabled, one increment of idle-time introspection: hypotheses about the agent's own memory and behavior, validated against recorded outcomes (see [internals/dream.md](internals/dream.md))
 
 A cycle runs until the full activity ladder completes; Snooze cancels instantly when you start a new session — your work always takes priority — and the interrupted activity resumes next cycle. `core/snooze.py` owns the lifecycle, the idle gate and the ladder; the work itself lives next to the store it touches — memory-store surgery in `core/memory/sweeps.py`, retention pruners in `core/retention.py`.
@@ -304,7 +303,6 @@ Concurrency is controlled per-provider via semaphores: `llm_max_concurrent` for 
 | Sessions, messages, tool calls | `data/sessions.db` | SQLite |
 | State machine transition log | `data/sessions.db` (`session_state_log` table) | SQLite |
 | RLM run index + residue | `data/sessions.db` (`rlm_runs` table) + `data/workspace/rlm/<run_id>/` | SQLite + filesystem |
-| Candor operational-memory store (when enabled) | `data/candor/` | SQLite |
 | Dream hypotheses + report index (when enabled) | `data/sessions.db` (`dream_hypotheses`, `dream_reports` tables) | SQLite |
 | Dream reports | `data/workspace/dreams/DREAM-<date>.md` | Markdown |
 | Memory entries (long-term) | `data/memories/*.md` | Markdown |

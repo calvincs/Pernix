@@ -3,7 +3,7 @@
 > **Notifications.** Every "notification" this page mentions goes through `core/notices.py` and lands in the tier its category is registered under — most self-maintenance receipts are *log* tier (the bell's Activity tab, never a badge); only things that need you interrupt. See [guides/notifications.md](../guides/notifications.md) for the full list.
 
 Pernix has long had the *observation* half of self-improvement — post-mortems,
-scout signals, [Candor](candor.md), [Dream](dream.md), the refine pass. These
+scout signals, [Dream](dream.md), the refine pass. These
 two subsystems ship the other half:
 
 - The **canary suite** (`core/canary/`) is the measurement substrate: golden
@@ -100,8 +100,7 @@ to guard. The isolation is an enumerated predicate list, not a vibe:
   denied to the session type; `recall`/`deep_recall` are off the allowlist
   and the scout does no memory preload (see *Canary isolation* below).
 - **Invisible to search** — canary messages are excluded from session FTS.
-- **Excluded from distill/refine sweeps** and from Candor's reliability
-  ledger.
+- **Excluded from distill/refine sweeps**.
 - **Post-mortems are written but stamped** `session_type='canary'` and
   excluded from the passive tripwire window and model-routing aggregation.
 - **Snooze-transparent** — canary sessions neither cancel a snooze cycle nor
@@ -133,7 +132,7 @@ audited every path in both directions and turned the list into assertions
 | Refine | `run_for_session` skips with `skipped_reason="canary_session"`, so no lesson, no SKILL.md proposal, and no *canary* proposal is ever derived from a scored run. `db.get_unrefined_sessions` excludes the type as well. |
 | User-profile sweep | Snooze's insight extraction excludes canary sessions (it excluded workers only until W5). |
 | Distill-coverage audit | Excludes the type in SQL. |
-| Candor ledger, gate trace, dream observation, TELOS anomalies, model-routing aggregation | Early-return on the type; post-mortems are written but stamped `session_type='canary'` and skipped by the passive tripwire window. |
+| Dream observation, model-routing aggregation | Early-return on the type; post-mortems are written but stamped `session_type='canary'` and skipped by the passive tripwire window. |
 | Space suggestions | The candidate query is `session_type = 'normal'`. |
 | Auto-title | The runner names every session `Canary: <name>` at creation, and the titler only fires on sessions still called `New session`. |
 | Cross-session search | `search_messages_fts` excludes canary rows, so a canary transcript cannot surface in another session's scout. |
@@ -143,7 +142,7 @@ audited every path in both directions and turned the list into assertions
 
 | Path | Guarantee |
 |---|---|
-| Scout preload | For a canary brief, the memory baseline, deep-memory, cross-session and lessons gatherers all return `None` (`scout.runner.memory_recall_denied`). The non-memory preload — tools, skills, models, adaptive hints, candor intel, workspace state — is the treatment and stays. |
+| Scout preload | For a canary brief, the memory baseline, deep-memory, cross-session and lessons gatherers all return `None` (`scout.runner.memory_recall_denied`). The non-memory preload — tools, skills, models, adaptive hints, workspace state — is the treatment and stays. |
 | Scout tools | `search_memory` is removed from the scout's tool schema, and `_exec_scout_tool` refuses it as a backstop. |
 | Scout fallback | The deterministic fallback report skips its `store.recall` too. |
 | Agent tools | `recall` and `deep_recall` are off `CANARY_TOOL_ALLOWLIST`; the memory-write tools were already denied by `denied_session_types`. |
@@ -410,7 +409,7 @@ stop that at the mouth:
 - **The mechanical lint** (`core/adaptive/lint.py`), applied inside
   `queue_producer_edits` — under all four machine producers. Narrative
   shapes are refused; negative tool claims pass only with the fix clause
-  (Candor's "prefer an alternative or verify; see why_reliability(...)"
+  (the retired Candor producer's "prefer an alternative or verify"
   template is the model citizen); policy/routing_hint content must contain
   an actionable directive. Human authorship uses the direct create path
   and is deliberately unlinted — the human is the authority the lint
@@ -420,12 +419,10 @@ stop that at the mouth:
   through one bounded judge call that rewrites the validated finding into
   an imperative rule or rules honestly that none exists —
   `reported:not-actionable` is terminal, and the finding still reaches the
-  dream report. A tool_pattern restating a live Candor hint is a terminal
-  duplicate.
+  dream report.
 - **Refine's contract** gained the Do-NOT-capture rules, a worked bad→good
   example, and a confidence field (floor and 2-edit cap enforced
-  mechanically in the parser). Telos hints dropped the "Supported
-  hypothesis (...)" framing and must pass the lint or stand as claims only.
+  mechanically in the parser).
 
 ### The usefulness signal (v3.1)
 
@@ -462,7 +459,9 @@ highlighted) and drive:
   sit at a neutral 0.5), then usage, and caps at 12 lines/1.6k chars with
   a truncation marker (which finally makes `search_adaptive`'s trigger
   real); the agent block caps at 12 policies/12k chars with deterministic
-  source-priority selection (user > refine > candor > telos > dream) —
+  source-priority selection (user > refine > candor > telos > dream;
+  candor and telos are retired producers whose old entries can still be
+  live) —
   stable bytes between idle applies, prompt-cache safe.
 
 ### Authorship (v3.1)
@@ -537,7 +536,7 @@ own once a model has an entry in `model_prices`.
 ### Producers
 
 Producers emit adaptive edits, each batch carrying ≥1 evidence reference
-(post-mortem ids, dream hypothesis ids, Candor ledger refs) — an edit without
+(post-mortem ids, dream hypothesis ids) — an edit without
 evidence is refused:
 
 - **Refine** — user corrections → `prompt_note`, technique/tool patterns →
@@ -545,51 +544,33 @@ evidence is refused:
   propose canaries (above). (A separate `snooze_reflect` producer existed
   briefly and was folded back into Refine; the module is gone.)
 - **Dream promotion** — the deferred phase from
-  [dream.md](dream.md) now ships here: mechanically-validated tool patterns
-  → `routing_hint`; counterfactually-validated ineffective lessons →
+  [dream.md](dream.md) now ships here: counterfactually-validated ineffective lessons →
   `policy` proposals; contradiction/stale-memory findings → proposals
   carrying the **memory-correction effector** (below). Every dream edit is
   global-scope and every global-scope dream edit escalates to high risk, so
   all of them are proposal-gated — none auto-applies.
-- **Candor** — calibrated reliability regressions → `routing_hint` with the
-  ledger's audit chain as evidence (queued during Snooze's Candor
-  maintenance activity). The same activity also **retires** hints it no
-  longer needs (below).
-- **Telos** — a hypothesis evaluated `supported` with real evidence and
-  confidence ≥ 0.65 queues a global `routing_hint` under producer `telos`,
-  so a validated claim about how the agent should work actually reaches
-  scout instead of dying in the journal.
+- **Candor** and **Telos** were producers until 3.2, when both add-ons were
+  retired. Their existing entries stay in the store under their old
+  `source` and age out through the usage and TTL sweeps.
 
-#### Hint retirement — every producer, not just Candor
+#### Hint retirement
 
 Minting alone is a ratchet: every entry consumes a slot in the per-kind cap
 and nothing ever gives one back. Once a kind fills, every further edit is
 rejected at apply time — a failure mode indistinguishable from a producer
-with nothing to report. All three programmatic producers now retire:
+with nothing to report. Dream retires its own:
 
 | Producer | Retires when | Where |
 |---|---|---|
-| Candor | the tool recovered above the degradation threshold | `core/snooze.py` (Candor maintenance) |
-| Dream | the originating hypothesis is gone or unpromoted, its cited Candor facts recovered, or the entry passed a 90-day TTL | `core/dream/retire.py` (per dream step) |
-| Telos | the cited hypothesis is missing or no longer `supported`, its question was abandoned, or the entry passed a 90-day TTL | `core/telos/retire.py` (daily slow loop) |
+| Dream | the originating hypothesis is gone or unpromoted, or the entry passed a 90-day TTL | `core/dream/retire.py` (per dream step) |
 
-The TTLs are the honest part: Dream and Telos verdicts are terminal by
+The TTL is the honest part: Dream verdicts are terminal by
 construction, so the evidence-withdrawn criteria rarely fire on their own.
-Without a TTL those passes would be decorative. A still-true claim re-mints
+Without a TTL that pass would be decorative. A still-true claim re-mints
 cheaply; a slot held forever cannot.
 
 A cap rejection also raises an **operator notification** now, so "the shelf
 is full" is visibly different from "the loop had nothing to say".
-
-Candor's rule in detail: a `routing_hint` is retired when all three hold: its
-`source` is `candor` (a producer deleting its own entry stays low-risk, so
-the cross-producer escalation doesn't fire), its id has the
-`tool-<name>-degraded` shape, and the tool has **recovered** — it no longer
-appears in `degraded_tools()` because calibrated reliability climbed back
-above threshold. Evidence reads `candor:tool_ok recovered (<id>)`. Mints and
-retires are capped at 2 each per pass and queued as one batch. Dedupe on the
-mint side only checks *live* hints, so a hint can legitimately come back if
-the tool degrades again.
 
 #### The memory-correction effector
 
@@ -802,9 +783,9 @@ this order:
 
 ## The Trust tab
 
-The Explorer's **Self-tuning** group carries a fourth tab, **Trust**, beside
-Learning, Self-checks and Goals. The other three each show one subsystem doing
-its job; Trust answers the question underneath all three — how much of this is
+The Explorer's **Self-tuning** group carries a third tab, **Trust**, beside
+Learning and Self-checks. The other two each show one subsystem doing
+its job; Trust answers the question underneath both — how much of this is
 grounded in something that happened, and how much is the model agreeing with
 itself. It reads `GET /api/trust` and renders counts only, no charts:
 

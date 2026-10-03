@@ -34,7 +34,7 @@ These are the most important settings to configure before first use.
 | `llm_base_url` | `http://localhost:11434/v1` | Base URL for the primary LLM provider. Points to Ollama by default. Change to any OpenAI-compatible endpoint. |
 | `llm_model` | *(empty)* | **Required. Primary** role — agent turns, plus every quality-critical call: compaction summaries, reflect verdicts, eval, and the RLM root. Set this before your first session. |
 | `fallback_model` | *(empty)* | **Backup** role — used whenever a Primary *or* Background call fails: provider failover, agent-loop stream failover, scout's last resort, and the one-shot retry wrapped around every non-streaming call. A different model on the **same** provider counts, so an all-Ollama setup still gets failover. Empty disables failover entirely. |
-| `background_model` | *(empty)* | **Background** role — the fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, refine input prep, LLM-backed Snooze activities, Dream, Telos, and RLM sub-calls. Quality-critical calls (compaction, reflect, eval) run on Primary instead. Empty falls back to `llm_model`. |
+| `background_model` | *(empty)* | **Background** role — the fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, refine input prep, LLM-backed Snooze activities, Dream, and RLM sub-calls. Quality-critical calls (compaction, reflect, eval) run on Primary instead. Empty falls back to `llm_model`. |
 | `llm_max_concurrent` | `1` | Maximum simultaneous requests to Ollama. Increase only if your hardware supports parallel inference. |
 | `llm_session_timeout` | `1800` | Maximum wall-clock seconds a session may hold an LLM slot. Prevents hung sessions from blocking others. Set to `0` for unlimited. |
 | `provider_quota_cooldown_s` | `600` | When a model 403s on an exhausted quota, failover *to* that model is refused for this many seconds — so a dead key can't mask the real error. |
@@ -143,7 +143,7 @@ After each agent turn, a lightweight reflect pass verifies that the agent actual
 | `reflect_next_turn_grading` | `true` | Grade a turn even when the user replies before its quiet window is up, using their next message as evidence ("did they correct us, or move on?") and the turn's captured message-id range so the evidence cannot drift into the newer turn. Every real turn gets a grade; cost stays bounded by one in-flight deferred grade per session. Off restores the latest-turn-only rule, which left roughly a quarter of interactive turns ungraded. |
 | `reflect_defer_idle_s` | `300` | Quiet seconds before a deferred grade runs — the wait for a turn the user never answers. With `reflect_next_turn_grading` on, a reply inside this window triggers the grade early instead of cancelling it. |
 | `reflect_nonpass_confidence_floor` | `0.5` | Materiality floor (2026-08-27 calibration audit): a `retry`/`escalate` verdict the grader itself rates below this confidence (0–1) is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous," and ambiguity should not burn a retry or fire an escalation. Coerced/malformed grades are exempt and stay conservative. `0` disables. |
-| `reflect_experience` | `true` | Parse reflect's per-turn experience read (sentiment, friction, user observations) and feed it to Candor, post-mortems, and user-profile memory. |
+| `reflect_experience` | `true` | Parse reflect's per-turn experience read (sentiment, friction, user observations) and feed it to post-mortems and user-profile memory. |
 | `reflect_next_turn_grading` | `true` | A turn whose deferred grade is still pending when the user's next message arrives is graded *then*, with that message as evidence ("USER'S NEXT MESSAGE"): a correction, a repeat of the request or a complaint reads as a missed intent (non-pass, cause `agent`); moving on or thanking reads as a pass. A deterministic `next_msg_correction` pre-check is stored in the payload whatever the grader concludes. Off, the grade is dropped and the turn has no outcome at all. The 300 s idle grade still covers turns with no reply. |
 | `grader_holdout_enabled` | `true` | Nightly run of the reflect grader over the fixtures in `data/eval/grader/` — cases with a known verdict and failure cause, covering clean pass, phantom deliverable, refusal-as-completion, correct escalate and the over-strict trap. Fixtures are never written to memory or the workspace. The result (`{accuracy, n, by_case, ran_at, model}`) lands in snooze state as `trust.grader_holdout` and is what the Trust tab's hold-out accuracy reads. |
 | `grader_holdout_schedule` | `30 3 * * *` | Cron for that run. |
@@ -158,23 +158,6 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 |---|---|---|
 | `snooze_enabled` | `true` | Enable/disable idle-time background maintenance. |
 | `snooze_interval_ticks` | `10` | How often snooze checks whether to run (each tick is approximately 60 seconds, so default = every 10 minutes). |
-
----
-
-## Candor (Operational Memory Add-on)
-
-Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Integrations → Operational memory (Candor). How it works: [internals/candor.md](internals/candor.md); design history: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
-
-| Setting | Default | Description |
-|---|---|---|
-| `candor_enabled` | `false` | Master switch. Turn-end emission, snooze maintenance, and the scout brief toggle hot; the agent tools (`predict_reliability`, `why_reliability`, `reliability_questions`) register at startup only, so enabling them needs a restart. |
-| `candor_scout_brief` | `true` | Inject the `[OPERATIONAL INTEL]` exception report (degraded tools, discovered conditions, open questions) into scout's pre-load context. |
-| `candor_max_obs_per_turn` | `200` | Safety valve on how many observations one turn may emit. |
-| `fetch_routing_enabled` | `true` | Candor-driven fetch rerouting (needs `candor_enabled`): `http_get` consults the calibrated per-domain `fetch_ok` rate and refuses domains that historically fail, pointing the agent at `browse_web` instead of burning a timeout on a bot wall. `force=true` on the call overrides. |
-| `fetch_routing_min_obs` | `8` | Minimum observations on a domain before rerouting — below this the rate is noise and never reroutes. |
-| `fetch_routing_threshold` | `0.40` | Reroute when the calibrated probability of `fetch_ok` falls below this. |
-
-The store lives at `data/candor/` (machine-local, not in `settings.json`).
 
 ---
 
@@ -200,7 +183,7 @@ Recursive Language Models (arXiv 2512.24601): the agent processes inputs far bey
 
 ## Dream (Introspection Add-on)
 
-Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems; generates typed hypotheses about itself (contradictions, stale memory, ineffective lessons, tool patterns); validates them against recorded outcomes; and writes a periodic report to `workspace/dreams/`. Hypotheses influence nothing until validated. Each day of dreaming narrates itself into a read-only Dream journal session in the sidebar. Toggles live in Settings → Autonomy & idle work → Dream (Introspection); all apply hot. How it works: [internals/dream.md](internals/dream.md).
+Idle-time introspection: during snooze the agent examines its own memory and post-mortems; generates typed hypotheses about itself (contradictions, stale memory, ineffective lessons); validates them against recorded outcomes; and writes a periodic report to `workspace/dreams/`. Hypotheses influence nothing until validated. Each day of dreaming narrates itself into a read-only Dream journal session in the sidebar. Toggles live in Settings → Autonomy & idle work → Dream (Introspection); all apply hot. How it works: [internals/dream.md](internals/dream.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -227,29 +210,6 @@ Idle-time filing: during Snooze, Pernix reads the last few weeks of ordinary cha
 | `space_suggest_min_days` | `3` | Distinct calendar days those chats must span — a burst on one afternoon is not a habit. |
 | `space_suggest_scan_interval_hours` | `24` | Floor between scheduled scans (also gated on ten new chats having appeared since the last one). |
 | `space_suggest_ttl_days` | `14` | A pending suggestion nobody accepted or declined expires after this many days and may be offered again. |
-
----
-
-## Telos (Teleological Layer Add-on)
-
-A non-convergent drive with correction machinery over the whole loop: turn anomalies mint Questions, an idle-time SOUP generates cross-domain hypotheses (only falsifiable ones execute; the rest wait in a speculation pool), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (Ordo), detecting Goodhart binding, measuring goal discharge (Hevel), reconciling the agent's self-story against its append-only trace ledger, and keeping exploration entropy above floor. All state is markdown+YAML under `data/telos/`. Toggles live in Settings → Autonomy & idle work → Goals (Telos); everything applies hot except tool registration (restart). How it works: [internals/telos.md](internals/telos.md); derivation: [dev/telos-spec.md](dev/telos-spec.md).
-
-| Setting | Default | Description |
-|---|---|---|
-| `telos_enabled` | `false` | Master switch. Off: no directories created, snooze Activity 16 skipped, cron never installs, post-task hook inert. Registers the `telos_status` / `telos_ask` tools (restart). |
-| `telos_dir` | `data/telos` | Directory holding Telos state: SOUP hypotheses, ledgers, and the append-only JSONL trace, all markdown+YAML. No Settings UI control; set via `POST /api/settings` or `data/settings.json`. |
-| `telos_root_text` | `"What is actually going on here, and what is it for?"` | The root objective — a question with no satisfaction predicate. Re-expressing it is an operator-only edit. |
-| `telos_schedule` | `0 4 * * *` | Daily slow-loop cron (UTC): retirement sweeps, with the weekly entropy-control block watermarked inside it. |
-| `telos_serendipity_budget` | `0.15` | Share of scheduler throughput reserved for high-surprise questions with no goal relevance. |
-| `telos_eig_floor` | `0.15` | Testability-gate admission floor on expected information gain. |
-| `telos_hypotheses_per_question` | `3` | SOUP output cap per generation pass. |
-| `telos_max_gated_backlog` | `12` | Above this many gated hypotheses, every idle step evaluates instead of generating. |
-| `telos_max_eval_tokens` | `20000` | Gate ceiling on a hypothesis's estimated evaluation cost. |
-| `telos_question_max_attempts` | `3` | Dry generation passes before a question is abandoned. |
-| `telos_anomaly_remint_cooldown_days` | `7` | One anomaly line of inquiry per source (`tool:X`, `reflect:retry`, …) per window — stops the same flaky tool minting a near-identical question every day. `0` disables. |
-| `telos_soup_context_entries` | `10` | Memory entries in the band-sampled SOUP context. |
-| `telos_soup_retention_days` | `30` | Age after which an unexamined pooled hypothesis is archived `expired` into `soup/archive/` — moved out of the loop's scans, never deleted. 0 = keep it in the pool forever. |
-| `telos_soup_archive_retention_days` | `180` | Hard-delete horizon for `soup/archive/` — the only place a hypothesis file is unlinked. Long by design: the archive is the calibration review's forensic record. 0 = keep forever. |
 
 ---
 
