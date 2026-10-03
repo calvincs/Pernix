@@ -2607,7 +2607,7 @@ def _resolve_tool_surface(
     # get_worker_result / check_workers / await_workers into the schema.
     active = registry.expand_cooccurrence(active)
     # Scheduled-job tool allow-list (E1, field case 0ba19fdbc823): when the
-    # dispatching cron/heartbeat job declares allowed_tools, the schema is
+    # dispatching cron job declares allowed_tools, the schema is
     # intersected with it AFTER the builtin force-add, the monotonic allowlist
     # and cooccurrence expansion — a job's charter outranks all three. A tool
     # the model can't see is a tool it can't drift onto; the executor enforces

@@ -544,8 +544,8 @@ class SessionManager:
 
         Called BEFORE the shutdown drain takes its snapshot. The flag used to
         go up at the same point but only guarded the pending dispatch and the
-        worker resume — prompt() itself never read it, so a cron fire or a
-        heartbeat landing in the window between the snapshot and the loop
+        worker resume — prompt() itself never read it, so a cron fire
+        landing in the window between the snapshot and the loop
         stopping created a brand new agent task that the drain had already
         walked past. Producers that live on tool threads (orchestration's
         message_worker / resume_worker, which reach the loop through
