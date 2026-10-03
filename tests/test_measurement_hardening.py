@@ -342,25 +342,8 @@ def test_resolve_feedback_survives_a_missing_table():
         assert _one("feedback:4711") is True
 
 
-def test_resolve_candor_is_unresolvable_while_candor_is_off(monkeypatch):
-    monkeypatch.setattr("config.settings.candor_enabled", False)
+def test_resolve_candor_is_always_unresolvable_now_candor_is_retired():
     assert _one("candor:tool_ok(browse_web)") is False
-
-
-def test_resolve_candor_reads_the_bridge(monkeypatch):
-    monkeypatch.setattr("config.settings.candor_enabled", True)
-
-    seen = {}
-
-    class _Bridge:
-        def predict_sync(self, pred, args):
-            seen["call"] = (pred, args)
-            return {"p": 0.4, "observations": 30} if pred == "tool_ok" else None
-
-    monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: _Bridge())
-    assert _one("candor:tool_ok(browse_web)") is True
-    assert seen["call"] == ("tool_ok", ["browse_web"])
-    assert _one("candor:fetch_ok(x)") is False
     assert _one("candor:not-a-fact-key") is False
 
 
@@ -557,7 +540,8 @@ def test_dream_stamps_hypothesis_and_the_evidence_it_pinned():
 
     assert refs[0] == f"hypothesis:{hid}"
     assert f"pm:{pm_id}" in refs
-    assert "candor:fetch_ok(*)" in refs
+    # Candor is retired: a candor evidence item no longer becomes a receipt.
+    assert not any(r.startswith("candor:") for r in refs)
     # retire.py finds the author through this ref — it must survive.
     assert f"dream_hypothesis:{hid}" in refs
     assert "memory:pernix.config" in refs

@@ -233,7 +233,7 @@ def test_a_slow_partial_fetch_says_deadline_not_cap_and_owns_an_unknown_total(ws
     monkeypatch.setattr("config.settings.candor_enabled", False, raising=False)
     monkeypatch.setattr(web, "_HTTP_GET_DEADLINE_S", 2.0)
 
-    out = web.http_get(drip_server, force=True)
+    out = web.http_get(drip_server)
     body = out[0] if isinstance(out, tuple) else out
 
     assert "chunk 0000" in body, "what was acquired is returned"

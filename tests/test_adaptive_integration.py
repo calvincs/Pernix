@@ -658,101 +658,6 @@ async def test_adaptive_step_skips_sweep_and_notify_when_nothing_applied(monkeyp
     assert not any("auto-applied" in (n.get("title") or "") for n in db.list_notifications("log"))
 
 
-# ---------------------------------------------------------------------------
-# Candor producer: mint AND retire
-# ---------------------------------------------------------------------------
-
-
-async def test_candor_retires_recovered_hints(monkeypatch):
-    """Candor must release cap slots it took, or it wedges routing_hint."""
-    from core.adaptive import apply_batch
-    from core.snooze import SnoozeRunner
-
-    degraded = [{"tool": "http_get", "p": 0.41, "n": 30}]
-
-    class _Bridge:
-        async def run_maintenance(self, cancelled):
-            return {}
-
-        async def degraded_tools(self):
-            return list(degraded)
-
-    monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: _Bridge())
-    # 2026-09-05: the ledger alone no longer mints — the recent window must
-    # agree. These tests are about the ledger path, so the window agrees.
-    monkeypatch.setattr("db.models.recent_tool_outcomes", lambda tool, days=14: {"calls": 40, "failures": 12})
-    runner = SnoozeRunner.__new__(SnoozeRunner)
-    runner._is_cancelled = lambda: False
-
-    async def _pass():
-        await SnoozeRunner._candor_maintenance(runner)
-        pending = db.adaptive_list_batches(status="pending")
-        return apply_batch(pending[0]["batch_id"], actor="user") if pending else None
-
-    assert (await _pass())["applied"] == ["tool-http_get-degraded"]
-    assert db.adaptive_entry_count("routing_hint") == 1
-
-    # Still degraded → the live hint dedupes, nothing new is queued.
-    await SnoozeRunner._candor_maintenance(runner)
-    assert db.adaptive_list_batches(status="pending") == []
-
-    # Reliability recovers → the tool drops out of the degraded set and its
-    # hint is retired, freeing the slot. Same-producer delete stays low-risk,
-    # so it rides an auto batch rather than a human-review proposal.
-    degraded.clear()
-    assert (await _pass())["applied"] == ["tool-http_get-degraded"]
-    assert db.adaptive_get_entry("tool-http_get-degraded")["status"] == "deleted"
-    assert db.adaptive_entry_count("routing_hint") == 0
-    assert db.adaptive_list_proposals(status="pending") == []
-
-    # A retired hint must be able to come back if the tool degrades again.
-    degraded.append({"tool": "http_get", "p": 0.3, "n": 40})
-    assert (await _pass())["applied"] == ["tool-http_get-degraded"]
-    assert db.adaptive_get_entry("tool-http_get-degraded")["status"] == "active"
-
-
-async def test_candor_does_not_mint_hints_for_names_that_are_not_tools(monkeypatch):
-    """Candor's ledger is keyed by operation name, so cron jobs land in it.
-
-    A hint reading "tool ai-tech-daily-brief degraded" advises scout about
-    something it cannot call, while holding a slot against the per-kind cap —
-    two of eleven live hints on the box were exactly this.
-    """
-    from core.snooze import SnoozeRunner
-    from core.tools.registry import get_registry
-
-    registry = get_registry()
-    registry.register(
-        name="http_get",
-        func=lambda **kw: "",
-        description="fetch a url",
-        parameters={"type": "object", "properties": {}},
-        category="web",
-    )
-
-    class _Bridge:
-        async def run_maintenance(self, cancelled):
-            return {}
-
-        async def degraded_tools(self):
-            return [
-                {"tool": "http_get", "p": 0.41, "n": 30},
-                {"tool": "ai-tech-daily-brief", "p": 0.20, "n": 12},  # a cron job
-            ]
-
-    monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: _Bridge())
-    # 2026-09-05: the ledger alone no longer mints — the recent window must
-    # agree. These tests are about the ledger path, so the window agrees.
-    monkeypatch.setattr("db.models.recent_tool_outcomes", lambda tool, days=14: {"calls": 40, "failures": 12})
-    runner = SnoozeRunner.__new__(SnoozeRunner)
-    runner._is_cancelled = lambda: False
-    await SnoozeRunner._candor_maintenance(runner)
-
-    pending = db.adaptive_list_batches(status="pending")
-    queued = [e["entry_id"] for e in json.loads(pending[0]["payload_json"])]
-    assert queued == ["tool-http_get-degraded"]
-
-
 async def test_memory_correction_effector_writes_on_promotion(monkeypatch, tmp_path):
     """A validated dream contradiction with cited memory files writes its
     corrective entry when it is PROMOTED — no review queue in between. The
@@ -855,26 +760,6 @@ def test_one_producer_cannot_own_the_whole_review_queue():
     assert db.adaptive_add_proposal(
         "candor", json.dumps([{"n": 9}]), "[]", "c", max_pending=40, max_pending_per_producer=3
     )
-
-
-async def test_paraphrased_tool_findings_promote_once(monkeypatch):
-    """Eleven of the sixty-four live proposals were one fetch_ok finding
-    restated. Lexical dedup cannot see a paraphrase; the Candor evidence key
-    is the claim's semantic identity, and promotion must use it."""
-    from core.dream.promote import promote_validated
-
-    _bypass_gate(monkeypatch)
-    ev = json.dumps([{"type": "candor", "pred": "fetch_ok", "args": ["*"], "quote": "p=0.49"}])
-    first = db.add_dream_hypothesis("tool_pattern", "fetch_ok succeeds only about half the time overall", ev)
-    second = db.add_dream_hypothesis("tool_pattern", "Fetching is unreliable, working roughly 50% of the time", ev)
-    for hid in (first, second):
-        db.update_dream_hypothesis(hid, status="validated")
-
-    assert await promote_validated(limit=10) == 1  # the paraphrase adds nothing
-    rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
-    assert rows[first]["promoted_ref"].startswith("proposal:")
-    assert rows[second]["promoted_ref"] == "reported:duplicate-evidence"  # terminal
-    assert len(db.adaptive_list_proposals(status="pending")) == 1
 
 
 async def test_same_file_correction_is_not_proposed_twice(monkeypatch):

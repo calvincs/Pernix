@@ -212,9 +212,9 @@ async def test_generate_saves_filters_and_advances_cursors(store, dream_on, monk
         "confidence": 0.9,
     }
     ghost_refs = {
-        "kind": "tool_pattern",
-        "statement": "A tool pattern citing evidence that was never offered to the model.",
-        "evidence": ["C9"],
+        "kind": "memory_stale",
+        "statement": "A stale-memory claim citing evidence that was never offered to the model.",
+        "evidence": ["M9"],
         "confidence": 0.9,
     }
     fake = FakeLLMClient(responses=[_resp(json.dumps([good, banned, ghost_refs]))])
@@ -252,18 +252,6 @@ def _fake_pack_items():
             render="[M1] a stored lesson entry",
             ref={"file": "pernix.config", "epoch": 1000, "hash": "abcdefabcdef"},
         ),
-        EvidenceItem(
-            ref_id="C1",
-            kind="candor",
-            render="[C1] fetch_ok(*): 49% success over 562 obs",
-            ref={"pred": "fetch_ok", "args": ["*"]},
-        ),
-        EvidenceItem(
-            ref_id="C2",
-            kind="candor",
-            render="[C2] fetch_ok(forbes.com): 20% success over 8 obs",
-            ref={"pred": "fetch_ok", "args": ["forbes.com"]},
-        ),
     ]
 
 
@@ -297,43 +285,6 @@ async def test_generate_lesson_ineffective_requires_pm_ref(store, dream_on, monk
     assert len(rows) == 1
     ev = json.loads(rows[0]["evidence_json"])
     assert any(e["type"] == "pm" and e.get("session_id") for e in ev)
-
-
-async def test_generate_tool_pattern_dedups_on_candor_evidence(store, dream_on, monkeypatch):
-    from core.dream.observe import EvidencePack
-
-    # An existing hypothesis (any status) already rests on fetch_ok(*).
-    db.add_dream_hypothesis(
-        "tool_pattern",
-        "fetch_ok success is globally degraded to about half of all attempts.",
-        json.dumps([{"type": "candor", "pred": "fetch_ok", "args": ["*"], "quote": "x"}]),
-    )
-    pack = EvidencePack(items=_fake_pack_items(), memory_file="pernix.config")
-
-    async def fake_build_pack(_store):
-        return pack
-
-    monkeypatch.setattr("core.dream.observe.build_pack", fake_build_pack)
-    reworded_dup = {
-        "kind": "tool_pattern",
-        "statement": "The browse method shows markedly lower reliability than API-based retrieval overall.",
-        "evidence": ["C1"],
-        "confidence": 0.6,
-    }
-    fresh = {
-        "kind": "tool_pattern",
-        "statement": "Forbes fetches fail four times out of five, far below the global success rate.",
-        "evidence": ["C2", "C1"],
-        "confidence": 0.6,
-    }
-    fake = FakeLLMClient(responses=[_resp(json.dumps([reworded_dup, fresh]))])
-    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
-
-    saved = await generate(store, _never_cancelled)
-    assert saved == 1, "a paraphrase citing only already-hypothesized candor facts must be rejected"
-    statements = [r["statement"] for r in db.list_dream_hypotheses()]
-    assert any("Forbes" in s for s in statements)
-    assert not any("browse method" in s for s in statements)
 
 
 # ---------------------------------------------------------------------------
@@ -382,72 +333,25 @@ async def test_validate_expires_on_moved_evidence(store, dream_on, monkeypatch):
     assert fake.call_count == 0, "expired refs must not spend an LLM call"
 
 
-async def test_validate_tool_pattern_candor_disabled_expires_after_attempts(store, dream_on, monkeypatch):
-    monkeypatch.setattr(config.settings, "candor_enabled", False)
+async def test_validate_tool_pattern_expires_now_candor_is_retired(store, dream_on):
+    """A pending tool_pattern rested on Candor evidence, which is retired: it
+    can never be re-checked, so it expires on the first pass."""
     db.add_dream_hypothesis(
         "tool_pattern",
         "browse_web fails at night according to the ledger.",
         json.dumps([{"type": "candor", "pred": "tool_ok", "args": ["browse_web"], "quote": "x"}]),
     )
 
-    out1, _ = await validate_one(store, db.list_dream_hypotheses(status="pending"), _never_cancelled)
-    assert out1 == "skipped"
-    out2, expired = await validate_one(store, db.list_dream_hypotheses(status="pending"), _never_cancelled)
-    assert out2 == "expired" and expired == 1
+    out, expired = await validate_one(store, db.list_dream_hypotheses(status="pending"), _never_cancelled)
+    assert out == "expired" and expired == 1
+    row = db.list_dream_hypotheses()[0]
+    assert row["status"] == "expired"
+    assert json.loads(row["validation_json"])["method"] == "candor_retired"
 
 
-async def test_validate_expires_duplicate_evidence_and_continues(store, dream_on, monkeypatch):
-    _seed_memory(store)
-    dup_key_ev = json.dumps([{"type": "candor", "pred": "fetch_ok", "args": ["*"], "quote": "x"}])
-    resolved_id = db.add_dream_hypothesis("tool_pattern", "fetch_ok globally degraded to half.", dup_key_ev)
-    db.update_dream_hypothesis(resolved_id, status="validated")
-    # Oldest pending: a paraphrase resting on the same candor fact.
-    db.add_dream_hypothesis("tool_pattern", "Fetching succeeds only about half the time across domains.", dup_key_ev)
-    # Newer pending: a real contradiction the judge will confirm.
-    ev = [_mem_evidence(store, "pernix.config", 1000), _mem_evidence(store, "pernix.config", 2000)]
-    db.add_dream_hypothesis("contradiction", "Port claims conflict between two entries.", json.dumps(ev))
-
-    fake = FakeLLMClient(responses=[_resp('{"verdict": "holds", "note": "8090 vs 9090"}')])
-    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
-
-    pending = db.list_dream_hypotheses(status="pending", oldest_first=True)
-    outcome, expired = await validate_one(store, pending, _never_cancelled)
-    # The duplicate expires without consuming the cycle's validation slot;
-    # the pass continues and lands the real verdict.
-    assert outcome == "validated" and expired == 1
-    rows = db.list_dream_hypotheses()
-    dup = next(r for r in rows if "half the time" in r["statement"])
-    assert dup["status"] == "expired"
-    assert json.loads(dup["validation_json"])["method"] == "duplicate_evidence"
-    assert next(r for r in rows if r["kind"] == "contradiction")["status"] == "validated"
-
-
-async def test_validate_tool_pattern_any_recovered_ref_refutes(store, dream_on, monkeypatch):
-    monkeypatch.setattr(config.settings, "candor_enabled", True)
-
-    class FakeBridge:
-        async def predict(self, pred, args):
-            if args == ["forbes.com"]:
-                return {"p": 0.20, "observations": 8}
-            return {"p": 0.80, "observations": 50}
-
-    monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: FakeBridge())
-    db.add_dream_hypothesis(
-        "tool_pattern",
-        "Fetches degrade globally and especially on forbes.com lately.",
-        json.dumps(
-            [
-                {"type": "candor", "pred": "fetch_ok", "args": ["*"], "quote": "x"},
-                {"type": "candor", "pred": "fetch_ok", "args": ["forbes.com"], "quote": "y"},
-            ]
-        ),
-    )
-    outcome, _ = await validate_one(store, db.list_dream_hypotheses(status="pending"), _never_cancelled)
-    # The wildcard fact recovered: the claim as stated no longer holds,
-    # even though the forbes-specific ref is still degraded.
-    assert outcome == "refuted"
-    note = json.loads(db.list_dream_hypotheses()[0]["validation_json"])["note"]
-    assert "degradation gone" in note and "fetch_ok(*)" in note
+def test_generation_drops_tool_pattern_at_the_parse_boundary():
+    item = {"kind": "tool_pattern", "statement": "browse_web degrades badly at night lately.", "evidence": ["P1"]}
+    assert parse_hypotheses(json.dumps([item])) == []
 
 
 # ---------------------------------------------------------------------------
@@ -539,38 +443,6 @@ async def test_promotion_gate_unavailable_leaves_the_row_for_retry(dream_on, mon
     monkeypatch.setattr(promote_mod, "_actionability_gate", _gate_down)
     assert await promote_mod.promote_validated(limit=10) == 0
     assert db.list_dream_hypotheses()[0]["status"] == "validated"  # still queued
-
-
-async def test_promotion_skips_restating_a_live_candor_hint(dream_on, monkeypatch):
-    """A tool_pattern about a tool Candor already flags is a restatement of
-    the live hint the scout already sees — terminal duplicate, no gate call."""
-    from core.dream.promote import promote_validated
-
-    _adaptive_on(monkeypatch)
-    from datetime import datetime as _dt
-
-    now = _dt.now(timezone.utc).isoformat()
-    db.adaptive_put_entry(
-        {
-            "id": "tool-fetch_ok-degraded",
-            "kind": "routing_hint",
-            "scope": "global",
-            "title": "tool fetch_ok degraded",
-            "content": "prefer an alternative or verify its output",
-            "risk": "low",
-            "version": 1,
-            "status": "active",
-            "source": "candor",
-            "created_at": now,
-            "updated_at": now,
-        }
-    )
-    ev = json.dumps([{"type": "candor", "pred": "tool_ok", "args": ["fetch_ok"], "quote": "p=0.4"}])
-    hid = db.add_dream_hypothesis("tool_pattern", "fetch_ok has become unreliable overall.", ev)
-    db.update_dream_hypothesis(hid, status="validated")
-
-    assert await promote_validated(limit=10) == 0
-    assert db.list_dream_hypotheses()[0]["promoted_ref"] == "reported:duplicate-evidence"
 
 
 async def test_replay_budget_zero_skips_lesson_hypotheses(store, dream_on, monkeypatch):

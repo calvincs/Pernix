@@ -335,40 +335,6 @@ class _TavilyLimitError(Exception):
     pass
 
 
-# ---------------------------------------------------------------------------
-# Fetch reliability — per-domain fetch_ok emission + deterministic reroute
-# ---------------------------------------------------------------------------
-
-# Bot walls answer HTTP 200 with challenge HTML, so a "successful" fetch that
-# matches the wall signature is still a failed fetch as far as reliability
-# history is concerned. The signature table lives in nudges (it drives the
-# post-failure hint); sharing it keeps the two classifiers from drifting.
-from core.harness.nudges import _BOT_DETECTION_RE as _WALL_RE  # noqa: E402
-
-
-def _fetch_domain(url: str) -> str | None:
-    """Domain key for reliability tracking: hostname, lowercased, minus `www.`.
-
-    None for anything that isn't a public-looking DNS name (IP literals,
-    single-label hosts) — reliability history is about sites, and loopback or
-    LAN outcomes would poison the aggregate.
-    """
-    try:
-        host = (urlparse(url).hostname or "").lower().rstrip(".")
-    except ValueError:
-        return None
-    if not host or "." not in host:
-        return None
-    import ipaddress
-
-    try:
-        ipaddress.ip_address(host)
-        return None
-    except ValueError:
-        pass
-    return host[4:] if host.startswith("www.") else host
-
-
 # A whole-exchange deadline for http_get. httpx's timeout is per-read, so a
 # server that drips one byte at a time satisfies it forever while holding a
 # tool-executor thread.
@@ -422,40 +388,6 @@ _TEXTUAL_CONTENT_TYPES = {
     "application/x-ndjson",
     "application/yaml",
 }
-
-
-def _reliability_reroute(domain: str | None) -> str | None:
-    """Deterministic pre-flight: refuse a raw fetch of a domain whose calibrated
-    fetch_ok rate is below threshold, before spending a timeout on its bot wall.
-
-    The rate blends http and browse outcomes, which is the recovery valve: when
-    browse_web keeps succeeding on the domain the blended rate climbs back over
-    the threshold and raw fetches get probed again on their own.
-
-    Returns the refusal text, or None to proceed. Any reliability-layer error
-    means proceed — a degraded oracle must never take the fetch path down.
-    """
-    if domain is None or not (settings.candor_enabled and settings.fetch_routing_enabled):
-        return None
-    try:
-        from core.extensions.candor.bridge import get_candor_bridge
-
-        pred = get_candor_bridge().predict_sync("fetch_ok", [domain], timeout=2.0)
-    except Exception:
-        return None
-    if not pred or not isinstance(pred.get("p"), (int, float)):
-        return None
-    n = int(pred.get("observations") or 0)
-    p = float(pred["p"])
-    if n < settings.fetch_routing_min_obs or p >= settings.fetch_routing_threshold:
-        return None
-    return (
-        f"Skipped: operational memory shows fetches of {domain} succeed only {p:.0%} "
-        f"of the time over {n} logged attempts (usually a bot wall), so the raw HTTP "
-        f"attempt was not made. Use browse_web for this URL — it renders like a real "
-        f"browser — or load_skill('crawl4ai-fetch') if browse_web also fails. To force "
-        f"the raw attempt anyway, call http_get with force=true."
-    )
 
 
 def _fetch_outcome(text: str, status: str, url: str, *, source_complete: bool, extra: dict | None = None):
@@ -542,7 +474,7 @@ def _clip_html_for_extraction(html: str, url: str, cap: int | None = None) -> tu
     )
 
 
-def http_get(url: str, force: bool = False, _context: dict | None = None):
+def http_get(url: str, _context: dict | None = None):
     """Fetch content from a URL. Returns (text, status), body max 100KB.
 
     The status dict carries `fetch_status` (ok / capped / deadline / cancelled
@@ -554,11 +486,6 @@ def http_get(url: str, force: bool = False, _context: dict | None = None):
         url = _validate_url(url, allow_loopback=allow_loopback)
     except ValueError as e:
         return _fetch_outcome(f"Error: {e}", "refused", url, source_complete=False)
-    domain = _fetch_domain(url)
-    if not force:
-        rerouted = _reliability_reroute(domain)
-        if rerouted:
-            return _fetch_outcome(rerouted, "refused", url, source_complete=False)
     import httpx
 
     try:
@@ -1090,23 +1017,11 @@ def register(reg) -> None:
     reg.register(
         name="http_get",
         func=http_get,
-        description=(
-            "Fetch content from a URL. Returns plain text. Max 100KB. Follows redirects. "
-            "Domains with a poor logged fetch success rate are refused up front with a "
-            "pointer to browse_web (deterministic reroute from operational memory); "
-            "force=true attempts the raw fetch anyway."
-        ),
+        description=("Fetch content from a URL. Returns plain text. Max 100KB. Follows redirects."),
         parameters={
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "URL to fetch"},
-                "force": {
-                    "type": "boolean",
-                    "description": (
-                        "Attempt the raw HTTP fetch even when operational memory says "
-                        "this domain usually fails. Default false."
-                    ),
-                },
             },
             "required": ["url"],
         },

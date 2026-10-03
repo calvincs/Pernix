@@ -2,10 +2,9 @@
 
 Sources, each behind its own cursor so steps stay incremental:
   - post_mortems newer than snooze_state[dream_pm_cursor]
-  - the Candor intel brief (semantic summary; parsed into per-line refs)
   - one memory file per step, rotated via snooze_state[dream_mem_cursor]
 
-Every item gets a short ref id ([P1], [C1], [M1]...). The hypothesizer may
+Every item gets a short ref id ([P1], [M1]...). The hypothesizer may
 cite only these ids — fabricated references die at the parse boundary.
 Memory refs carry a content-hash prefix so later validation can detect that
 consolidation/splitting moved or rewrote the entry (stale ref => expired,
@@ -24,22 +23,16 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 
-from config import settings
 from db import models as db
 
 logger = logging.getLogger("pernix.dream.observe")
 
 _PM_LIMIT = 6
-_CANDOR_LINE_LIMIT = 6
 _MEMORY_ENTRY_LIMIT = 12
 _RENDER_CHAR_CAP = 300
-
-# `- pred(arg1, arg2): 62% success over 41 obs ...` (intel.py line format)
-_BRIEF_LINE_RE = re.compile(r"^- (\w+)\(([^)]*)\):")
 
 
 def is_dream_authored(entry) -> bool:
@@ -61,8 +54,8 @@ def content_hash(text: str) -> str:
 
 @dataclass
 class EvidenceItem:
-    ref_id: str  # "P1" | "C1" | "M1" ...
-    kind: str  # "pm" | "candor" | "memory"
+    ref_id: str  # "P1" | "M1" ...
+    kind: str  # "pm" | "memory"
     render: str  # the line shown to the LLM (already ref-id prefixed)
     ref: dict  # machine ref for later validation
 
@@ -130,35 +123,6 @@ async def build_pack(store) -> EvidencePack:
             )
     except Exception as e:
         logger.debug("dream observe: post-mortem gather failed: %s", e)
-
-    # --- Candor intel brief (semantic summary of the outcome ledger) ------
-    if settings.candor_enabled:
-        try:
-            from core.extensions.candor.bridge import get_candor_bridge
-
-            brief = await get_candor_bridge().intel_brief()
-        except Exception as e:
-            logger.debug("dream observe: candor brief failed: %s", e)
-            brief = None
-        if brief:
-            ci = 0
-            for line in brief.splitlines():
-                line = line.strip()
-                m = _BRIEF_LINE_RE.match(line)
-                if not m:
-                    continue
-                ci += 1
-                args = [a.strip() for a in m.group(2).split(",") if a.strip()]
-                pack.items.append(
-                    EvidenceItem(
-                        ref_id=f"C{ci}",
-                        kind="candor",
-                        render=f"[C{ci}] {line[2:][:_RENDER_CHAR_CAP]}",
-                        ref={"pred": m.group(1), "args": args},
-                    )
-                )
-                if ci >= _CANDOR_LINE_LIMIT:
-                    break
 
     # --- One memory file, rotated ----------------------------------------
     try:

@@ -50,9 +50,6 @@ REF_KINDS: tuple[str, ...] = ("pm", "candor", "signal", "feedback", "hypothesis"
 GROUNDING_KINDS: frozenset[str] = frozenset({"pm", "candor", "signal", "feedback", "hypothesis"})
 
 _REF_RE = re.compile(r"^(" + "|".join(REF_KINDS) + r"):(.+)$", re.IGNORECASE)
-# "pred(a, b)" — Candor renders its fact keys this way in the intel brief and
-# in the hint evidence snooze already writes.
-_CANDOR_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)$")
 
 
 @dataclass(frozen=True)
@@ -139,37 +136,11 @@ def _resolve_feedback(message_id: str) -> bool:
         return False
 
 
-def _candor_key_parts(key: str) -> tuple[str, list[str]] | None:
-    m = _CANDOR_KEY_RE.match(key.strip())
-    if not m:
-        return None
-    args = [a.strip() for a in m.group(2).split(",") if a.strip()]
-    return (m.group(1), args)
-
-
 def _resolve_candor(key: str) -> bool:
-    """An admitted Candor fact, read through the bridge.
-
-    Unresolvable — not false — when candor is off or the bridge cannot be
-    reached; the same posture as a table that does not exist yet. The sync
-    read refuses to run on the event loop by design, so callers that might
-    be on one get False and, with it, a human review.
-    """
-    from config import settings
-
-    if not settings.candor_enabled:
-        return False
-    parts = _candor_key_parts(key)
-    if parts is None:
-        return False
-    pred, args = parts
-    try:
-        from core.extensions.candor.bridge import get_candor_bridge
-
-        return get_candor_bridge().predict_sync(pred, args) is not None
-    except Exception as e:
-        logger.debug("receipts: candor resolution failed for %s: %s", key, e)
-        return False
+    """A Candor fact. Candor was retired in 2026-10, so no `candor:` receipt
+    can resolve any more: always unresolvable (False), which routes an entry
+    resting only on one to human review."""
+    return False
 
 
 def _hypothesis_row(hypothesis_id: str) -> dict | None:

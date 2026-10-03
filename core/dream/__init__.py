@@ -104,9 +104,9 @@ async def run_step(is_cancelled) -> dict:
         except Exception as e:
             logger.warning("dream: promotion failed: %s", e)
 
-        # Symmetric with promotion, and for the same reason Candor's pass is
-        # symmetric: minting without retiring wedges the per-kind cap, after
-        # which every promotion is silently rejected (core/dream/retire.py).
+        # Symmetric with promotion: minting without retiring wedges the
+        # per-kind cap, after which every promotion is silently rejected
+        # (core/dream/retire.py).
         try:
             from core.dream.retire import retire_stale_hints
 

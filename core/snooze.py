@@ -9,8 +9,7 @@ the authoritative order). They fall into a few clusters:
   stale entries, and the distillation coverage audit (the lens's own
   feedback loop).
 - Skill learning — extracting skill requirements, mining skill co-occurrence.
-- Signal synthesis — folding operational signals (and, when Candor is on, the
-  candor gate) into durable memory.
+- Signal synthesis — folding operational signals into durable memory.
 - Retention sweeps — expiring post-mortems, RLM runs, canary
   runs, and old cron runs/sessions.
 - Self-modification — refine (authoring improvements) and applying approved
@@ -59,38 +58,6 @@ SKILL_SWEEP_MAX_PENDING = 30
 # activity cooldown. Without this, a canary sweep and snooze deadlock — the
 # sweep waits for idle while its own sessions keep snooze from being idle.
 SNOOZE_TRANSPARENT_TYPES = frozenset({"canary"})
-
-# Tools the candor reliability producer must never call "degraded". A dialog
-# tool's job is to reach the USER, so in an unattended session it reports
-# by-design unavailability rather than an answer — a property of the session,
-# not a fault in the tool. Those non-answers were emitted as tool_ok=false
-# until 2026-09-04 (see UNAVAILABLE_PREFIX in core/tools/executor.py), and the
-# historical counts they left behind are still in the ledger, so the exemption
-# is what stops the "tool ask_user degraded — prefer an alternative" hint from
-# being minted again off that history. A live one is retired by the same pass.
-# Matched by registered category first; the names are the fallback for when
-# the registry has not loaded.
-CANDOR_HINT_EXEMPT_CATEGORIES = frozenset({"dialog"})
-CANDOR_HINT_EXEMPT_TOOLS = frozenset({"ask_user", "notify_user", "approve_dangerous_tool"})
-# A degraded hint needs the recent window to agree with the ledger. Candor
-# keeps every observation forever with no decay, so one bad week months ago
-# pins a tool at "7% reliable" while the last 191 calls all succeeded (the
-# live `forget` hint, 2026-09-05). The last CANDOR_HINT_CORROBORATION_DAYS of
-# tool results, minus misses and by-design unavailability, must show at
-# least CANDOR_HINT_MIN_RECENT_CALLS calls with a failure share at or above
-# core.signals.POOR_PERFORMER_THRESHOLD — or no hint is minted, and a live
-# one is retired.
-CANDOR_HINT_CORROBORATION_DAYS = 14
-CANDOR_HINT_MIN_RECENT_CALLS = 5
-
-# Receipt prefix for adaptive evidence that points at a Candor fact (W4 parses
-# `candor:<fact_key>`; the key is the predicate call the p/n was derived from).
-CANDOR_RECEIPT_PREFIX = "candor:"
-
-
-def candor_receipt(tool: str) -> str:
-    """The `candor:<fact_key>` receipt for a tool's reliability ledger."""
-    return f"{CANDOR_RECEIPT_PREFIX}tool_ok({tool})"
 
 
 def snooze_transparent(session) -> bool:
@@ -579,15 +546,6 @@ class SnoozeRunner:
             _announce(bus, "cleanup_rlm_runs", "Pruning old RLM run directories")
             await self._rung("cleanup_rlm_runs", self._cleanup_rlm_runs())
 
-        # Activity 12b: Candor operational-memory maintenance (no LLM).
-        # Runs the admission gate (the expensive sweep — this is its only
-        # home), drains the pending observation buffer, and checkpoints. All
-        # store work happens on the bridge's dedicated executor thread;
-        # cancellation is polled between phases and drain chunks.
-        if not self._is_cancelled() and settings.candor_enabled:
-            _announce(bus, "candor_gate", "Sweeping Candor operational memory (gate + buffer drain)")
-            await self._rung("candor_maintenance", self._candor_maintenance())
-
         # Activity 12c: Canary retention cleanup (no LLM). Prunes canary_runs
         # rows and the canary sessions behind them past canary_retention_days.
         # NEVER dispatches sweeps — post-batch sweeps are enqueued through the
@@ -663,7 +621,7 @@ class SnoozeRunner:
 
         # Activity 14b: Distillation coverage audit — the feedback loop on
         # the memory lens itself (core/memory/audit.py). One sampled session
-        # per run under a daily budget; misses land in Candor and are written
+        # per run under a daily budget; misses are counted and written
         # back to memory. Own budget like refine/dream — independent of
         # did_llm.
         if not self._is_cancelled() and settings.distill_audit_enabled and self._llm_ready():
@@ -1619,189 +1577,6 @@ Output valid JSON only. No markdown fences. /no_think"""
                 )
         except Exception as e:
             logger.warning("Snooze synthesis failed: %s", e)
-
-    # ------------------------------------------------------------------
-    # Activity 12b: Candor operational-memory maintenance
-    # ------------------------------------------------------------------
-
-    async def _candor_maintenance(self) -> None:
-        """Gate sweep + pending-buffer drain for the Candor add-on.
-
-        No watermark needed: the bridge's drain cursor is the durable state,
-        and run_gate() is O(1) when no new observations exist.
-        """
-        try:
-            from core.extensions.candor.bridge import get_candor_bridge
-
-            stats = await get_candor_bridge().run_maintenance(self._is_cancelled)
-            if stats and (stats.get("seeded") or stats.get("drained") or stats.get("checkpointed")):
-                logger.info("Snooze candor maintenance: %s", stats)
-        except Exception as e:
-            logger.warning("Snooze candor maintenance failed: %s", e)
-            return
-
-        # Candor producer (plan 4d): calibrated reliability regressions →
-        # routing_hint edits. Deduped by slug — a live hint for the same tool
-        # is left alone (updates would churn the cooldown; the ledger ref lets
-        # a reviewer pull the full audit chain on demand). The pass is
-        # symmetric: it retires hints as well as minting them, so a recovered
-        # tool releases its slot instead of wedging the per-kind cap.
-        if settings.adaptive_enabled and not self._is_cancelled():
-            try:
-                from core.adaptive.contract import queue_producer_edits
-                from core.extensions.candor.bridge import get_candor_bridge
-                from db import models as db
-
-                degraded = await get_candor_bridge().degraded_tools()
-                # Candor's tool_ok ledger is keyed by whatever the caller
-                # named the operation, so cron jobs and scripts land in it
-                # alongside real tools. A hint reading "tool
-                # ai-tech-daily-brief degraded" advises scout about something
-                # it cannot call, and it holds a slot against the per-kind cap
-                # while doing it — two of eleven live hints were this. The
-                # registry is the authority on what is actually a tool.
-                from core.tools.registry import get_registry
-
-                registry = get_registry()
-                # An empty registry means "not loaded yet", not "no tool is
-                # real". Filtering against it would discard every hint and,
-                # worse, retire every live one — so the check only engages
-                # once the registry actually has tools in it.
-                known = registry.all_tools()
-
-                def _is_tool(name: str) -> bool:
-                    return not known or registry.exists(name)
-
-                def _is_exempt(name: str) -> bool:
-                    """Dialog tools never earn a degraded hint (see the
-                    CANDOR_HINT_EXEMPT_* constants)."""
-                    tool = registry.get(name)
-                    if tool is not None:
-                        return getattr(tool, "category", "") in CANDOR_HINT_EXEMPT_CATEGORIES
-                    return name in CANDOR_HINT_EXEMPT_TOOLS
-
-                skipped = [d["tool"] for d in degraded if not _is_tool(d["tool"])]
-                if skipped:
-                    logger.info("Candor: skipped %d degraded non-tool name(s): %s", len(skipped), ", ".join(skipped))
-                exempt = [d["tool"] for d in degraded if _is_tool(d["tool"]) and _is_exempt(d["tool"])]
-                if exempt:
-                    # Every idle cycle re-derives this; it is not news.
-                    logger.debug(
-                        "Candor: skipped %d degraded dialog tool(s) — by-design unavailability " "is not a fault: %s",
-                        len(exempt),
-                        ", ".join(exempt),
-                    )
-                degraded = [d for d in degraded if _is_tool(d["tool"]) and not _is_exempt(d["tool"])]
-
-                from core.signals import POOR_PERFORMER_THRESHOLD
-
-                corroboration: dict[str, tuple[bool, str]] = {}
-
-                def _corroborated(name: str) -> tuple[bool, str]:
-                    """(recent window agrees, reason) — see the constants above."""
-                    if name not in corroboration:
-                        try:
-                            recent = db.recent_tool_outcomes(name, days=CANDOR_HINT_CORROBORATION_DAYS)
-                        except Exception as e:  # pragma: no cover - defensive
-                            recent = {"calls": 0, "failures": 0, "error": repr(e)}
-                        calls, fails = int(recent.get("calls") or 0), int(recent.get("failures") or 0)
-                        if calls < CANDOR_HINT_MIN_RECENT_CALLS:
-                            corroboration[name] = (
-                                False,
-                                f"only {calls} call(s) in the last {CANDOR_HINT_CORROBORATION_DAYS} days",
-                            )
-                        else:
-                            ok = (fails / calls) >= POOR_PERFORMER_THRESHOLD
-                            corroboration[name] = (ok, f"{fails}/{calls} recent calls failed")
-                    return corroboration[name]
-
-                stale = [(d["tool"], _corroborated(d["tool"])[1]) for d in degraded if not _corroborated(d["tool"])[0]]
-                if stale:
-                    logger.debug(
-                        "Candor: %d degraded tool(s) not corroborated by recent results: %s",
-                        len(stale),
-                        "; ".join(f"{t} ({why})" for t, why in stale),
-                    )
-                degraded = [d for d in degraded if _corroborated(d["tool"])[0]]
-                degraded_ids = {f"tool-{d['tool']}-degraded" for d in degraded}
-                mints = []
-                for d in degraded:
-                    entry_id = f"tool-{d['tool']}-degraded"
-                    existing = db.adaptive_get_entry(entry_id)
-                    # Only a LIVE hint dedupes: a retired one must be able to
-                    # come back if the tool degrades again.
-                    if existing and existing.get("status") == "active":
-                        continue
-                    mints.append(
-                        {
-                            "action": "create",
-                            "kind": "routing_hint",
-                            "scope": "global",
-                            "entry_id": entry_id,
-                            "title": f"tool {d['tool']} degraded",
-                            "content": (
-                                f"Calibrated reliability for {d['tool']} is {d['p']:.0%} over "
-                                f"{d['n']} observations — prefer an alternative or verify its "
-                                f"output; see why_reliability('tool_ok', '{d['tool']}')."
-                            ),
-                            # Receipt first: W4's resolver reads evidence[0]
-                            # as `candor:<fact_key>` and checks the ledger the
-                            # p/n above was actually derived from.
-                            "evidence": [
-                                candor_receipt(d["tool"]),
-                                f"calibrated p={d['p']:.3f} over n={d['n']} observations",
-                            ],
-                        }
-                    )
-                # Retirement: a hint whose tool has RECOVERED (calibrated p
-                # back above threshold, so it fell out of the degraded set) is
-                # stale advice AND holds a slot against the per-kind cap
-                # forever. Candor deleting its own entry is same-producer, so
-                # it stays low-risk (the 4b escalation is cross-producer).
-                retires = []
-                for row in db.adaptive_list_entries(kind="routing_hint", status=db.ADAPTIVE_LIVE_STATUS):
-                    eid = row["id"]
-                    if row.get("source") != "candor" or eid in degraded_ids:
-                        continue
-                    if not (eid.startswith("tool-") and eid.endswith("-degraded")):
-                        continue
-                    # Two ways to leave the degraded set, and the audit trail
-                    # should not call them the same thing: the tool recovered,
-                    # or the name was never a tool and should not have minted
-                    # a hint at all.
-                    named = eid[len("tool-") : -len("-degraded")]
-                    if not _is_tool(named):
-                        why = "not a registered tool"
-                    elif _is_exempt(named):
-                        why = "dialog tool — by-design unavailability is not a fault"
-                    elif named in corroboration and not corroboration[named][0]:
-                        why = f"not corroborated by recent results — {corroboration[named][1]}"
-                    else:
-                        why = "recovered"
-                    retires.append(
-                        {
-                            "action": "delete",
-                            "kind": "routing_hint",
-                            "scope": "global",
-                            "entry_id": eid,
-                            "baseline_version": row["version"],
-                            # Receipt first, same contract as the mint: the
-                            # ledger that no longer supports the hint.
-                            "evidence": [candor_receipt(named), f"hint retired: {why} ({eid})"],
-                        }
-                    )
-                edits = mints[:2] + retires[:2]
-                if edits:
-                    q = queue_producer_edits(edits, "candor", rationale="candor reliability regression")
-                    if q["queued"] or q["gated"]:
-                        logger.info(
-                            "Candor adaptive hints queued: %d (%d retirement), gated: %d",
-                            q["queued"],
-                            len(retires[:2]),
-                            q["gated"],
-                        )
-            except Exception as e:
-                logger.warning("Candor adaptive producer failed: %s", e)
 
     # ------------------------------------------------------------------
     # Activity 15: Adaptive layer drain + tripwire (plan §6c)
