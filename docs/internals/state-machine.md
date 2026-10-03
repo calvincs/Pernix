@@ -421,7 +421,7 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 50); when the ca
 ### 2.3 Tool routing (`core/tools/registry.py`, `core/extensions/`)
 
 - ~35 **builtin tools** always registered (`file_read`, `file_write`, `bash`, `ask_user`, etc.); `call_model` is a model_mgmt extension, and `spawn_worker` / `get_worker_result` are orchestration extensions
-- **Extensions** — thirteen modules listed in `BUNDLED_EXTENSIONS` (`core/extensions/__init__.py`): `web`, `orchestration`, `evaluation`, `scheduling`, `toolmaker`, `model_mgmt`, `session_tools`, `planning`, `skillmaker` always register; `candor`, `rlm`, `telos` and `mcp` register conditionally on their own settings (`candor_enabled`, `rlm_enabled`, `telos_enabled`, `mcp_enabled`). Full inventory and gating: [extensions.md](extensions.md)
+- **Extensions** — the modules listed in `BUNDLED_EXTENSIONS` (`core/extensions/__init__.py`): `web`, `orchestration`, `evaluation`, `scheduling`, `packages`, `model_mgmt`, `session_tools`, `planning`, `skillmaker` always register; `candor`, `rlm`, `telos` and `mcp` register conditionally on their own settings (`candor_enabled`, `rlm_enabled`, `telos_enabled`, `mcp_enabled`). Full inventory and gating: [extensions.md](extensions.md)
 - Agent sees only the schema slice for `active_tools` — scout-picked plus a monotonically-growing allowlist (`_resolve_tool_surface()`, `agent.py:1216`)
 - `discover_tools()` during the loop can expand `active_tools` mid-turn (`agent.py:2269-2270`)
 
@@ -616,7 +616,7 @@ Tools with `"worker"` in `denied_session_types`: every orchestration tool (`spaw
 ### 4.3 What a worker can use
 
 - All core tools (`file_read`, `file_write`, `bash`, `call_model`, `ask_user`, …) — including `ask_user`: the question is posted to the global question registry and routed to **whichever user is watching the parent's UI**. From the worker's perspective the mechanism is identical to a main session — turn terminates with `waiting_for_input=True`, user's answer arrives as a new `manager.prompt()` into the worker.
-- All enabled extension tools (browser, vcs, planning, skillmaker, toolmaker)
+- All enabled extension tools (browser, vcs, planning, skillmaker)
 - Skills (scout auto-injects top-1)
 - Shared workspace (reads/writes visible to parent), but its deliverable is isolated in `.worker_{id[:12]}_summary.md`
 

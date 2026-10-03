@@ -2780,9 +2780,8 @@ async def _record_round_results(
     Five consumers read from the same pass: the transcript (what the model
     sees next round), the UI event stream, the stuck detector, the cross-round
     dedup cache, and the turn's tool summary that reflect grades against.
-    Two results also feed back into the schema — discover_tools and
-    create_tool/update_tool widen active_tools in place so a newly found or
-    newly written tool is callable on the very next round.
+    discover_tools also feeds back into the schema — it widens active_tools
+    in place so a newly found tool is callable on the very next round.
     """
     from core.harness.nudges import evaluate as _nudge_eval
 
@@ -2891,12 +2890,6 @@ async def _record_round_results(
         # Dynamic tool expansion via discover_tools
         if result.tool_name == "discover_tools" and not result.was_error:
             _expand_tools_from_discovery(result.content, active_tools)
-
-        # A newly created/updated custom tool goes straight into active_tools
-        # so it appears in the LLM schema on the next round without requiring
-        # a separate discover_tools call.
-        if result.tool_name in ("create_tool", "update_tool") and not result.was_error:
-            _inject_created_tool(item["parsed_args"].get("name", ""), active_tools)
 
 
 def _is_recovery_move(
@@ -3365,20 +3358,6 @@ def _expand_tools_from_discovery(discovery_result: str, active_tools: list[str])
         tool_name = match.group(1)
         registry = get_registry()
         if registry.exists(tool_name) and not registry.is_disabled(tool_name) and tool_name not in active_tools:
-            bisect.insort(active_tools, tool_name)
-
-
-def _inject_created_tool(tool_name: str, active_tools: list[str]) -> None:
-    """Add a tool registered by create_tool/update_tool into the sorted active tools list.
-
-    Mirrors _expand_tools_from_discovery so a newly minted custom tool enters
-    the LLM schema on the very next round without a separate discover_tools call.
-    """
-    import bisect
-
-    registry = get_registry()
-    if tool_name and registry.exists(tool_name) and not registry.is_disabled(tool_name):
-        if tool_name not in active_tools:
             bisect.insort(active_tools, tool_name)
 
 

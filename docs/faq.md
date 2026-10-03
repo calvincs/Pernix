@@ -202,7 +202,7 @@ Write a **skill**. Skills are just markdown files with YAML frontmatter, optiona
 
 ### How do I add a custom tool?
 
-Use the **toolmaker** extension's `create_tool` to author a Python tool from inside a chat — no code changes to Pernix itself. See [authoring/custom-tools.md](authoring/custom-tools.md).
+Write a skill that bundles a script (the agent runs it under `bash`), or connect an MCP server. The in-chat toolmaker (`create_tool`) was removed in 3.2. See [authoring/writing-skills.md](authoring/writing-skills.md) and [mcp.md](mcp.md).
 
 ---
 

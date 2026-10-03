@@ -516,7 +516,6 @@ async def test_canary_session_runs_under_the_tool_allowlist(monkeypatch):
     for denied in (
         "create_skill",
         "update_skill",
-        "create_tool",
         "spawn_worker",
         "schedule_job",
         "notify_user",
