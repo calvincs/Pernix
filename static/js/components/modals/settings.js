@@ -46,7 +46,7 @@ const LOCKED_NOTE = 'Edit-locked. The settings API rejects changes to this field
 // Which keys those are is already declared, per field, as the `restart` string
 // that renders the badge beside the control. A second hand-maintained list
 // drifted from the badges the moment one was added: every RESTART_TOOLS field
-// (web_search_enabled, candor_enabled, rlm_enabled, …) wore a
+// (web_search_enabled, rlm_enabled, …) wore a
 // "restart" badge and then saved with a plain "Saved". Derive it instead. (S5)
 const RESTART_EXTRA_KEYS = new Set([
     // List-valued editors with no field entry of their own. The Allowed
@@ -256,17 +256,6 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'Operational memory (Candor)',
-        tab: 'integrations',
-        term: 'Internal name: Candor. Settings keys are candor_*.',
-        description: 'Calibrated reliability tracking: tool outcomes and reflect verdicts feed an auditable evidence ledger, and scout receives an operational-intel brief flagging degraded tools, discovered conditions, and open questions. Observation capture, snooze maintenance, and the scout brief toggle immediately; the agent-facing tools (predict_reliability, why_reliability, reliability_questions) register at startup, so they appear/disappear after a restart.',
-        fields: [
-            { key: 'candor_enabled', label: 'Candor Enabled', type: 'bool', restart: RESTART_TOOLS },
-            { key: 'candor_scout_brief', label: 'Scout Intel Brief', type: 'bool' },
-            { key: 'candor_max_obs_per_turn', label: 'Max Observations / Turn', type: 'number' },
-        ],
-    },
-    {
         title: 'Large-input runs (RLM)',
         tab: 'tools',
         term: 'Internal name: RLM \u2014 Recursive Language Models. Settings keys are rlm_*.',
@@ -302,7 +291,7 @@ const SECTIONS = [
     {
         title: 'Dream (Introspection)',
         tab: 'autonomy',
-        description: 'Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems, generates typed hypotheses about itself (contradictions, stale lessons, tool patterns), validates them against recorded outcomes, and writes a periodic dream report to workspace/dreams/. Hypotheses influence nothing until validated; replays/day bounds the counterfactual scout-replay spend (0 disables replay). All settings apply immediately.',
+        description: 'Idle-time introspection: during snooze the agent examines its own memory and post-mortems, generates typed hypotheses about itself (contradictions, stale memories, stale lessons), validates them against recorded outcomes, and writes a periodic dream report to workspace/dreams/. Hypotheses influence nothing until validated; replays/day bounds the counterfactual scout-replay spend (0 disables replay). All settings apply immediately.',
         fields: [
             { key: 'dream_enabled', label: 'Dreaming Enabled', type: 'bool' },
             { key: 'dream_hypotheses_per_cycle', label: 'Max Hypotheses / Step', type: 'number' },

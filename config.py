@@ -23,7 +23,6 @@ _NO_PERSIST = {
     "workspace_dir",
     "memory_dir",
     "skills_dir",
-    "candor_store_dir",
 }
 
 # Fields that are runtime-only — set via CLI flags, never read from settings.json
@@ -341,21 +340,6 @@ class Settings:
     distill_audit_enabled: bool = True
     distill_audit_per_day: int = 2  # sampled sessions per UTC day (0 disables)
 
-    # --- Candor (operational-memory add-on, off by default) ---
-    # Calibrated reliability tracking via the external `candor` package.
-    # All call sites gate on candor_enabled at runtime (hot toggle), except
-    # tool registration which follows the web-extension pattern (restart).
-    candor_enabled: bool = False
-    candor_scout_brief: bool = True  # inject [OPERATIONAL INTEL] into scout preload
-    candor_max_obs_per_turn: int = 200  # safety valve on turn-end emission volume
-    # Deterministic fetch routing (needs candor_enabled): http_get consults the
-    # calibrated per-domain fetch_ok rate before fetching and refuses domains
-    # that historically fail, pointing the agent at browse_web instead of
-    # burning a timeout on a bot wall. force=true on the call overrides.
-    fetch_routing_enabled: bool = True
-    fetch_routing_min_obs: int = 8  # below this the rate is noise; never reroute
-    fetch_routing_threshold: float = 0.40  # reroute when calibrated p(fetch_ok) < this
-
     # --- Gates / goals / heartbeats (long-running work, plan Phase 3) ---
     # Deterministic gates: user-authored shell checks that run before
     # Reflect; a failing gate mechanically clamps a pass verdict to retry.
@@ -557,7 +541,7 @@ class Settings:
     # Recursive Language Models engine (core/extensions/rlm): processes inputs
     # beyond the context window in a sandboxed child REPL. All call sites gate
     # on rlm_enabled at runtime (hot toggle), except tool registration which
-    # follows the Candor pattern (restart). The rlm_* caps exist to prevent
+    # follows the web-extension pattern (restart). The rlm_* caps exist to prevent
     # runaway recursion/spend; model roles fall back per resolve_*_model().
     rlm_enabled: bool = False
     rlm_max_iterations: int = 20  # root REPL turns per run
@@ -622,7 +606,7 @@ class Settings:
     mcp_refresh_interval_s: int = 900
 
     # --- Dream (idle-time introspection add-on, off by default) ---
-    # Hypothesis generation over memory/Candor/post-mortems, validated against
+    # Hypothesis generation over memory/post-mortems, validated against
     # recorded outcomes, promoted only through gates — docs/dev/dream-plan.md.
     # Fully inert when off: snooze Activity 14 is skipped and no dream tables
     # are read or written. All call sites gate on dream_enabled at runtime.
@@ -758,7 +742,7 @@ class Settings:
     )
     reflect_experience: bool = (
         True  # Parse reflect's per-turn experience read (sentiment, friction, user observations)
-        # and feed it to Candor / post-mortems / user-profile memory. Prompt always asks for it.
+        # and feed it to post-mortems / user-profile memory. Prompt always asks for it.
     )
     # Interactive turns don't pay for their own verification. Reflect is
     # synchronous today — 370 runs over 14 days on the box measured a 16.5s
@@ -852,7 +836,6 @@ class Settings:
     workspace_dir: str = "data/workspace"
     memory_dir: str = "data/memories"
     skills_dir: str = "data/skills"
-    candor_store_dir: str = "data/candor"
 
     @property
     def workspace_venv_python(self) -> str:

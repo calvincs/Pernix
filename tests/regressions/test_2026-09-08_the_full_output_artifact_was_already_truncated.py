@@ -230,7 +230,6 @@ def test_a_slow_partial_fetch_says_deadline_not_cap_and_owns_an_unknown_total(ws
     is unknown — and the audit's 3 KB deadline-truncated body claimed it had
     hit the 100 KB cap."""
     monkeypatch.setattr("config.settings.localhost_mode", True, raising=False)
-    monkeypatch.setattr("config.settings.candor_enabled", False, raising=False)
     monkeypatch.setattr(web, "_HTTP_GET_DEADLINE_S", 2.0)
 
     out = web.http_get(drip_server)

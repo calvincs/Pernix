@@ -126,8 +126,6 @@ def server(monkeypatch):
     global STATE
     STATE = _State()
     monkeypatch.setattr("config.settings.network_enabled", False, raising=False)
-    monkeypatch.setattr("config.settings.candor_enabled", False, raising=False)
-    monkeypatch.setattr("config.settings.fetch_routing_enabled", False, raising=False)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Slow)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
