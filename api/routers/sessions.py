@@ -723,9 +723,9 @@ async def set_message_feedback(session_id: str, message_id: str, body: dict = {}
     else:
         stored = await _asyncio.to_thread(db.upsert_message_feedback, session_id, message_id, signal, note)
 
-    # Ground truth beats self-grading: stamp the turn's post-mortem and undo
-    # or apply the credit its verdict handed the entries it used. Never fatal
-    # — the click is stored either way.
+    # Ground truth beats self-grading: stamp the turn's post-mortem so
+    # synthesis reads the thumb over the verdict. Never fatal — the click is
+    # stored either way.
     from core.feedback import apply_user_signal
 
     await _asyncio.to_thread(apply_user_signal, session_id, message_id, signal)

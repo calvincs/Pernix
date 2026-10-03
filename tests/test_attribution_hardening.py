@@ -3,12 +3,10 @@
 Four defects in the attribution path, all of which let the learning loop
 record activity without ever recording a verdict:
 
-1. `attribute()` credited adaptive entries for wins only, so every policy's
-   failure counter was a structural zero and the failure-dominated retirement
-   in core/adaptive/retire.py could never fire for policy/prompt_note.
+1. `attribute()` credited adaptive entries for wins only.
 2. Hint uses were bumped at scout submit time even for canary sessions and
-   fallback plans (the hint-usage count was retired with the adaptive layer
-   in 3.2, and its tests with it).
+   fallback plans.
+   (Points 1-2 went with the adaptive layer in 3.2, and their tests with it.)
 3. `ask_user` in an unattended session returned an "Error:" string for a
    by-design non-answer, so the executor set was_error, tool_summary booked a
    failure and Candor (since retired) emitted tool_ok(ask_user)=false.
@@ -32,12 +30,8 @@ from core.tools.executor import (
 from core.tools.registry import ToolRegistry
 
 
-def _pm(verdict, failure_cause, *, used_hints=None, cited_policies=None, tool_summary=None):
+def _pm(verdict, failure_cause, *, tool_summary=None):
     payload = {"scout_summary": {"from_fallback": False}}
-    if used_hints is not None:
-        payload["scout_summary"]["used_hints"] = used_hints
-    if cited_policies is not None:
-        payload["cited_policies"] = cited_policies
     if tool_summary is not None:
         payload["tool_summary"] = tool_summary
     return {
@@ -49,67 +43,6 @@ def _pm(verdict, failure_cause, *, used_hints=None, cited_policies=None, tool_su
         "scout_viability": "verified",
         "payload_json": json.dumps(payload),
     }
-
-
-def _entries(row):
-    return [a for a in synthesis.attribute(row) if a.signal_type == "adaptive_entry"]
-
-
-# ---------------------------------------------------------------------------
-# 1. Cited policies and used hints can accrue failures
-# ---------------------------------------------------------------------------
-
-
-def test_policy_failure_fires_on_retry_blamed_on_the_agent():
-    attrs = _entries(_pm("retry", "agent", cited_policies=["p1"]))
-    assert len(attrs) == 1
-    assert attrs[0].subject == "p1"
-    assert attrs[0].delta_failures == 1 and attrs[0].delta_successes == 0
-    # The use still books, so the retirement denominator is honest.
-    assert attrs[0].delta_reinforcements == 1
-    assert "cause=agent" in attrs[0].rationale
-
-
-def test_policy_failure_fires_on_escalate_blamed_on_the_scout():
-    attrs = _entries(_pm("escalate", "scout", cited_policies=["p1"]))
-    assert len(attrs) == 1
-    assert attrs[0].delta_failures == 1
-    assert "verdict=escalate" in attrs[0].rationale and "cause=scout" in attrs[0].rationale
-
-
-def test_policy_failure_does_not_fire_on_retry_blamed_on_the_environment():
-    """env/task/skill are not the policy's doing: use booked, no verdict."""
-    for cause in ("env", "task", "skill"):
-        attrs = _entries(_pm("retry", cause, cited_policies=["p1"]))
-        assert len(attrs) == 1, cause
-        assert attrs[0].delta_failures == 0 and attrs[0].delta_successes == 0, cause
-        assert attrs[0].delta_reinforcements == 1, cause
-        assert "not charged" in attrs[0].rationale, cause
-
-
-def test_policy_success_branch_still_credits_a_pass():
-    attrs = _entries(_pm("pass", "none", cited_policies=["p1"]))
-    assert len(attrs) == 1
-    assert attrs[0].delta_successes == 1 and attrs[0].delta_failures == 0
-
-
-def test_hint_failure_fires_on_escalate_blamed_on_the_agent():
-    attrs = _entries(_pm("escalate", "agent", used_hints=["h1"]))
-    assert len(attrs) == 1
-    assert attrs[0].subject == "h1"
-    assert attrs[0].delta_failures == 1
-    # Hint usage was already counted at scout submit time — no double count.
-    assert attrs[0].delta_reinforcements == 0
-    assert "cause=agent" in attrs[0].rationale
-
-
-def test_hint_failure_keeps_the_original_retry_scout_rule_as_a_subset():
-    attrs = _entries(_pm("retry", "scout", used_hints=["h1"]))
-    assert len(attrs) == 1 and attrs[0].delta_failures == 1
-
-
-def test_hint_is_not_charged_for_an_environment_failure():
-    assert _entries(_pm("retry", "env", used_hints=["h1"])) == []
 
 
 # ---------------------------------------------------------------------------

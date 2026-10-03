@@ -35,10 +35,8 @@ class Attribution:
     subject: str
     delta_successes: int = 0
     delta_failures: int = 0
-    # adaptive_entry outcome attributions set this to 0: their usage was
-    # already counted at the source (scout submit-time for hints; this pass
-    # for cited policies), and double-counting the observation inflates the
-    # denominator retirement divides by.
+    # 0 when the observation's use was already counted elsewhere and only the
+    # outcome should land.
     delta_reinforcements: int = 1
     # Short, free-form note describing *why* this attribution was made.
     # Stored in signal payload for UI / debugging.
@@ -55,14 +53,6 @@ class Attribution:
 # if ≥50% of invocations failed, we attribute a failure against the tool.
 # Anything below this is considered mixed / inconclusive and skipped.
 _TOOL_FAILURE_RATIO: float = 0.5
-
-# Failure causes that implicate the guidance an adaptive entry supplied.
-# `scout` means the plan was wrong and `agent` means its execution was, and
-# the rendered guidance had a hand in both. `env` (network, permissions,
-# rate limit), `task` (ambiguous or impossible request) and `skill` (a
-# broken skill) are failures the entry could not have caused, so they leave
-# its counters alone rather than charging it for the weather.
-_ENTRY_FAULT_CAUSES: frozenset[str] = frozenset({"agent", "scout"})
 
 
 def attribute(pm_row: dict) -> list[Attribution]:
@@ -221,74 +211,6 @@ def attribute(pm_row: dict) -> list[Attribution]:
                     metrics=metrics,
                 )
             )
-
-    # --- Adaptive-entry attribution (v3.1 usefulness signal) ---
-    # Hints: usage was counted at scout submit-time; here only the OUTCOME
-    # lands, so delta_reinforcements=0. Policies: reflect's citation is both
-    # the usage and the outcome in one observation, so the reinforcement
-    # rides along and a cited policy always books its use.
-    #
-    # Both channels record failures as well as successes. v1 credited wins
-    # only, which made every entry's failure counter a structural zero: the
-    # failure-dominated retirement in core/adaptive/retire.py divides wins by
-    # (wins + losses) and so could never see a losing entry. Worse for
-    # policies — the zero-use sweep is the only other retirement path and a
-    # cited policy is used by definition, so nothing could retire one at all.
-    # A non-pass verdict blamed on the plan (`scout`) or on its execution
-    # (`agent`) is the honest evidence that the guidance did not carry the
-    # turn; `env`/`task`/`skill` causes are not the entry's doing and still
-    # book the use without a verdict either way.
-    blamed = verdict in ("retry", "escalate") and failure_cause in _ENTRY_FAULT_CAUSES
-    for hint_id in scout_summary.get("used_hints") or []:
-        if not isinstance(hint_id, str) or not hint_id:
-            continue
-        if verdict == "pass":
-            attributions.append(
-                Attribution(
-                    "adaptive_entry",
-                    hint_id,
-                    delta_successes=1,
-                    delta_reinforcements=0,
-                    rationale="hint shaped plan; verdict=pass",
-                )
-            )
-        elif blamed:
-            attributions.append(
-                Attribution(
-                    "adaptive_entry",
-                    hint_id,
-                    delta_failures=1,
-                    delta_reinforcements=0,
-                    rationale=(
-                        f"hint shaped plan; verdict={verdict}, cause={failure_cause} — "
-                        f"the plan it steered did not carry the turn"
-                    ),
-                )
-            )
-    for pol_id in payload.get("cited_policies") or []:
-        if not isinstance(pol_id, str) or not pol_id:
-            continue
-        if verdict == "pass":
-            rationale = "policy cited by reflect; verdict=pass"
-        elif blamed:
-            rationale = (
-                f"policy cited by reflect; verdict={verdict}, cause={failure_cause} — "
-                f"its guidance was in force on a turn that failed for a reason it covers"
-            )
-        else:
-            rationale = (
-                f"policy cited by reflect; verdict={verdict}, cause={failure_cause} — "
-                f"use recorded, outcome not charged to the policy"
-            )
-        attributions.append(
-            Attribution(
-                "adaptive_entry",
-                pol_id,
-                delta_successes=1 if verdict == "pass" else 0,
-                delta_failures=1 if blamed else 0,
-                rationale=rationale,
-            )
-        )
 
     return attributions
 
