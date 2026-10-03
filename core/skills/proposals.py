@@ -239,9 +239,8 @@ def restore_skill_backup(proposal_id: str, actor: str = "user") -> dict:
     """Undo one applied skill proposal by restoring its pre-apply backup.
 
     The sixth principle of the hardening plan is that every channel has an
-    undo. Skill auto-apply had a veto window, a
-    timestamped backup, and a README sentence telling a human to copy the
-    file back by hand — which is not an undo, it is a hope.
+    undo. Applying a proposal takes a timestamped backup; a README sentence
+    telling a human to copy the file back by hand is not an undo, it is a hope.
 
     Restores the backup taken at apply time (not merely the newest), marks
     the proposal 'rolled_back', and journals both sides: a safety copy of the
@@ -331,24 +330,20 @@ def restore_skill_backup(proposal_id: str, actor: str = "user") -> dict:
         len(current),
         len(restored),
     )
-    # skill_verify rolls back on a red verify canary and raises its own, more
-    # specific "Skill auto-rolled-back" notice; this one would be a second
-    # bell item for the same event.
-    if actor != "skill-verify":
-        from core import notices
+    from core import notices
 
-        notices.notify(
-            "skills.rolled_back",
-            title=f"Skill rolled back: {skill_name}",
-            body=(
-                f"Proposal {proposal_id} ({status}) was rolled back by {actor}. "
-                f"{skill_md.name} restored from {backup.name} "
-                f"({len(current)} -> {len(restored)} bytes). The state it replaced was "
-                "backed up first, in the same directory."
-            ),
-            subject=skill_name,
-            link={"kind": "tab", "tab": "skills"},
-        )
+    notices.notify(
+        "skills.rolled_back",
+        title=f"Skill rolled back: {skill_name}",
+        body=(
+            f"Proposal {proposal_id} ({status}) was rolled back by {actor}. "
+            f"{skill_md.name} restored from {backup.name} "
+            f"({len(current)} -> {len(restored)} bytes). The state it replaced was "
+            "backed up first, in the same directory."
+        ),
+        subject=skill_name,
+        link={"kind": "tab", "tab": "skills"},
+    )
     return result
 
 
