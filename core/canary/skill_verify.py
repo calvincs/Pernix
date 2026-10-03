@@ -25,8 +25,8 @@ at apply time and marks the proposal 'rolled_back'. Off by default — the
 signal earns trust the way adaptive_auto_rollback does.
 
 SECURITY: verify-gate commands execute on the HOST (core/gates.py jails the
-cwd, not the command), and SKILL.md is machine-editable — update_skill, the
-API, proposal applies. So every gate must pass the same allowlist proof
+cwd, not the command), and SKILL.md is machine-editable — bash, the API,
+proposal applies. So every gate must pass the same allowlist proof
 that guards canary auto-admission (propose.is_gate_command_safe). A skill
 whose verify gates fail the proof gets a notification and NO canary; the
 canary session's own tool allowlist (runner.CANARY_TOOL_ALLOWLIST) fences

@@ -207,13 +207,17 @@ Entries without a `path` are ignored.
 - **Include error handling guidance** — what should the agent do if the API returns an error, a rate limit, or unexpected data?
 - **Version your skills** — increment the version when you make significant changes so you can track what changed.
 
+### Asking the agent to write a skill
+
+There are no skill-authoring tools; the agent writes the files with `bash`, the same way you would. Ask for it in plain words ("make this a skill called `company-brief`"). The contract it follows is the one above: a directory `data/skills/<name>/` (from the agent's workspace cwd, `../skills/<name>/`) holding a `SKILL.md` with `name`, `description`, `tags` and `version` frontmatter and the instructions as the body, plus any `scripts/` or `references/`. Review what it wrote in the Skills panel before you rely on it.
+
 ### Removing a skill
 
 Deleting a skill is a human action, not an agent tool — the agent-side `delete_skill` (and `list_skills`) tool was removed as unused. Use the Explorer → Capabilities → Skills panel, or `DELETE /api/skills/{name}` directly.
 
 ### Skill Discovery
 
-Pernix scans `data/skills/` once, at server startup — a skill directory you drop in by hand is **not** picked up automatically on the next agent turn. To register it without a restart, trigger a rescan: open (or refresh) the Skills panel — listing skills via the API rescans the directory — or have the agent call `load_skill` on it by name, which rescans once as a fallback when the name isn't found in the registry. Skills created through the agent's own skill tools register immediately. Syntax errors in a skill's YAML frontmatter will cause that skill to be skipped (the error is logged).
+Pernix scans `data/skills/` once, at server startup — a skill directory you drop in by hand is **not** picked up automatically on the next agent turn. To register it without a restart, trigger a rescan: open (or refresh) the Skills panel — listing skills via the API rescans the directory — or have the agent call `load_skill` on it by name, which rescans once as a fallback when the name isn't found in the registry. The same applies to a skill the agent writes itself (see below). Syntax errors in a skill's YAML frontmatter will cause that skill to be skipped (the error is logged).
 
 ### Giving a skill its own behavioral test (`verify:` block)
 
@@ -228,7 +232,7 @@ verify:
   timeout: 300
 ```
 
-`core/canary/skill_verify.py` watches every `SKILL.md` for changes (a sha256 content watermark checked at idle) and materializes a `verify:` block as a managed canary named `skill--<name>` with `covers: [skill:<name>]`, resyncing it whenever the block or the skill body changes and retiring it when the block is removed. Because verify-gate commands run on the host and `SKILL.md` is machine-editable (by `update_skill`, the API, and self-healing proposal applies), each gate command must pass the same allowlist proof required for canary auto-admission — a gate that doesn't gets a notification and no canary is created, rather than a silently-unsafe one. See [canary-and-adaptive.md](../internals/canary-and-adaptive.md) for how the canary suite runs these.
+`core/canary/skill_verify.py` watches every `SKILL.md` for changes (a sha256 content watermark checked at idle) and materializes a `verify:` block as a managed canary named `skill--<name>` with `covers: [skill:<name>]`, resyncing it whenever the block or the skill body changes and retiring it when the block is removed. Because verify-gate commands run on the host and `SKILL.md` is machine-editable (by `bash`, the API, and self-healing proposal applies), each gate command must pass the same allowlist proof required for canary auto-admission — a gate that doesn't gets a notification and no canary is created, rather than a silently-unsafe one. See [canary-and-adaptive.md](../internals/canary-and-adaptive.md) for how the canary suite runs these.
 
 ### How a skill improves itself (refine + self-healing)
 

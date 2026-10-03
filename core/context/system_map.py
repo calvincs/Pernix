@@ -150,7 +150,7 @@ _STORE_TOOLS = """\
 | adaptive store | rendered into prompt; adaptive_proposals (pending, plain-language); /api/adaptive/* | adaptive_note (2/day, linted); adaptive_proposal_decide (only when the user says so) |
 | candor ledger | predict_reliability, why_reliability, reliability_questions | (automatic capture) |
 | telos layer | telos_status, telos_ask | telos_ask (mints questions) |
-| skills | load_skill, read_skill_instructions | create_skill / update_skill |
+| skills | load_skill, read_skill_instructions | SKILL.md file (data/skills/<name>/); Skills panel editor |
 | post-mortems | (scout: search_post_mortems) | (reflect writes them) |
 | workspace files | file_read, grep, glob, bash, repl | file_write, bash |"""
 

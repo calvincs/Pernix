@@ -174,10 +174,11 @@ def test_system_prompt_catalog_excludes_disabled_skills(tmp_path, monkeypatch):
     assert "hidden-skill" not in block
 
 
-def test_create_skill_clears_stale_disabled_flag(tmp_path, monkeypatch):
-    """Re-creating a skill with the same name as a previously-disabled one
-    must come back enabled — otherwise create_skill silently lands in a
-    disabled state because .disabled.json kept the old name."""
+def test_file_authored_skill_clears_stale_disabled_flag(tmp_path, monkeypatch):
+    """Re-authoring a skill (as a SKILL.md file) with the same name as a
+    previously-disabled, since-deleted one must come back enabled once a
+    rescan has seen the deletion — otherwise .disabled.json would silently
+    re-disable the new skill."""
     import shutil
 
     monkeypatch.setattr("config.settings.skills_dir", str(tmp_path))
@@ -188,20 +189,14 @@ def test_create_skill_clears_stale_disabled_flag(tmp_path, monkeypatch):
     reg.scan(tmp_path)
     reg.disable("ghost")
     assert reg.is_disabled("ghost")
-    # Simulate a manual rm -rf — the on-disk .disabled.json still has "ghost".
+    # A manual rm -rf; the on-disk .disabled.json still has "ghost".
     shutil.rmtree(tmp_path / "ghost")
-    monkeypatch.setattr("core.skills.registry._skill_registry", reg)
-    from core.extensions.skillmaker import create_skill
-
-    # No `approved` argument: authorization moved to the executor's
-    # server-side dangerous gate, which the direct function call bypasses.
-    result = create_skill(
-        name="ghost",
-        description="brand new skill, totally different",
-        instructions="# fresh body\nDo new things, in detail and with care.",
-    )
-    assert "created" in result.lower()
-    assert not reg.is_disabled("ghost")  # stale disabled flag cleared
+    reg.rescan(tmp_path)  # any listing / load_skill miss rescans
+    # The agent (via bash) or a human writes a fresh SKILL.md by hand.
+    _make_skill_in_tmp(tmp_path, "ghost", "# fresh body\nDo new things, in detail and with care.")
+    reg.rescan(tmp_path)
+    assert reg.exists("ghost")
+    assert not reg.is_disabled("ghost")  # stale disabled flag pruned
 
 
 async def test_e2e_patch_disables_skill_then_load_skill_returns_error(tmp_path, monkeypatch):

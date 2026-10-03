@@ -309,8 +309,12 @@ SKILLS = capability packages in data/skills/. To use one: load_skill(name) and
 follow the instructions inside. Skills do NOT need validation.
 
 MULTI-STEP PIPELINES — build them from skills plus workers:
-- Write the sequence down as a SKILL (create_skill) whose instructions list the
-  steps in order. That is the durable, reusable artifact.
+- Write the sequence down as a SKILL whose instructions list the steps in
+  order. That is the durable, reusable artifact. Create it with bash as
+  data/skills/<name>/SKILL.md (../skills/<name>/SKILL.md from the workspace):
+  YAML frontmatter with name, description, tags and version, then the
+  instructions; scripts go in scripts/. It is picked up on the next skills
+  rescan (load_skill(name) rescans once if the name is unknown).
 - To RUN a step in isolation, spawn_worker(task, ...) — each worker gets its own
   context, so a long pipeline does not fill this session's window. Run
   independent steps as concurrent workers and collect them with await_workers.
