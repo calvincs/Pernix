@@ -5403,18 +5403,6 @@ def count_auto_applied_skill_proposals_since(cutoff_iso: str) -> int:
         return int(row[0]) if row else 0
 
 
-def archive_proposals_for_run(run_id: str) -> int:
-    """Archive all pending proposals associated with a deleted run."""
-    with connect_sessions() as conn:
-        cur = conn.execute(
-            """UPDATE skill_improvement_proposals
-               SET status = 'archived', resolved_at = ?
-               WHERE run_id = ? AND status = 'pending'""",
-            (_now(), run_id),
-        )
-        return cur.rowcount
-
-
 def get_db_stats() -> dict:
     with connect_sessions() as conn:
         tables = {}
