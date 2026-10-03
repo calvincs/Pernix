@@ -7,8 +7,8 @@ record activity without ever recording a verdict:
    failure counter was a structural zero and the failure-dominated retirement
    in core/adaptive/retire.py could never fire for policy/prompt_note.
 2. Hint uses were bumped at scout submit time even for canary sessions and
-   fallback plans, whose post-mortems `attribute()` drops — uses accrued
-   against outcomes that could never arrive.
+   fallback plans (the hint-usage count was retired with the adaptive layer
+   in 3.2, and its tests with it).
 3. `ask_user` in an unattended session returned an "Error:" string for a
    by-design non-answer, so the executor set was_error, tool_summary booked a
    failure and Candor (since retired) emitted tool_ok(ask_user)=false.
@@ -23,7 +23,6 @@ from types import SimpleNamespace
 
 from core import synthesis
 from core.agent import record_tool_outcome
-from core.scout.runner import _count_hint_usage
 from core.tools.executor import (
     UNAVAILABLE_PREFIX,
     ToolExecutionResult,
@@ -111,41 +110,6 @@ def test_hint_failure_keeps_the_original_retry_scout_rule_as_a_subset():
 
 def test_hint_is_not_charged_for_an_environment_failure():
     assert _entries(_pm("retry", "env", used_hints=["h1"])) == []
-
-
-# ---------------------------------------------------------------------------
-# 2. No use bump where the outcome can never arrive
-# ---------------------------------------------------------------------------
-
-
-def _hint_bump_probe(monkeypatch):
-    bumped = []
-    monkeypatch.setattr("config.settings.adaptive_enabled", True)
-    monkeypatch.setattr("db.models.adaptive_list_entries", lambda **kw: [{"id": "h1"}])
-    monkeypatch.setattr("db.models.upsert_signal", lambda *a, **kw: bumped.append(a))
-    return bumped
-
-
-def test_no_hint_use_bump_in_canary_sessions(monkeypatch):
-    bumped = _hint_bump_probe(monkeypatch)
-    report = SimpleNamespace(used_hints=["[h1]"], from_fallback=False)
-
-    _count_hint_usage(report, "canary")
-    assert bumped == []
-    # Sanitisation still ran, so the post-mortem carries real ids.
-    assert report.used_hints == ["h1"]
-
-
-def test_no_hint_use_bump_for_a_fallback_plan(monkeypatch):
-    bumped = _hint_bump_probe(monkeypatch)
-    _count_hint_usage(SimpleNamespace(used_hints=["h1"], from_fallback=True), "normal")
-    assert bumped == []
-
-
-def test_hint_use_bump_still_fires_for_an_ordinary_session(monkeypatch):
-    bumped = _hint_bump_probe(monkeypatch)
-    _count_hint_usage(SimpleNamespace(used_hints=["h1"], from_fallback=False), "normal")
-    assert bumped == [("adaptive_entry", "h1")]
 
 
 # ---------------------------------------------------------------------------

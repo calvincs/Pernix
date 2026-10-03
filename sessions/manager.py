@@ -3068,9 +3068,7 @@ class SessionManager:
             "scout_model": scout_report.scout_model,
             # Observability fields (2026-08-28 scout audit): these existed on
             # the report but never reached the event, so the UI and every
-            # audit had to reconstruct them from post-mortems — and echo
-            # density (used_hints) was unmeasurable per-turn at all.
-            "used_hints": list(scout_report.used_hints or []),
+            # audit had to reconstruct them from post-mortems.
             "task_type": getattr(scout_report, "task_type", ""),
             "execution_mode": scout_report.execution_mode,
             "viability": scout_report.viability,

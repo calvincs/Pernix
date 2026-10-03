@@ -121,8 +121,6 @@ SCOUT_SYSTEM_PROMPT = """You are a Scout Agent. Your job is to prepare context f
 
 Your initial context already includes baseline memory search results, available tools, available skills, and cross-session findings. Review these carefully before deciding if you need more. When baseline memory or cross-session findings substantively cover the user's request, your approach_guidance must synthesize from those findings first — treat external search (search_web/browse_web) as supplementation, not the default opening move.
 
-When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations, and echo the [id] of EVERY hint that influenced the plan — even partially (a tool it steered you toward, a step it added, a pitfall it made you avoid) — in the report's used_hints array. The usage signal you echo is the only evidence the system has that a hint earns its place; a used-but-unechoed hint gets retired as dead weight. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
-
 When [MODEL ROUTING INTEL] is present (observed verdict rates by model and task category): it is an exception report — a model absent from it has no known problem. Steer recommended_model away from listed (model, category) pairs when a viable alternative exists; never report a model's absence as a concern.
 
 You also have tools to search deeper if the baseline is insufficient:
@@ -132,7 +130,6 @@ You also have tools to search deeper if the baseline is insufficient:
 - search_skills: Find more skill packages
 - read_skill_instructions: Read full instructions for a skill before recommending it
 - search_post_mortems: Look up past failure narratives (filter by failure_cause or subject tool/skill name). Use when you suspect a prior failure pattern is relevant.
-- search_adaptive: Search machine-curated routing hints, prompt notes, and policies by keyword (only useful when the adaptive layer is enabled).
 
 PROCEDURE:
 1. Review the user message, session context, and pre-loaded baseline data (memory, tools, skills).
@@ -158,7 +155,6 @@ REPORT FIELD GUIDANCE:
 - deliverables_plan: Array of concrete work items the agent is expected to produce (0-6). Each item has a "description" (the artifact or outcome, e.g. "Write summary.md with key findings") and an optional "execution_hint" (inline | task | worker). Leave empty for pure Q&A. Reflect will check each item at turn end, so be specific and measurable.
 - execution_mode: Overall approach — "inline" (default, single-agent work) or "tasks" (multi-step sequential via task system).
 - task_type: Classify what KIND of task this is: "research" (finding/verifying information, web or corpus), "coding" (writing or modifying code/config), "data_analysis" (computing over data or files), "writing" (producing documents, summaries, distillations), "ops" (operating this system or external services: settings, deploys, admin actions), "conversational" (questions answered from context/memory, discussion). Pick the dominant kind when mixed. This is a statistics label only — it never changes how the task runs.
-- used_hints: ALWAYS EMIT THIS FIELD. Array of [id] values from the ADAPTIVE ROUTING HINTS block whose guidance influenced this plan, even partially — a tool choice it steered, a step it added, a pitfall it made you avoid. Echo every hint you actually drew on (the retention sweep deletes hints that never record use, so omitting a used hint kills it); emit [] when no hint applied or no hints block was present. Do not echo hints that had no influence.
 
 RULES:
 - Be terse. Every token costs the main agent context space.
@@ -373,25 +369,6 @@ _SCOUT_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "search_adaptive",
-            "description": "Search the adaptive layer (machine-curated routing hints, prompt notes, policies) by keyword. Use when the preloaded [ADAPTIVE ROUTING HINTS] block ends with a '+N more hints' marker and the task might match one of the unrendered hints, or to check for policy on a specific tool/skill/topic.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Keywords to match against titles and content"},
-                    "kind": {
-                        "type": "string",
-                        "enum": ["routing_hint", "prompt_note", "policy"],
-                        "description": "Optional kind filter",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "submit_report",
             "description": "Submit the final scout report. Call this exactly once when you have gathered enough context. This ends the scout session.",
             "parameters": {
@@ -456,13 +433,8 @@ _SCOUT_TOOLS = [
                         "enum": list(TASK_TYPES),
                         "description": "What KIND of task this is (classification for outcome statistics; never changes execution).",
                     },
-                    "used_hints": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Ids from [ADAPTIVE ROUTING HINTS] that influenced this plan, even partially; [] if none applied.",
-                    },
                 },
-                "required": ["recommended_tools", "approach_guidance", "used_hints"],
+                "required": ["recommended_tools", "approach_guidance"],
             },
         },
     },
@@ -482,7 +454,7 @@ def memory_recall_denied(brief: SessionBrief) -> bool:
     """True when this session's scout must not read memory at all.
 
     Canary isolation (trust-loop hardening W5, plan §5): eval sessions run
-    WITH the treatment under measurement — adaptive entries, skills — and
+    WITH the treatment under measurement — skills, tools — and
     WITHOUT memory recall. A canary that can look up "the answer to
     gen-grep-count" measures the memory index, not the pipeline, and the
     generated sentinels exist precisely so a memorised answer cannot pass.
@@ -561,34 +533,6 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
             return result or "No relevant findings in other sessions."
         except Exception as e:
             return f"Session search error: {e}"
-
-    elif name == "search_adaptive":
-        try:
-            from config import settings as _settings
-
-            if not _settings.adaptive_enabled:
-                return "Adaptive layer is disabled."
-            from db import models as db
-
-            query = (args.get("query") or "").lower()
-            words = [w for w in query.split() if len(w) >= 2]
-            entries = db.adaptive_list_entries(kind=args.get("kind") or None, status=db.ADAPTIVE_LIVE_STATUS)
-            scored = []
-            for e in entries:
-                haystack = f"{e['title']} {e['content']}".lower()
-                hits = sum(1 for w in words if w in haystack)
-                if hits or not words:
-                    scored.append((hits, e))
-            scored.sort(key=lambda t: -t[0])
-            if not scored:
-                return "No matching adaptive entries."
-            lines = [
-                f"[{e['kind']} id={e['id']} v{e['version']} scope={e['scope']}] {e['title']}: {e['content'][:400]}"
-                for _, e in scored[:8]
-            ]
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Adaptive search error: {e}"
 
     elif name == "search_tools":
         try:
@@ -720,11 +664,6 @@ def _extract_report(args: dict) -> ScoutReport:
         deliverables_plan=deliverables,
         execution_mode=mode,
         task_type=task_type,
-        used_hints=(
-            [str(h)[:64] for h in args.get("used_hints", []) if h][:24]
-            if isinstance(args.get("used_hints"), list)
-            else []
-        ),
     )
 
 
@@ -1200,52 +1139,6 @@ def should_bypass_scout(message: str, turn_count: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _count_hint_usage(report: ScoutReport, session_type: str = "normal") -> None:
-    """Record which adaptive routing hints shaped a FRESH scout plan.
-
-    Called at the fresh-report acceptance seams in run_scout (primary and
-    fallback-model success paths) — every report passing there came from a
-    live LLM run, so a single claim is counted exactly once. (This used to
-    live inside the report cache's write path; the cache recorded 0 hits in
-    506 live runs over 8 days — exact-string key, 5-minute TTL — and was
-    removed in the 2026-08-28 scout audit. The counting seam survives it.)
-    Citations are sanitized against the live hint ids: the model can only
-    credit hints that exist, and over-echo can at worst delay a retirement,
-    never cause one. Never raises — counting is telemetry, not control flow.
-
-    The bump mirrors the filters in core.synthesis.attribute(), because a use
-    counted here is a denominator that only that function can ever fill in.
-    A canary session's post-mortem is dropped by attribute() and a fallback
-    report is not the model's claim about what shaped the plan, so in both
-    cases the outcome never arrives — bumping anyway would let uses accrue
-    without outcomes, which reads to the retention sweep as a live, earning
-    entry and to the retirement maths as a clean record. Sanitisation still
-    runs either way, so the report carries real ids into the post-mortem.
-    """
-    if not report.used_hints or not settings.adaptive_enabled:
-        return
-    try:
-        # Live includes trial entries (W6): a hint the scout only sees on half
-        # the turns is still a hint it saw on THIS one, and dropping its echo
-        # would starve exactly the entries whose effect is being measured.
-        live = {
-            e["id"] for e in db.adaptive_list_entries(kind="routing_hint", status=db.ADAPTIVE_LIVE_STATUS, limit=200)
-        }
-        kept = [h for h in dict.fromkeys(h.strip("[] ") for h in report.used_hints) if h in live]
-        report.used_hints = kept
-        if session_type == "canary" or report.from_fallback:
-            logger.debug(
-                "adaptive hint-usage bump skipped (%s): %s",
-                "canary session" if session_type == "canary" else "fallback plan",
-                ", ".join(kept),
-            )
-            return
-        for hid in kept:
-            db.upsert_signal("adaptive_entry", hid)
-    except Exception as e:
-        logger.debug("adaptive hint-usage count failed: %s", e)
-
-
 def _prior_turn_verdict_block(session_id: str) -> str:
     """The immediately previous turn's non-pass grade, for the next scout.
 
@@ -1395,9 +1288,7 @@ async def run_scout(
 
             # A fallback report is a degraded artifact, not a scout result:
             # keep it as the floor but let the dedicated fallback model try
-            # for a real plan first. Breaking out (rather than returning) also
-            # skips hint-usage counting — a deterministic fallback's hints
-            # are not an LLM's claim about what shaped the plan.
+            # for a real plan first.
             if report.from_fallback:
                 logger.warning(
                     "Scout produced only a fallback report for session %s after %d attempt(s)",
@@ -1407,7 +1298,6 @@ async def run_scout(
                 degraded_report = report
                 break
 
-            _count_hint_usage(report, brief.session_type)
             if attempt > 1:
                 logger.info("Scout succeeded on attempt %d for session %s", attempt, session_id)
             logger.info(
@@ -1480,7 +1370,6 @@ async def run_scout(
                 logger.warning("Scout fallback model produced no usable plan for session %s", session_id)
                 degraded_report = report
             else:
-                _count_hint_usage(report, brief.session_type)
                 logger.info(
                     "Scout fallback model succeeded for session %s in %dms", session_id, report.scout_latency_ms
                 )
@@ -1592,7 +1481,7 @@ async def _run_scout_llm(
 
     # Canary isolation (W5): the four memory-derived gatherers below are the
     # scout's whole recall surface. A canary session gets none of them — the
-    # non-memory preload (tools, skills, models, adaptive hints, workspace
+    # non-memory preload (tools, skills, models, workspace
     # state) is the treatment being measured and stays.
     _no_recall = memory_recall_denied(brief)
 
@@ -1729,21 +1618,6 @@ async def _run_scout_llm(
             logger.debug("Scout model-routing intel failed: %s", e)
             return None
 
-    def _gather_adaptive_hints() -> str | None:
-        # Adaptive routing hints (plan 4e): learned tool/skill selection
-        # guidance renders ONLY here, beside [MODEL ROUTING INTEL] — planning
-        # signal for scout, never agent-prompt weight (I5).
-        if not settings.adaptive_enabled:
-            return None
-        try:
-            from core.adaptive.render import build_routing_hints_block
-            from core.adaptive.trial import turn_key_for_session
-
-            return build_routing_hints_block(session_id, turn_key_for_session(session_id)) or None
-        except Exception as e:
-            logger.debug("Scout adaptive hints failed: %s", e)
-            return None
-
     def _gather_workspace_state() -> str | None:
         try:
             from core.tools.paths import workspace as _ws
@@ -1765,7 +1639,6 @@ async def _run_scout_llm(
         asyncio.to_thread(_gather_lessons),
         asyncio.to_thread(_gather_workspace_state),
         _gather_models(),
-        asyncio.to_thread(_gather_adaptive_hints),
         asyncio.to_thread(_gather_model_routing_intel),
     )
     user_content_parts.extend(part for part in gathered if part)

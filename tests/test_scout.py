@@ -246,54 +246,16 @@ def test_bypass_fallback_stays_quiet():
     assert "[SCOUT STATUS]" not in report.to_system_prompt_section()
 
 
-def test_extract_report_parses_used_hints():
+def test_extract_report_ignores_a_stray_used_hints_key():
+    """used_hints was retired with the adaptive layer (3.2); a model that
+    still emits it must not break report extraction."""
     from core.scout.runner import _extract_report
 
     report = _extract_report(
-        {
-            "recommended_tools": ["bash"],
-            "approach_guidance": "do the thing",
-            "used_hints": ["[yt-dlp-403-captions-fallback]", "plain-id", 42, ""],
-        }
+        {"recommended_tools": ["bash"], "approach_guidance": "do the thing", "used_hints": ["[old-hint]"]}
     )
-    # Brackets tolerated, non-strings dropped at count time (str() here), empties dropped.
-    assert "[yt-dlp-403-captions-fallback]" in report.used_hints or "yt-dlp-403-captions-fallback" in report.used_hints
-    assert "" not in report.used_hints
-
-
-def test_count_hint_usage_sanitizes_and_counts_once(monkeypatch):
-    """Citations are checked against LIVE hint ids and counted at the fresh-
-    report seam — a fabricated id never lands a row, a real one lands one."""
-    from datetime import datetime, timezone
-
-    from core.scout.report import ScoutReport
-    from core.scout.runner import _count_hint_usage
-    from db import models as db
-
-    monkeypatch.setattr("config.settings.adaptive_enabled", True)
-    now = datetime.now(timezone.utc).isoformat()
-    db.adaptive_put_entry(
-        {
-            "id": "real-hint",
-            "kind": "routing_hint",
-            "scope": "global",
-            "title": "real",
-            "content": "prefer x",
-            "risk": "low",
-            "version": 1,
-            "status": "active",
-            "source": "refine",
-            "created_at": now,
-            "updated_at": now,
-        }
-    )
-    db.delete_signal("adaptive_entry", "real-hint")
-    report = ScoutReport(used_hints=["[real-hint]", "made-up-hint", "real-hint"])
-    _count_hint_usage(report)
-    assert report.used_hints == ["real-hint"]  # sanitized + deduped
-    row = db.get_signal("adaptive_entry", "real-hint")
-    assert row is not None and row["reinforcements"] == 1
-    assert db.get_signal("adaptive_entry", "made-up-hint") is None
+    assert report.approach_guidance == "do the thing"
+    assert not hasattr(report, "used_hints")
 
 
 # ---------------------------------------------------------------------------
@@ -301,20 +263,16 @@ def test_count_hint_usage_sanitizes_and_counts_once(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_used_hints_is_required_in_schema():
-    """The echo went 0-for-215 organic turns while optional; required (with []
-    allowed) makes emission the norm and density measurable."""
-    from core.scout.runner import _SCOUT_TOOLS
+def test_scout_schema_has_no_adaptive_surface():
+    """search_adaptive and the used_hints echo went with the adaptive layer."""
+    from core.scout.runner import _SCOUT_TOOLS, SCOUT_SYSTEM_PROMPT
 
+    names = {t["function"]["name"] for t in _SCOUT_TOOLS}
+    assert "search_adaptive" not in names
     schema = [t for t in _SCOUT_TOOLS if t["function"]["name"] == "submit_report"][0]
-    assert "used_hints" in schema["function"]["parameters"]["required"]
-
-
-def test_extract_report_defaults_missing_used_hints_to_empty():
-    from core.scout.runner import _extract_report
-
-    r = _extract_report({"recommended_tools": [], "approach_guidance": "x" * 40})
-    assert r.used_hints == []
+    assert "used_hints" not in schema["function"]["parameters"]["properties"]
+    assert schema["function"]["parameters"]["required"] == ["recommended_tools", "approach_guidance"]
+    assert "ADAPTIVE" not in SCOUT_SYSTEM_PROMPT and "used_hints" not in SCOUT_SYSTEM_PROMPT
 
 
 def test_scout_report_carries_rounds_field():
