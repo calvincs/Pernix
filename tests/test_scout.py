@@ -1,5 +1,6 @@
 """Tests for scout agent pattern."""
 
+from config import settings
 from core.scout.report import ScoutReport, SessionBrief
 from core.scout.runner import (
     _build_fallback_report,
@@ -330,3 +331,43 @@ def test_cache_is_gone():
 
     for name in ("_cache", "_get_cached", "_put_cache", "_cache_key", "CACHE_TTL"):
         assert not hasattr(runner, name), name
+
+
+# ---------------------------------------------------------------------------
+# Scout structural-gate rule (moved from test_fetch_reliability.py)
+# ---------------------------------------------------------------------------
+
+
+def test_scout_prompt_injects_gate_rule_when_gates_enabled(monkeypatch):
+    from core.scout.runner import _scout_system_prompt
+
+    monkeypatch.setattr(settings, "gates_enabled", False)
+    monkeypatch.setattr(settings, "rlm_enabled", False)
+    assert "STRUCTURAL SPECS" not in _scout_system_prompt()
+    monkeypatch.setattr(settings, "gates_enabled", True)
+    prompt = _scout_system_prompt()
+    assert "STRUCTURAL SPECS" in prompt
+    assert "add_gate" in prompt
+    assert prompt.rstrip().endswith("/no_think")
+    assert prompt.index("STRUCTURAL SPECS") < prompt.index("Do NOT use <think>")
+
+
+def test_scout_prompt_has_live_state_rule():
+    # Static rule (always on): stale memories about mutable operational state
+    # (worker limits, cron jobs) produced phantom friction in session
+    # 1e2806e0d2ea — live tools are the source of truth for such state.
+    from core.scout.runner import SCOUT_SYSTEM_PROMPT
+
+    idx = SCOUT_SYSTEM_PROMPT.index("LIVE STATE BEATS MEMORY")
+    assert idx < SCOUT_SYSTEM_PROMPT.index("KNOWN FACTS BEAT EMPTY CONFIG")
+
+
+def test_scout_prompt_stacks_conditional_rules(monkeypatch):
+    from core.scout.runner import _scout_system_prompt
+
+    monkeypatch.setattr(settings, "gates_enabled", True)
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    prompt = _scout_system_prompt()
+    assert "RECURSIVE ANALYSIS" in prompt
+    assert "STRUCTURAL SPECS" in prompt
+    assert prompt.rstrip().endswith("/no_think")

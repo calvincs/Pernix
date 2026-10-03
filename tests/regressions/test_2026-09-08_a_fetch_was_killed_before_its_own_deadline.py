@@ -148,10 +148,10 @@ def _instrument(reg):
     inner = {}
     real = tool.function
 
-    def wrapped(url, force=False, _context=None):
+    def wrapped(url, _context=None):
         inner["start"] = time.monotonic()
         try:
-            return real(url, force=force, _context=_context)
+            return real(url, _context=_context)
         finally:
             inner["end"] = time.monotonic()
 
@@ -191,7 +191,7 @@ def test_every_operation_is_bounded_by_what_is_left_of_the_total(reg):
 
 
 async def test_a_slow_redirect_chain_completes_through_the_executor(server, reg):
-    calls = [{"name": "http_get", "arguments": {"url": f"{server}/hop0", "force": True}}]
+    calls = [{"name": "http_get", "arguments": {"url": f"{server}/hop0"}}]
     results = await execute_tool_round(calls, None, reg)
     assert not results[0].was_error, results[0].content
     assert MARKER in results[0].content
@@ -203,7 +203,7 @@ async def test_a_dripping_body_outlives_the_old_dispatch_budget(server, reg):
     """The audit's measurement, verbatim: a legitimate fetch that takes longer
     than 20s and less than the fetch's own deadline."""
     inner = _instrument(reg)
-    calls = [{"name": "http_get", "arguments": {"url": f"{server}/drip", "force": True}}]
+    calls = [{"name": "http_get", "arguments": {"url": f"{server}/drip"}}]
     t0 = time.monotonic()
     results = await execute_tool_round(calls, None, reg)
     elapsed = time.monotonic() - t0
@@ -219,7 +219,7 @@ async def test_a_cancelled_dispatch_stops_the_fetch_that_is_running(server, reg)
     """`_kill_tool_subprocess` is a no-op for a pure-Python fetch, so the
     thread ran on past the reported timeout with the socket still open."""
     inner = _instrument(reg)
-    calls = [{"name": "http_get", "arguments": {"url": f"{server}/drip", "force": True}}]
+    calls = [{"name": "http_get", "arguments": {"url": f"{server}/drip"}}]
     task = asyncio.ensure_future(execute_tool_round(calls, None, reg))
     await asyncio.sleep(1.5)
     assert "start" in inner, "precondition: the fetch is running"
@@ -244,9 +244,7 @@ async def test_a_cancelled_dispatch_stops_the_fetch_that_is_running(server, reg)
     # And with nothing still in flight, a retry is one acquisition, not two.
     with STATE.lock:
         STATE.max_active = 0
-    results = await execute_tool_round(
-        [{"name": "http_get", "arguments": {"url": f"{server}/hop0", "force": True}}], None, reg
-    )
+    results = await execute_tool_round([{"name": "http_get", "arguments": {"url": f"{server}/hop0"}}], None, reg)
     assert not results[0].was_error
     assert STATE.max_active == 1, "a retry must not run alongside the acquisition it replaced"
 
@@ -260,9 +258,7 @@ async def test_deadline_expiry_is_reported_as_the_fetchs_own_deadline(server, mo
     inner = _instrument(reg)
 
     t0 = time.monotonic()
-    results = await execute_tool_round(
-        [{"name": "http_get", "arguments": {"url": f"{server}/drip", "force": True}}], None, reg
-    )
+    results = await execute_tool_round([{"name": "http_get", "arguments": {"url": f"{server}/drip"}}], None, reg)
     elapsed = time.monotonic() - t0
     assert elapsed < 8.0, f"the deadline is 3s; the call took {elapsed:.1f}s"
     body = results[0].content
@@ -281,12 +277,10 @@ async def test_a_dispatch_that_never_got_a_thread_never_fetches(server, reg, mon
     monkeypatch.setattr(tool_executor, "_get_tool_executor", lambda: pool)
     try:
         hog = asyncio.ensure_future(
-            execute_tool_round([{"name": "http_get", "arguments": {"url": f"{server}/drip", "force": True}}], None, reg)
+            execute_tool_round([{"name": "http_get", "arguments": {"url": f"{server}/drip"}}], None, reg)
         )
         await asyncio.sleep(0.3)
-        results = await execute_tool_round(
-            [{"name": "http_get", "arguments": {"url": f"{server}/final", "force": True}}], None, reg
-        )
+        results = await execute_tool_round([{"name": "http_get", "arguments": {"url": f"{server}/final"}}], None, reg)
         assert results[0].was_error
         assert "never started" in results[0].content and "saturated" in results[0].content
         assert "timed out after" not in results[0].content
@@ -301,9 +295,7 @@ async def test_a_dispatch_that_never_got_a_thread_never_fetches(server, reg, mon
 
 
 async def test_a_successful_fetch_carries_a_structured_status(server, reg):
-    results = await execute_tool_round(
-        [{"name": "http_get", "arguments": {"url": f"{server}/final", "force": True}}], None, reg
-    )
+    results = await execute_tool_round([{"name": "http_get", "arguments": {"url": f"{server}/final"}}], None, reg)
     meta = results[0].metadata or {}
     assert meta.get("fetch_status") == "ok"
     assert meta.get("source_complete") is True

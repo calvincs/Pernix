@@ -90,8 +90,7 @@ def _evidence_refs(row: dict) -> list[str]:
     """Flatten the hypothesis's pinned evidence into refs, receipts first.
 
     The receipt grammar (core/adaptive/receipts.py) leads: `hypothesis:<id>`
-    for the finding itself, then a `pm:` for every graded turn and a
-    `candor:` for every fact key the hypothesis was built on. Those are what
+    for the finding itself, then a `pm:` for every graded turn. Those are what
     the auto-approval sweep can resolve. The older human-readable refs
     (memory files, session ids) follow unchanged — they were never
     resolvable, but they are what a person reads first in the panel.
@@ -104,10 +103,6 @@ def _evidence_refs(row: dict) -> list[str]:
                 kind = item.get("type", "ref")
                 if kind == "pm" and item.get("id"):
                     refs.append(f"pm:{item['id']}")
-                    continue
-                if kind == "candor" and item.get("pred"):
-                    args = ", ".join(str(a) for a in (item.get("args") or []))
-                    refs.append(f"candor:{item['pred']}({args})")
                     continue
                 ident = item.get("id") or item.get("session_id") or item.get("file") or ""
                 if ident:
@@ -204,34 +199,6 @@ def _announce_applied_corrections(applied: list[dict]) -> None:
         logger.warning("dream: corrections notification failed: %s", e)
 
 
-def _evidence_already_promoted(row: dict) -> bool:
-    """True when a prior promotion already rests on this row's Candor facts.
-
-    `hypothesize.candor_keys` exists because "the same degradation
-    (fetch_ok(*) p=0.49) was validated as ten differently worded
-    tool_pattern hypotheses" — lexical dedup cannot see a paraphrase, so the
-    evidence key is the semantic identity of the claim. Validation already
-    applies that test; promotion did not, so those ten paraphrases each
-    minted their own proposal. Eleven of the sixty-four proposals backed up
-    on the live box were one finding about fetch_ok reliability, restated.
-    """
-    from core.dream.hypothesize import candor_keys, existing_candor_keys
-
-    try:
-        evidence = [e for e in json.loads(row.get("evidence_json") or "[]") if isinstance(e, dict)]
-    except (TypeError, ValueError):
-        return False
-    keys = candor_keys(evidence)
-    if not keys:
-        return False  # nothing to key on: fall through to normal promotion
-    prior = [
-        r
-        for r in db.list_dream_hypotheses(kind=row.get("kind"), limit=500)
-        if r["id"] != row["id"] and r.get("status") == "promoted"
-    ]
-    return keys <= existing_candor_keys(prior)
-
-
 def _validation_note(row: dict) -> str:
     """The validator's one-line note, when the validation recorded one."""
     try:
@@ -260,47 +227,10 @@ async def _actionability_gate(row: dict) -> dict | None:
     return verdict
 
 
-def _candor_tools_from_evidence(row: dict) -> set[str]:
-    """Tool names the hypothesis's Candor evidence is about."""
-    try:
-        evidence = [e for e in json.loads(row.get("evidence_json") or "[]") if isinstance(e, dict)]
-    except (TypeError, ValueError):
-        return set()
-    from core.dream.hypothesize import candor_keys
-
-    return {args[0] for _pred, args in candor_keys(evidence) if args and args[0] and args[0] != "*"}
-
-
 async def _promote_edit(row: dict, target_kind: str) -> str | None:
     """Gate, then queue an adaptive edit; dream+global risk rules route it
     to a proposal."""
     from core.adaptive.contract import queue_producer_edits
-
-    if _evidence_already_promoted(row):
-        logger.info(
-            "dream: %s hypothesis %s rests on already-promoted evidence — not re-proposed",
-            row.get("kind"),
-            row["id"][:8],
-        )
-        return _DUPLICATE_EVIDENCE_REF
-
-    # A tool_pattern about a tool Candor already flags is a restatement of
-    # Candor's own live hint — the instruction the agent needs is already in
-    # the scout prompt, with better calibration.
-    if target_kind == "routing_hint":
-        tools = _candor_tools_from_evidence(row)
-        live = {
-            e["id"]
-            for e in db.adaptive_list_entries(kind="routing_hint", status=db.ADAPTIVE_LIVE_STATUS, limit=200)
-            if e.get("source") == "candor"
-        }
-        if any(f"tool-{t}-degraded" in live for t in tools):
-            logger.info(
-                "dream: %s hypothesis %s restates a live candor hint — not re-proposed",
-                row.get("kind"),
-                row["id"][:8],
-            )
-            return _DUPLICATE_EVIDENCE_REF
 
     verdict = await _actionability_gate(row)
     if verdict is None:

@@ -121,12 +121,6 @@ SCOUT_SYSTEM_PROMPT = """You are a Scout Agent. Your job is to prepare context f
 
 Your initial context already includes baseline memory search results, available tools, available skills, and cross-session findings. Review these carefully before deciding if you need more. When baseline memory or cross-session findings substantively cover the user's request, your approach_guidance must synthesize from those findings first — treat external search (search_web/browse_web) as supplementation, not the default opening move.
 
-When [OPERATIONAL INTEL] is present (calibrated reliability from logged outcome history):
-- It is an EXCEPTION REPORT: it lists only degraded or conditional items. A tool or domain absent from the block has no known problem — never report its absence as a concern or a gap.
-- Fold relevant entries into approach_guidance: steer the plan away from targets with low success rates, and toward any stated working condition (e.g. "works when method=browse" means plan browse_web for those domains instead of http_get; a failure-mode line like "rate_limit 38%" means plan for backoff or an alternative source).
-- The percentages are calibrated from real observation counts. Weigh them by evidence: a wide credible interval or few obs is weak evidence; many obs is strong. An [unstable] or [under_specified] tag means the rate is context-dependent — flag that uncertainty in your plan rather than trusting the point estimate.
-- When reliability is central to the task, add predict_reliability / why_reliability / reliability_questions to recommended_tools so the main agent can query live calibrated numbers and their evidence chains.
-
 When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations, and echo the [id] of EVERY hint that influenced the plan — even partially (a tool it steered you toward, a step it added, a pitfall it made you avoid) — in the report's used_hints array. The usage signal you echo is the only evidence the system has that a hint earns its place; a used-but-unechoed hint gets retired as dead weight. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
 
 When [MODEL ROUTING INTEL] is present (observed verdict rates by model and task category): it is an exception report — a model absent from it has no known problem. Steer recommended_model away from listed (model, category) pairs when a viable alternative exists; never report a model's absence as a concern.
@@ -1599,7 +1593,7 @@ async def _run_scout_llm(
     # Canary isolation (W5): the four memory-derived gatherers below are the
     # scout's whole recall surface. A canary session gets none of them — the
     # non-memory preload (tools, skills, models, adaptive hints, workspace
-    # state, candor intel) is the treatment being measured and stays.
+    # state) is the treatment being measured and stays.
     _no_recall = memory_recall_denied(brief)
 
     def _gather_memory_baseline() -> str | None:
@@ -1724,29 +1718,6 @@ async def _run_scout_llm(
         _step("models", "Listing available models")
         return await build_model_catalog_block()
 
-    async def _gather_candor_intel() -> str | None:
-        # Calibrated operational intel (Candor add-on): degraded tools,
-        # admitted conditions, open questions. The bridge serializes store
-        # access on its own thread — awaiting here never blocks the loop.
-        # First call after boot may hit the lazy ledger fold; the timeout
-        # falls back to the last cached brief instead of stalling scout.
-        if not (settings.candor_enabled and settings.candor_scout_brief):
-            return None
-        try:
-            from core.extensions.candor.bridge import get_candor_bridge
-
-            bridge = get_candor_bridge()
-            try:
-                brief = await asyncio.wait_for(bridge.intel_brief(), timeout=4)
-            except asyncio.TimeoutError:
-                brief = bridge.cached_brief()
-            if brief:
-                _step("candor", "Injecting operational reliability intel")
-            return brief
-        except Exception as e:
-            logger.debug("Scout candor intel failed: %s", e)
-            return None
-
     def _gather_model_routing_intel() -> str | None:
         # H2 (plan §12.4): learned (model, task-category) verdict rates as
         # an exception brief steering recommended_model. Pure SQLite read.
@@ -1760,7 +1731,7 @@ async def _run_scout_llm(
 
     def _gather_adaptive_hints() -> str | None:
         # Adaptive routing hints (plan 4e): learned tool/skill selection
-        # guidance renders ONLY here, beside [OPERATIONAL INTEL] — planning
+        # guidance renders ONLY here, beside [MODEL ROUTING INTEL] — planning
         # signal for scout, never agent-prompt weight (I5).
         if not settings.adaptive_enabled:
             return None
@@ -1794,7 +1765,6 @@ async def _run_scout_llm(
         asyncio.to_thread(_gather_lessons),
         asyncio.to_thread(_gather_workspace_state),
         _gather_models(),
-        _gather_candor_intel(),
         asyncio.to_thread(_gather_adaptive_hints),
         asyncio.to_thread(_gather_model_routing_intel),
     )
