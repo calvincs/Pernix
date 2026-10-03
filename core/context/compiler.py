@@ -466,7 +466,7 @@ def _build_server_context() -> str:
             "Substitute the actual relative path for any artifact you want to verify or share.",
             "",
             "SELF-INSPECTION — questions about Pernix's own state (notifications, adaptive",
-            "proposals and batches, cron runs, dream, telos, canaries, other sessions):",
+            "proposals and batches, cron runs, dream, canaries, other sessions):",
             "- START at SYSTEM-MAP.md in the workspace: the machine-generated map of the DB",
             "  schema, data layout, API routes, and context blocks. Read it BEFORE guessing a",
             "  table name, path, or endpoint — it is regenerated every boot and cannot drift.",
@@ -763,112 +763,6 @@ def _build_goal_burn(session_id: str) -> str:
         return ""
 
 
-# The baseline line re-reads the soup directory and the calibration trace
-# window, and the volatile tail is rebuilt on every LLM round — a TTL keeps
-# that cost to once a minute. Baselines are trends, not to-the-second state;
-# a number up to a minute old answers "is the pool growing / is EIG red /
-# did an alarm open" exactly as well as a fresh one.
-_TELOS_BASELINE_TTL_S = 60
-_telos_baseline_cache: tuple[float, str] = (0.0, "")
-# (monotonic stamp, telos_dir, block) — dir-keyed so a redirected store
-# (tests, config change) never serves another store's stale block.
-_telos_drive_cache: tuple[float, str, str | None] = (0.0, "", None)
-
-
-def _telos_baseline_line(store) -> str:
-    """One line of drive-state numbers for the volatile tail.
-
-    Requested by the agent itself (2026-08-17): it was blind to its own pool
-    size, calibration, and alarm count unless it spent a tool call on
-    telos_status — on exactly the turns where the user asks about system
-    state. Injected like the token budget: ambiently, every turn.
-    """
-    import time as _time
-
-    global _telos_baseline_cache
-    stamp, cached = _telos_baseline_cache
-    now = _time.monotonic()
-    if cached and now - stamp < _TELOS_BASELINE_TTL_S:
-        return cached
-
-    hyps = store.list_hypotheses()
-    soup = sum(1 for h in hyps if h.get("status") == "soup")
-    gated = sum(1 for h in hyps if h.get("status") == "gated")
-    archived = store.count_archived("hypothesis")
-    alarms = len(store.list_alarms(open_only=True))
-
-    from core.telos.calibration import eig_calibration
-
-    calib = eig_calibration(store)
-    if calib.get("brier") is None:
-        eig = "EIG unevaluated"
-    else:
-        eig = f"EIG Brier {calib['brier']:.3f}/{calib['n']} (discount {calib['discount']:.2f}x)"
-
-    line = (
-        f"Baseline: pool {soup} soup / {gated} gated / {archived} archived · {eig} · "
-        f"{alarms} live alarm{'s' if alarms != 1 else ''}"
-    )
-    _telos_baseline_cache = (now, line)
-    return line
-
-
-def _build_telos_drive_block() -> str:
-    """Open telos questions + live alarms + baseline numbers for the volatile
-    tail (audit P5 port 3). The agent used to be unaware of its own drive
-    state unless it voluntarily called telos_status. Byte-identical output
-    (empty string) when telos is disabled; capped to three questions to bound
-    tail churn.
-
-    The WHOLE block is behind the 60s TTL now, not just the baseline line:
-    the question and alarm scans used to run raw on every compile — up to
-    max_tool_rounds full directory globs + YAML parses per turn, for FYI
-    content where 60 seconds of staleness costs nothing.
-    """
-    if not settings.telos_enabled:
-        return ""
-    import time as _time
-
-    global _telos_drive_cache
-    stamp, cached_dir, cached = _telos_drive_cache
-    now = _time.monotonic()
-    if cached is not None and cached_dir == settings.telos_dir and now - stamp < _TELOS_BASELINE_TTL_S:
-        return cached
-    try:
-        from core.telos.store import TelosStore
-
-        store = TelosStore.open()
-        qs = sorted(
-            store.list_questions(state="open"),
-            key=lambda q: (-float(q.get("surprise") or 0.0), q.get("created_at") or ""),
-        )[:3]
-        alarms = store.list_alarms(open_only=True)
-        lines = ["[TELOS] " + _telos_baseline_line(store)]
-        if qs:
-            lines.append(
-                "Open questions the idle loop is working on (FYI — answer opportunistically if your task touches one):"
-            )
-            for q in qs:
-                lines.append(
-                    f"- ({q.id}, surprise {float(q.get('surprise') or 0):.2f}) {str(q.get('text') or '')[:180]}"
-                )
-        if alarms:
-            # Alarm TEXT, not just a count — the count alone sent the agent
-            # off to spend a telos_status call on exactly the turns where the
-            # user was asking about system state (first-person audit §2.4).
-            previews = []
-            for a in alarms[:2]:
-                label = str(a.get("text") or a.get("reason") or a.get("kind") or a.get("id") or "alarm")
-                previews.append(label[:80])
-            suffix = f" — {'; '.join(previews)}" if previews else ""
-            lines.append(f"Open telos alarms: {len(alarms)}{suffix} (see telos_status)")
-        block = "\n".join(lines)
-        _telos_drive_cache = (now, settings.telos_dir, block)
-        return block
-    except Exception:
-        return ""
-
-
 def _build_watched_workers_block(session_id: str) -> str:
     """Outstanding watched workers, for the volatile tail.
 
@@ -1048,7 +942,6 @@ def _format_turn_ledger(snap: dict, anchor: str, sess: dict) -> str:
 def _build_volatile_tail(
     resource_status: str,
     goal_burn: str = "",
-    telos_block: str = "",
     workers_block: str = "",
     ledger_block: str = "",
 ) -> str:
@@ -1072,8 +965,6 @@ def _build_volatile_tail(
         lines.append(resource_status)
     if goal_burn:
         lines.append(goal_burn)
-    if telos_block:
-        lines.append(telos_block)
     if workers_block:
         lines.append(workers_block)
     if ledger_block:
@@ -1261,7 +1152,6 @@ def compile_context(
     volatile_tail = _build_volatile_tail(
         resource_status,
         goal_burn=_build_goal_burn(session_id) if goal_block else "",
-        telos_block=_build_telos_drive_block(),
         workers_block=_build_watched_workers_block(session_id),
         ledger_block=_build_turn_ledger(session_id, turn_user_msg_id),
     )

@@ -198,19 +198,6 @@ def agent_state(_context: dict | None = None) -> str:
             lines.append(f"MEMORY STORE: {mem_files} files (recall/deep_recall to query)")
     except Exception:
         pass
-    try:
-        from config import settings as _s
-
-        if _s.telos_enabled:
-            from core.telos.store import TelosStore
-
-            store = TelosStore.open()
-            alarms = store.list_alarms(open_only=True)
-            qs = store.list_questions(state="open")
-            if alarms or qs:
-                lines.append(f"TELOS: {len(qs)} open questions, {len(alarms)} alarms (telos_status for detail)")
-    except Exception:
-        pass
 
     if len(lines) == 1:
         lines.append("(all quiet — nothing in flight, no recent verdicts or notifications)")
@@ -245,7 +232,7 @@ def register(reg) -> None:
             "One-call digest of platform state: work in flight (sessions, jobs, RLM), "
             "this session's recent reflect verdicts, recent notifications, adaptive-layer "
             "state (active entries, pending proposals, suspect batches), recent canary "
-            "gate-fails, cron health, memory-store size, telos alarms. Use INSTEAD of "
+            "gate-fails, cron health and memory-store size. Use INSTEAD of "
             "querying each subsystem separately when asked about Pernix's own state."
         ),
         parameters={"type": "object", "properties": {}},

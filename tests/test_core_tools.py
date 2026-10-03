@@ -814,8 +814,8 @@ def test_approve_dangerous_tool_not_registered_under_dangerous(monkeypatch):
 
 def test_file_read_harness_data_path_explains_the_root(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
-    result = file_read("data/telos/questions/open.md")
-    assert "File not found: data/telos/questions/open.md" in result
+    result = file_read("data/memories/pernix.ops.md")
+    assert "File not found: data/memories/pernix.ops.md" in result
     assert "resolved against workspace root" in result
     assert "use bash with an absolute path" in result
 
@@ -830,6 +830,6 @@ def test_file_edit_harness_data_path_explains_the_root(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     from core.tools.builtin.file_edit import file_edit
 
-    result = file_edit("data/telos/ledger.md", "old", "new")
-    assert "File not found: data/telos/ledger.md" in result
+    result = file_edit("data/memories/ledger.md", "old", "new")
+    assert "File not found: data/memories/ledger.md" in result
     assert "resolved against workspace root" in result

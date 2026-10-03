@@ -96,12 +96,6 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
     if settings.candor_enabled and session_obj:
         await _maybe_candor(session_id, session, session_obj=session_obj)
 
-    # TELOS: trace the turn and mint questions from anomalies. Runs after
-    # Candor so this turn's outcomes are already in the reliability record
-    # the surprise priors read from. Mechanical, no LLM.
-    if settings.telos_enabled and session_obj:
-        await _maybe_telos(session_id, session, session_obj=session_obj)
-
 
 async def _cleanup_stale_questions(session_id: str, session_obj=None) -> None:
     """Delete questions that the user answered inline (bypassing the modal).
@@ -328,20 +322,6 @@ async def _maybe_candor(session_id: str, session: dict, session_obj=None) -> Non
         logger.warning("Candor emission failed for %s: %s", session_id, e)
 
 
-async def _maybe_telos(session_id: str, session: dict, session_obj=None) -> None:
-    """Feed this turn to the TELOS layer: trace append + anomaly->question
-    minting. Delta-tracked per turn inside on_post_task. Failure is never
-    fatal — a TELOS problem logs a warning and the turn completes normally."""
-    try:
-        from core.telos.anomaly import on_post_task
-
-        await asyncio.wait_for(on_post_task(session_id, session, session_obj), timeout=10)
-    except asyncio.TimeoutError:
-        logger.warning("TELOS post-task hook still running after 10s — continuing without waiting")
-    except Exception as e:
-        logger.warning("TELOS post-task hook failed for %s: %s", session_id, e)
-
-
 def _broadcast_reflect_notification(
     session_id: str,
     session: dict,
@@ -474,14 +454,6 @@ async def _log_gate_outcomes(session_id: str, session: dict, session_obj, result
         }
         for r in results
     ]
-
-    if settings.telos_enabled:
-        try:
-            from core.telos.anomaly import record_gate_outcomes
-
-            await asyncio.to_thread(record_gate_outcomes, session_id, session_type, attempt, reflect_mode, gates)
-        except Exception as e:
-            logger.warning("Gate trace append failed for %s: %s", session_id, e)
 
     if settings.candor_enabled:
         import time as _time

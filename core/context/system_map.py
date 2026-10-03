@@ -60,7 +60,6 @@ data/agent/               SOUL.md / RULES.md / SESSIONS.md (user-owned — never
 data/agent/spaces/<slug>/ per-space directive overrides (same three files; present file wins)
 data/adaptive/ADAPTIVE.md read-only mirror of the adaptive store (never read back)
 data/canaries/            canary suite (CANARY.md per task)
-data/telos/               telos layer (questions/soup/claims/ledgers, markdown+YAML)
 data/candor/              candor operational-memory store
 data/kernels/<sid>/       session-kernel snapshots + large-tool-result payloads
 data/settings.json        runtime settings
@@ -118,7 +117,6 @@ CONTEXT_BLOCKS = (
     ),
     ("[CURRENT STATE]", "compiler volatile tail", "reference", "per round", "clock, resource status, goal burn"),
     ("[RESOURCE STATUS]", "agent loop", "binding (rounds)", "per round", "context %, spend, rounds remaining"),
-    ("[TELOS]", "telos store", "FYI", "60s cache", "open questions, alarms (text), drive baseline"),
     (
         "[WORKERS YOU ARE WATCHING]",
         "sessions table",
@@ -149,7 +147,6 @@ _STORE_TOOLS = """\
 | session history | list_recent_sessions, read_session_summary, search_sessions | (automatic) |
 | adaptive store | rendered into prompt; adaptive_proposals (pending, plain-language); /api/adaptive/* | adaptive_note (2/day, linted); adaptive_proposal_decide (only when the user says so) |
 | candor ledger | predict_reliability, why_reliability, reliability_questions | (automatic capture) |
-| telos layer | telos_status, telos_ask | telos_ask (mints questions) |
 | skills | load_skill, read_skill_instructions | create_skill / update_skill |
 | post-mortems | (scout: search_post_mortems) | (reflect writes them) |
 | workspace files | file_read, grep, glob, bash, repl | file_write, bash |"""

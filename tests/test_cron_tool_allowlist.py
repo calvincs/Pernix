@@ -95,17 +95,17 @@ async def test_executor_unconstrained_without_allowlist(monkeypatch):
 def test_schema_intersects_allowlist_over_builtin_force_add():
     """Builtins outside the allow-list must vanish from the schema — the
     force-add is exactly what kept offering bash to the curiosity drive."""
-    reg = _make_registry({"bash": lambda: "x", "recall": lambda: "x", "telos_status": lambda: "x"})
+    reg = _make_registry({"bash": lambda: "x", "recall": lambda: "x", "search_sessions": lambda: "x"})
     for t in reg.enabled_tools():
         t.source = "builtin"
 
     session = AgentSession(session_id="cron-test")
     session.last_scout_report = None
-    session.tool_allowlist = frozenset({"recall", "telos_status"})
+    session.tool_allowlist = frozenset({"recall", "search_sessions"})
 
     _, names = _resolve_tool_surface(session, "cron-test", reg)
     assert "bash" not in names
-    assert set(names) == {"recall", "telos_status"}
+    assert set(names) == {"recall", "search_sessions"}
 
 
 def test_schema_unconstrained_without_allowlist():
@@ -202,10 +202,10 @@ async def test_dispatch_leaves_allowlist_untouched_when_job_has_none(monkeypatch
 def test_session_brief_renders_constraint_block():
     from core.scout.report import SessionBrief
 
-    brief = SessionBrief(session_id="s", tool_allowlist=["recall", "telos_status"])
+    brief = SessionBrief(session_id="s", tool_allowlist=["recall", "search_sessions"])
     text = brief.to_prompt_text()
     assert "CONSTRAINED SESSION" in text
-    assert "recall, telos_status" in text
+    assert "recall, search_sessions" in text
     assert "5-15 guidance does not apply" in text
 
 
