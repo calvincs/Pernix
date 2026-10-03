@@ -99,7 +99,7 @@ Pending proposals show up as a banner on Explorer → Capabilities → Skills, o
 
 You don't have to click anything, though. A proposal older than `skill_proposal_auto_apply_after_hours` (24; 0 disables) applies itself during idle time once it clears a mechanical bar — the target skill still exists and is enabled, the change is under 4,000 characters, confidence is at least 0.6 — capped at `skill_proposal_max_auto_applies_per_day` (5). Before it touches the file, a timestamped copy of the current `SKILL.md` lands in `data/skill_backups/<skill>/`, so an auto-applied change is a rollback away, not a leap of faith. It shows up as a notification either way.
 
-A skill can also carry its own behavioral test: a `verify:` block in `SKILL.md` becomes a managed canary (`skill--<name>`) that the canary suite runs to check the skill still does what it claims — a proposal that breaks the skill's own test gets caught there, not just by eyeballing the diff. See [../authoring/writing-skills.md](../authoring/writing-skills.md) for the format.
+A `verify:` block in `SKILL.md` used to become a managed canary (`skill--<name>`). Since 3.2 nothing syncs those blocks into the canary suite (the canary maintenance sweep that did is gone); a block in an old skill is harmless and ignored. See [../authoring/writing-skills.md](../authoring/writing-skills.md).
 
 ---
 

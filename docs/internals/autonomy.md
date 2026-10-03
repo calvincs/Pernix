@@ -351,7 +351,7 @@ for genuine decisions.
 
 The [canary suite](canary.md) is built to coexist with this:
 canary sweeps are snooze-transparent and workspace-isolated, so an overnight
-autonomous goal and the nightly measurement baseline can share the box.
+autonomous goal and a post-deploy sweep can share the box.
 
 ## Settings
 

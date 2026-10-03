@@ -232,7 +232,7 @@ verify:
   timeout: 300
 ```
 
-`core/canary/skill_verify.py` watches every `SKILL.md` for changes (a sha256 content watermark checked at idle) and materializes a `verify:` block as a managed canary named `skill--<name>` with `covers: [skill:<name>]`, resyncing it whenever the block or the skill body changes and retiring it when the block is removed. Because verify-gate commands run on the host and `SKILL.md` is machine-editable (by `bash`, the API, and self-healing proposal applies), each gate command must pass the same allowlist proof required for canary auto-admission — a gate that doesn't gets a notification and no canary is created, rather than a silently-unsafe one. See [canary.md](../internals/canary.md) for how the canary suite runs these.
+**Not synced since 3.2.** `core/canary/skill_verify.py` used to materialise a `verify:` block as a managed canary named `skill--<name>` from the canary maintenance sweep. That sweep was retired with the canary suite's auto-maintenance, so a `verify:` block is currently ignored; the module goes with the skill self-healing prune. To test a skill behaviourally, write a canary for it by hand (see `youtube-captions-digest` in [canary.md](../internals/canary.md)).
 
 ### How a skill improves itself (refine + self-healing)
 
