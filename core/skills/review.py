@@ -1,12 +1,19 @@
 """Pernix — the "N skill proposals wait for your decision" rollup (review.pending).
 
-Skill proposals are suggestions: none applies on its own, so every pending
-proposal waits for a human. A bell item per proposal would be noise; this
-module keeps ONE coalescing bell row in step with the pending count.
+Most skill proposals decide themselves: with auto-apply on (the default)
+they apply after the window, so a bell item per proposal would be a receipt,
+not a request. What the bell carries is the residue auto-apply refuses —
+the items that sit until a human clicks. This module counts exactly those
+and keeps ONE coalescing bell row in step with the count.
 
-Until 3.2 skill proposals had a veto window and applied themselves after it,
-so the rollup counted only the ones that window would never take.
-It also used to count canary and adaptive proposals; both queues
+Counted: pending skill_improvement_proposals auto-apply will not take — ALL
+of them when skill_proposal_auto_apply is off, otherwise those that
+``_validate_for_auto_apply`` skips (too large, low confidence, written as an
+instruction to an editor, a near-duplicate heading, or past the prompt
+limit). A disabled skill and the per-skill monthly cap
+are not counted — they clear on their own.
+
+Until 3.2 the rollup also counted canary and adaptive proposals; both queues
 went with the adaptive layer. Cheap by construction: one bounded list query.
 No LLM.
 """
@@ -15,6 +22,7 @@ from __future__ import annotations
 
 import logging
 
+from config import settings
 from core import notices
 from db import models as db
 
@@ -28,13 +36,33 @@ _LINK = {"kind": "tab", "tab": "skills"}
 _LAST_KEY = "review_pending_last_body"
 
 
+def _skill_needs_human(prop: dict) -> bool:
+    from core.skills.proposals import _validate_for_auto_apply
+
+    if not settings.skill_proposal_auto_apply:
+        return True
+    try:
+        reason = _validate_for_auto_apply(prop)
+    except Exception:
+        return True
+    # Transient refusals clear on their own: a disabled skill when it is
+    # re-enabled, the per-skill monthly cap when the month rolls over.
+    transient = "disabled" in (reason or "") or "in 30 days" in (reason or "")
+    return bool(reason) and reason.startswith("skip:") and not transient
+
+
 def count_review_pending() -> int:
-    """Pending skill proposals — every one waits for a human."""
-    return len(db.list_skill_proposals(status="pending", limit=500))
+    """Pending skill proposals that wait for a human and never auto-apply."""
+    return sum(1 for prop in db.list_skill_proposals(status="pending", limit=500) if _skill_needs_human(prop))
 
 
 def _body(n: int) -> str:
-    return f"Proposals are suggestions; nothing applies until you do.\n• {n} skill proposal(s) to review"
+    why = (
+        "auto-apply is off"
+        if not settings.skill_proposal_auto_apply
+        else "auto-apply's checks refused them; open each to see why"
+    )
+    return f"None of these apply on their own.\n• {n} skill proposal(s) — {why}"
 
 
 def refresh_review_pending() -> int:

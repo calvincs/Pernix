@@ -369,6 +369,17 @@ class Settings:
     # retention deletes it for good after canary_purge_after_days.
     canary_purge_after_days: int = 30  # retired canaries older than this are deleted
 
+    # --- Skill self-healing (refine skill proposals, auto-apply) ---
+    # Refine writes SKILL.md improvement proposals. With auto-apply on (the
+    # default) a pending proposal older than the window is machine-checked
+    # (see core/skills/proposals.py:_validate_for_auto_apply) and applied
+    # with a timestamped backup under data/skill_backups/. A proposal that
+    # fails a check waits in the Skills tab. Off: every proposal waits for
+    # a click. Rollback is manual (Skills tab or the rollback route).
+    skill_proposal_auto_apply: bool = True
+    skill_proposal_auto_apply_after_hours: int = 24
+    skill_proposal_max_auto_applies_per_day: int = 5
+
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
     # namespace survives tool rounds, turns, and compaction (I1), and — via

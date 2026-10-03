@@ -6,7 +6,7 @@ Pernix does a lot on its own — it grades its answers, tunes its own habits, ru
 |---|---|---|
 | **Interrupt** | A number on the bell, a live desktop notification, and a Web Push / webhook to your phone | The agent needs you, or you must be told: a question, a failed job, a turn that stopped and needs a reply, a goal that ran out of budget, money (the fallback model carrying the load) |
 | **Bell** | A quiet item in the bell panel and a small dot on the bell — never a number, never a push | Worth a look, not worth a buzz: a canary that failed after a deploy, an embeddings outage, an MCP server that stopped answering, a skill that was rolled back for you |
-| **Log** | A line in the **Activity** tab — never a badge | Receipts for self-maintenance that already has its own tab: skill rollbacks, dream corrections, space suggestions |
+| **Log** | A line in the **Activity** tab — never a badge | Receipts for self-maintenance that already has its own tab: skill auto-applies and rollbacks, dream corrections, space suggestions |
 | **Drop** | Nothing recorded | Reserved for overrides, and for synthetic canary and worker sessions (see below) |
 
 Questions from the agent (`ask_user`) are separate from this: they live in the question panel, always count toward the badge and always push.
@@ -22,7 +22,7 @@ Open the bell. It has two tabs:
 
 Some items close themselves when their cause goes away — the embeddings outage when the server answers again, an MCP alert when the connection is back. They leave the bell and stay in *Activity* marked resolved.
 
-**One rollup instead of many.** Skill proposals, which only apply when you apply them, are summed into a single item — "N skill proposals wait for your decision" — that opens the Skills tab and clears at zero.
+**One rollup instead of many.** Skill proposals that wait for *your* decision (the ones auto-apply's checks refused, or every pending one when auto-apply is off) are summed into a single item — "N skill proposals wait for your decision" — that opens the Skills tab and clears at zero.
 
 ## Sessions that are not your conversation
 
@@ -65,7 +65,7 @@ Generated from `core/notices.py`. *Session types* lists where a category's tier 
 | `review.pending` | bell | one coalesced row counting the skill proposals only you can decide; opens the Skills tab, resolves at zero |
 | `canary.sweep_failed` | bell | a canary gate-failed in a deploy, model-swap or Run-all sweep; coalesces, resolved by a sweep where every canary passes |
 | `canary.sweep_result` | log | any other finished full sweep (all passed, or only timeouts/errors) |
-| `skills.rolled_back` | log | |
+| `skills.rolled_back`, `skills.proposals_auto_applied` | log | |
 | `dream.corrections_applied`, `dream.queue_stalled`, `dream.promotion_stalled` | log | |
 | `spaces.suggested` | log | the suggestion row in the sidebar is the surface |
 | `system.fallback_burn` | interrupt | the fallback model is carrying the load |

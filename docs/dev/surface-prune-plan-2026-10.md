@@ -56,9 +56,13 @@ workflow it is cut down rather than removed.
    fixture, web read tools) and `youtube-captions-digest` (local VTT fixture,
    youtube-whisper skill). Memory round-trip is covered by a plain pytest, not
    a canary. Workers and `search_web` are left to unit tests.
-8. **Skill self-healing becomes suggestions only.** Remove auto-apply, automatic
-   rollback and stuck-mode trial hints; add a 30-day archive for stale
-   proposals. Loading, manual apply, backups and manual rollback stay.
+8. **Skill self-healing: checked auto-apply.** Remove automatic rollback and
+   stuck-mode trial hints; add a 30-day archive for stale proposals.
+   Auto-apply was first removed, then restored on the owner's call (2026-10-03:
+   "I would rather those be auto applied so I don't have to deal with them")
+   as `skill_proposal_auto_apply` (default on), behind checks built from the
+   box's failure modes: size, editor-note unwrapping, near-duplicate headings,
+   the prompt limit, and 3 per skill per 30 days.
 9. **Scout: one round.** New `scout_max_rounds` (default 1). With one round the
    existing last-round path offers only `submit_report`. Add `fallback_reason`
    to the scout event. Deleting the multi-round machinery waits for two weeks of

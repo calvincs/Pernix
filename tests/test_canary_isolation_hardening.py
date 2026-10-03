@@ -1170,9 +1170,11 @@ def _skill_env(tmp_path, monkeypatch, name="heal-me"):
 
 
 def _auto_applied(skill_name: str, change: str = "Add: on GPU OOM use --device cpu.") -> str:
-    """A proposal applied with the 'auto_applied' label — the status the
-    retired 3.1 veto-window sweep left on its rows, which stay rollback-able."""
-    from core.skills.proposals import apply_proposal
+    """A ripe proposal, auto-applied through the real veto-window sweep."""
+    from datetime import datetime, timedelta, timezone
+
+    from core.skills.proposals import auto_apply_ripe_proposals
+    from db.database import connect_sessions
 
     pid = db.add_skill_proposal(
         skill_name=skill_name,
@@ -1182,7 +1184,11 @@ def _auto_applied(skill_name: str, change: str = "Add: on GPU OOM use --device c
         confidence=0.8,
         source_origin="refine",
     )
-    apply_proposal(pid, status_label="auto_applied")
+    past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+    with connect_sessions() as conn:
+        conn.execute("UPDATE skill_improvement_proposals SET created_at = ? WHERE id = ?", (past, pid))
+    out = auto_apply_ripe_proposals()
+    assert out["applied"] == [pid], out
     return pid
 
 

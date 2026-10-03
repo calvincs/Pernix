@@ -185,7 +185,7 @@ The UI works on mobile when accessed via network mode. It can also be installed 
 
 Pernix's behavior beyond raw LLM responses is shaped by three things:
 
-**Skills** (`data/skills/`) are capability packs you install. Each skill teaches the agent a specific procedure — how to call a particular API, process a specific file type, or follow a domain procedure. Skills are plain markdown with YAML frontmatter; the agent discovers them automatically and loads their instructions only when relevant. When a skill fails and a session works around it, Pernix can propose the fix back into the skill's own instructions as a suggestion you review and apply from the Skills tab, with a backup and one-click rollback.
+**Skills** (`data/skills/`) are capability packs you install. Each skill teaches the agent a specific procedure — how to call a particular API, process a specific file type, or follow a domain procedure. Skills are plain markdown with YAML frontmatter; the agent discovers them automatically and loads their instructions only when relevant. When a skill fails and a session works around it, Pernix folds the fix back into the skill's own instructions on its own, after checks that keep it short and well-formed, with a backup and one-click rollback in the Skills tab (or turn auto-apply off and review each one).
 
 **SOUL.md** (`data/agent/SOUL.md`) defines who Pernix is — its personality, communication style, and core traits. Edit it freely to match how you want the agent to talk to you.
 
