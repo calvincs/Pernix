@@ -2680,7 +2680,7 @@ def bell_tiers(browser):
     b = _bell(pg)
     pg.screenshot(path=f"{shots}/{tag}-desktop-bell-needs.png")
     titles = [i["title"] for i in b["items"]]
-    coalesced = next((i for i in b["items"] if i["title"] == "Canary probe parked"), None)
+    coalesced = next((i for i in b["items"] if i["title"] == "Canary sweep: 1 of 4 failed (deploy)"), None)
     check(
         "bell",
         "m2: Needs you lists the interrupt first, then the open bell rows, with x3 on the repeat",
@@ -2755,7 +2755,7 @@ def bell_tiers(browser):
     check(
         "bell",
         "m2: an area chip narrows Activity to that area and keeps the other chips",
-        titles == ["Canary probe parked"] and len(b["chips"]) >= 4,
+        titles == ["Canary sweep: 1 of 4 failed (deploy)"] and len(b["chips"]) >= 4,
         {"titles": titles, "chips": b["chips"]},
         "m2",
     )

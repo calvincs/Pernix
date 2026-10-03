@@ -89,6 +89,11 @@ CATEGORIES: dict[str, Category] = {
     "jobs.test_passed": Category("log", legacy_emit="sse"),
     "jobs.test_failed": Category("bell", legacy_urgency="high", legacy_emit="sse"),
     # --- canary suite (synthetic tests; the Canary tab is the surface) -----
+    # One notice per full sweep (deploy, model swap, Run all): a gate failure
+    # is a quiet bell item that coalesces until a clean sweep resolves it;
+    # anything else is a log line.
+    "canary.sweep_failed": Category("bell", coalesce=True),
+    "canary.sweep_result": Category("log"),
     "canary.contaminated": Category("log"),
     # --- skills --------------------------------------------------------------
     "skills.verify_unsafe": Category("bell"),

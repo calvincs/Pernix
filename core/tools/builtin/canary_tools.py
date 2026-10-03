@@ -1,9 +1,9 @@
-"""Pernix — Canary tools (adaptation plan 3.5): manual trigger + status.
+"""Pernix — Canary tools: read-only suite status for the agent.
 
-Registered only when canary_enabled. canary_run enqueues via the scheduler
-and returns immediately — a canary is a full multi-minute pipeline run and
-must never block the calling turn. Denied inside canary sessions (a canary
-spawning canaries is a fork bomb) and workers.
+Registered only when canary_enabled. The agent can read the suite and its
+recent results; it cannot start a run. The `canary_run` tool was retired in
+3.2: canaries run after a deploy or a model swap, or when the user presses
+Run in the Canary tab (POST /api/canary/run).
 """
 
 from __future__ import annotations
@@ -14,27 +14,6 @@ import logging
 from config import settings
 
 logger = logging.getLogger("pernix.tools.canary")
-
-
-def canary_run(name: str, _context: dict | None = None) -> str:
-    """Queue one canary for immediate background execution."""
-    from core.canary import load_canary
-    from core.extensions.scheduling import enqueue_manual_canary
-
-    name = (name or "").strip()
-    if not name:
-        return "Error: name is required."
-    if load_canary(name) is None:
-        from core.canary import scan_canaries
-
-        known = ", ".join(sorted(c.name for c in scan_canaries())) or "(none)"
-        return f"Error: no canary named '{name}'. Known canaries: {known}"
-    if not enqueue_manual_canary(name):
-        return "Error: scheduler unavailable — canary not queued."
-    return (
-        f"Canary '{name}' queued for background execution. Results land in "
-        f"canary_runs (see canary_status) — the run takes as long as the task does."
-    )
 
 
 def canary_status(task: str = "", limit: int = 10, _context: dict | None = None) -> str:
@@ -73,29 +52,6 @@ def canary_status(task: str = "", limit: int = 10, _context: dict | None = None)
 def register(reg) -> None:
     if not settings.canary_enabled:
         return
-    reg.register(
-        name="canary_run",
-        func=canary_run,
-        description=(
-            "Run one golden-task canary in the background (headless full-pipeline "
-            "session scored by its deterministic gates). Use after approving a new "
-            "canary or to spot-check a regression. Returns immediately; check "
-            "canary_status for results."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Canary name (directory under data/canaries)"},
-            },
-            "required": ["name"],
-        },
-        category="evaluation",
-        tags=["canary", "regression", "benchmark", "golden", "sweep", "measure"],
-        timeout=15,
-        parallel_safe=False,
-        safety_level="caution",  # spawns a background LLM pipeline run
-        denied_session_types={"canary", "worker"},
-    )
     reg.register(
         name="canary_status",
         func=canary_status,

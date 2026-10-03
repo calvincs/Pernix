@@ -1035,7 +1035,7 @@ POST /api/canary/run
 ```json
 { "name": "fix-failing-test" }
 ```
-Queues one canary by name, or a **full sweep** (every canary) with `"name": "*"`. Returns `{"queued": ...}`; `400` when `canary_enabled` is off, `404` for an unknown name.
+Queues one canary by name, or a **full sweep** (every canary, recorded as trigger `manual`, reported with one notice) with `"name": "*"`. Returns `{"queued": ...}`; `400` when `canary_enabled` is off, `404` for an unknown name.
 
 ### Create a Canary
 ```

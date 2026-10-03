@@ -12,6 +12,11 @@ from db.database import init_db
 
 logger = logging.getLogger("pernix.api")
 
+# A deploy queues one full canary sweep this long after boot. Restarts inside
+# the window replace the queued job (same job id), so a burst of rebuilds is
+# measured once, after things have settled.
+_DEPLOY_SWEEP_DELAY_S = 900
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -275,8 +280,10 @@ async def lifespan(app: FastAPI):
             _db.set_snooze_state("app_version_seen", _stamp)
             # First boot ever (no stamp) is a fresh install, not a deploy.
             if _seen and settings.canary_enabled:
+                # Debounced: the sweep waits 15 minutes, and a restart inside
+                # that window replaces the queued job instead of adding one.
                 logger.info("Deploy detected (%s -> %s): full canary sweep queued", _seen, _stamp)
-                enqueue_full_sweep("deploy", delay_s=300)
+                enqueue_full_sweep("deploy", delay_s=_DEPLOY_SWEEP_DELAY_S)
     except Exception as e:
         logger.warning("Deploy detection failed (continuing): %s", e)
 
