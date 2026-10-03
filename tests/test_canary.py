@@ -116,20 +116,6 @@ def test_sweep_queries_exclude_canary():
     assert canary not in {s["id"] for s in db.get_unrefined_sessions(min_idle_minutes=0)}
 
 
-async def test_candor_early_returns_for_canary(monkeypatch):
-    from sessions.hooks import _maybe_candor
-
-    called = []
-    monkeypatch.setattr(
-        "core.extensions.candor.bridge.get_candor_bridge",
-        lambda: called.append(1),
-        raising=False,
-    )
-    # A canary session dict short-circuits before any candor import is used.
-    await _maybe_candor("sid", {"session_type": "canary"}, session_obj=SimpleNamespace())
-    assert not called
-
-
 async def test_distill_skipped_for_canary(monkeypatch):
     from sessions import hooks
 

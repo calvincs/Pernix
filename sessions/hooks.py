@@ -26,10 +26,6 @@ logger = logging.getLogger("pernix.sessions.hooks")
 # turn while keeping the read bounded on a long-lived session.
 REFLECT_TAIL_MESSAGES = 400
 
-# Failure text carried into the gate trace event. Ledger-safe: enough to name
-# the failure, short enough that an append-only daily JSONL stays readable.
-GATE_EXCERPT_CHARS = 200
-
 
 def _strip_thinking(text: str) -> str:
     """Strip LLM thinking/reasoning blocks from response content.
@@ -87,14 +83,6 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
     # Evaluation: feature QA against acceptance criteria
     if settings.eval_auto and session_obj:
         await _maybe_evaluate(session_id, session, emit=emit, session_obj=session_obj)
-
-    # Candor: feed this turn's operational outcomes to the add-on store.
-    # Runs after reflect so the verdict is available. Mechanical, no LLM.
-    # When the grade is deferred there is no verdict yet: the tool/termination
-    # outcomes go now, and _deferred_candor emits the verdict and experience
-    # observations when the background grade lands.
-    if settings.candor_enabled and session_obj:
-        await _maybe_candor(session_id, session, session_obj=session_obj)
 
 
 async def _cleanup_stale_questions(session_id: str, session_obj=None) -> None:
@@ -244,84 +232,6 @@ async def _maybe_distill(session_id: str, session: dict) -> None:
         logger.warning("Distillation failed for %s: %s", session_id, e)
 
 
-async def _maybe_candor(session_id: str, session: dict, session_obj=None) -> None:
-    """Emit this turn's operational outcomes to the Candor add-on store.
-
-    Delta-tracked against session_obj.turn.candor_emitted (keyed by turn id) so a
-    reflect-retry re-entry — post-hooks run once per attempt — never
-    double-observes the earlier attempt's tool calls. Failure is never fatal:
-    a Candor problem logs a warning and the turn completes normally.
-    """
-    # Canary isolation (plan §5): deliberately-hard synthetic tasks would
-    # poison the reliability ledger Phase 4 consumes. §10.9 revisits a
-    # separate ledger namespace for calibration.
-    if session.get("session_type") == "canary":
-        return
-
-    import time as _time
-
-    try:
-        from core.extensions.candor.bridge import get_candor_bridge
-        from core.extensions.candor.emit import build_turn_observations
-
-        turn_id = getattr(session_obj, "current_turn_user_msg_id", None)
-        prev = session_obj.turn.candor_emitted
-        if not isinstance(prev, dict) or prev.get("turn") != turn_id:
-            prev = {"turn": turn_id, "tools": {}}
-
-        verdict = failure_cause = None
-        experience: dict = {}
-        stash = session_obj.turn.candor_reflect
-        if stash and stash[0] == turn_id:
-            verdict, failure_cause = stash[1], stash[2]
-            if len(stash) > 3 and isinstance(stash[3], dict):
-                experience = stash[3]
-
-        model = getattr(session_obj, "model_override", None) or settings.llm_model or "default"
-        observations, emitted = build_turn_observations(
-            tool_summary=session_obj.turn.tool_summary or {},
-            already_emitted=prev["tools"],
-            termination_reason=getattr(session_obj, "termination_reason", None),
-            reflect_verdict=verdict,
-            failure_cause=failure_cause,
-            model=model,
-            session_kind=session.get("session_type") or "normal",
-            is_retry=bool(session_obj.turn.reflect_count),
-            ts_ms=int(_time.time() * 1000),
-            max_obs=settings.candor_max_obs_per_turn,
-        )
-        session_obj.turn.candor_emitted = {"turn": turn_id, "tools": emitted}
-        if len(observations) >= settings.candor_max_obs_per_turn:
-            logger.warning(
-                "Candor emission hit the per-turn cap (%d) — excess dropped", settings.candor_max_obs_per_turn
-            )
-
-        # Interaction-quality observations from reflect's experience read.
-        # A handful per turn; they share the same per-turn cap as tool obs.
-        if experience and settings.reflect_experience:
-            from core.extensions.candor.emit import build_experience_observations
-
-            observations.extend(
-                build_experience_observations(
-                    experience=experience,
-                    model=model,
-                    session_kind=session.get("session_type") or "normal",
-                    is_retry=bool(session_obj.turn.reflect_count),
-                    ts_ms=int(_time.time() * 1000),
-                )
-            )
-            observations = observations[: settings.candor_max_obs_per_turn]
-        if observations:
-            # Bounded wait: post-hooks block turn completion. If the bridge
-            # executor is busy (e.g. a gate sweep is finishing), the job still
-            # runs to completion after we stop waiting — data is late, not lost.
-            await asyncio.wait_for(get_candor_bridge().record(observations), timeout=10)
-    except asyncio.TimeoutError:
-        logger.warning("Candor record still queued after 10s — continuing without waiting")
-    except Exception as e:
-        logger.warning("Candor emission failed for %s: %s", session_id, e)
-
-
 def _broadcast_reflect_notification(
     session_id: str,
     session: dict,
@@ -407,78 +317,7 @@ async def _run_turn_gates(session_id: str, session: dict, session_obj, emit=None
                 "names_broken": [r.name for r in results if r.broken],
             }
         )
-    try:
-        await _log_gate_outcomes(session_id, session, session_obj, results, attempt)
-    except Exception as e:
-        # Belt-and-braces over the logger's own per-surface guards: this
-        # function's contract is that it never raises, and gate results drive
-        # the clamp and the retry fallback. Observability never gates a turn.
-        logger.warning("Gate outcome logging failed for %s: %s", session_id, e)
     return results
-
-
-async def _log_gate_outcomes(session_id: str, session: dict, session_obj, results: list, attempt: int) -> None:
-    """Record this attempt's gate verdicts where hypotheses can reach them.
-
-    Gate outcomes used to survive only inside a post-mortem's extra_payload,
-    and only on turns where reflect actually ran. Since bfbaadd deferred the
-    interactive grade to an observe-only background task, gates are the sole
-    synchronous retry path a "normal" session has — and the one part of that
-    loop with no standing ledger, so every TELOS hypothesis about it was
-    un-evaluable by construction (the defect class the 2026-08-16 question
-    audit found in anomaly minting).
-
-    One trace event and one gate_ok observation PER GATE PER ATTEMPT, never
-    an attempts array: the fail -> retry -> pass arc has to be matchable as a
-    sequence. reflect_mode rides on both surfaces so the September
-    calibration review can tell the two grading regimes apart.
-
-    Fail soft on both surfaces, independently: a ledger problem must never
-    cost the turn, and a broken trace must not suppress the observation.
-    """
-    if session.get("session_type") == "canary":
-        # Canary isolation, as in _maybe_candor / on_post_task: synthetic
-        # turns run deliberately-hard gates, and neither the trace nor the
-        # reliability ledger should learn from them.
-        return
-
-    session_type = session.get("session_type") or "normal"
-    reflect_mode = "deferred" if _reflect_is_deferred(session) else "sync"
-    gates = [
-        {
-            "name": r.name,
-            "passed": bool(r.passed),
-            # The tail is where a failing command says why; runner-level
-            # problems (timeout, policy refusal) produce no output at all.
-            "excerpt": "" if r.passed else ((r.output_tail or r.error or "")[-GATE_EXCERPT_CHARS:]).strip(),
-        }
-        for r in results
-    ]
-
-    if settings.candor_enabled:
-        import time as _time
-
-        try:
-            from core.extensions.candor.bridge import get_candor_bridge
-            from core.extensions.candor.emit import build_gate_observations
-
-            observations = build_gate_observations(
-                gates=gates,
-                attempt=attempt,
-                model=getattr(session_obj, "model_override", None) or settings.llm_model or "default",
-                session_kind=session_type,
-                reflect_mode=reflect_mode,
-                ts_ms=int(_time.time() * 1000),
-            )
-            if observations:
-                # Bounded wait, as in _maybe_candor: post-hooks block turn
-                # completion, and a busy bridge executor still finishes the
-                # job after we stop waiting — data is late, not lost.
-                await asyncio.wait_for(get_candor_bridge().record(observations), timeout=10)
-        except asyncio.TimeoutError:
-            logger.warning("Candor gate record still queued after 10s — continuing without waiting")
-        except Exception as e:
-            logger.warning("Candor gate emission failed for %s: %s", session_id, e)
 
 
 def _same_failure_repeating(session_id: str, turn_started_iso: str | None = None) -> str | None:
@@ -655,10 +494,6 @@ class _DeferredGrade:
     termination_reason: str | None = None
     prior_termination_reasons: list = field(default_factory=list)
     gate_results: list = field(default_factory=list)
-    # Candor context, captured here because both move after the turn: the
-    # model override is restored at turn end, and the session row is re-read.
-    model: str = ""
-    session_kind: str = "normal"
 
 
 # The one staleness reason next-turn grading does NOT override: the session
@@ -826,8 +661,6 @@ async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj
         termination_reason=getattr(session_obj, "termination_reason", None),
         prior_termination_reasons=termination_history[1:] if termination_history else [],
         gate_results=list(gate_results or []),
-        model=getattr(session_obj, "model_override", None) or settings.llm_model or "default",
-        session_kind=session.get("session_type") or "normal",
         turn_last_msg_id=turn_last_msg_id,
     )
 
@@ -886,67 +719,6 @@ async def _deferred_reflect_task(session_obj, snap: _DeferredGrade) -> None:
         await _run_deferred_reflect(session_obj, snap, next_user_message=next_user_message)
 
 
-async def _deferred_candor(snap: _DeferredGrade, result) -> None:
-    """Feed the deferred verdict and experience read to Candor.
-
-    The synchronous _maybe_candor already emitted this turn's tool and
-    termination outcomes — with no verdict, because the grade hadn't run yet.
-    Verdict and interaction-quality are the two families only reflect can
-    produce, so without this every interactive turn would lose exactly the
-    signal interactive sessions exist to carry (sentiment, friction,
-    clarification loops).
-
-    Tool/turn observations are suppressed by handing the builder an empty
-    summary rather than by delta bookkeeping: the per-turn ledger
-    (session.turn.candor_emitted / candor_reflect) belongs to a turn that is
-    over, and the deferred path never writes to session.turn.
-    """
-    if not settings.candor_enabled or snap.session_kind == "canary":
-        return
-
-    import time as _time
-
-    try:
-        from core.extensions.candor.bridge import get_candor_bridge
-        from core.extensions.candor.emit import build_experience_observations, build_turn_observations
-
-        ts_ms = int(_time.time() * 1000)
-        # attempt > 1 ⟺ turn.reflect_count was non-zero when this was snapshotted.
-        is_retry = snap.attempt > 1
-        observations, _emitted = build_turn_observations(
-            tool_summary={},  # already observed on the synchronous path
-            already_emitted={},
-            termination_reason=None,  # ditto
-            reflect_verdict=result.verdict,
-            failure_cause=result.failure_cause,
-            model=snap.model,
-            session_kind=snap.session_kind,
-            is_retry=is_retry,
-            ts_ms=ts_ms,
-            max_obs=settings.candor_max_obs_per_turn,
-        )
-        if result.experience and settings.reflect_experience:
-            observations.extend(
-                build_experience_observations(
-                    experience=result.experience,
-                    model=snap.model,
-                    session_kind=snap.session_kind,
-                    is_retry=is_retry,
-                    ts_ms=ts_ms,
-                )
-            )
-        if not observations:
-            return
-        observations = observations[: settings.candor_max_obs_per_turn]
-        # Bounded wait as on the sync path, though nothing is blocked on us
-        # here: if the executor is busy the job still completes, just later.
-        await asyncio.wait_for(get_candor_bridge().record(observations), timeout=10)
-    except asyncio.TimeoutError:
-        logger.warning("Deferred Candor record still queued after 10s — continuing without waiting")
-    except Exception as e:
-        logger.warning("Deferred Candor emission failed for %s: %s", snap.session_id, e)
-
-
 def _deferred_verdict_notification(session_id: str, result) -> None:
     """Surface a non-pass deferred verdict — the grade alone has no effector.
 
@@ -983,7 +755,7 @@ async def _run_deferred_reflect(session_obj, snap: _DeferredGrade, next_user_mes
     """Grade the snapshotted turn, observe-only.
 
     Writes exactly what the synchronous path writes — reflect row, post-mortem,
-    lessons, experience, user observations, Candor — and nothing else. No retry flag,
+    lessons, experience, user observations — and nothing else. No retry flag,
     no state transition, no write to session.turn: by the time this runs the
     turn is finished, and a new one may already own the session.
 
@@ -1057,7 +829,6 @@ async def _run_deferred_reflect(session_obj, snap: _DeferredGrade, next_user_mes
             "outcome_source": "next_turn" if next_user_message else "llm",
         }
         await asyncio.to_thread(db.add_message, session_id, "reflect", json.dumps(reflect_event))
-        await _deferred_candor(snap, result)
 
         session_obj.emit_event({"type": "reflect.deferred", **reflect_event})
         # The notification's whole ask is "reply in the session so the agent
@@ -1299,17 +1070,6 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             prior_termination_reasons=prior_reasons,
             gate_results=gate_results,
             tool_summary_attempts=session_obj.turn.tool_summary_attempts or None,
-        )
-
-        # Stash the verdict for _maybe_candor (which runs after reflect).
-        # Keyed by turn id so a turn where reflect is skipped can't inherit a
-        # stale verdict from an earlier turn. The experience dict rides along
-        # so interaction-quality observations share the same staleness rule.
-        session_obj.turn.candor_reflect = (
-            session_obj.current_turn_user_msg_id,
-            result.verdict,
-            result.failure_cause,
-            result.experience,
         )
 
         # If trial hints were injected and reflect now reports pass, count

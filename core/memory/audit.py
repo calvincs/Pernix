@@ -7,10 +7,9 @@ the measurement: sample one already-distilled session per run (budgeted per
 UTC day), re-derive the durable facts a future session would need from the
 raw transcript, and check each against the memory store's dedup gate.
 
-Two outputs per fact:
-  - a Candor ``distill_coverage(*)`` frequency observation (covered=True),
-    plus a ``distill_miss_kind`` categorical for misses — so lens degradation
-    surfaces in the intel brief and becomes dreamable evidence;
+Two outputs per run:
+  - coverage counts (``facts`` / ``missed`` in the result, which snooze
+    folds into its cycle stats);
   - repair: missed facts are written back to memory (source="audit"), so the
     audit fixes what it measures instead of only counting it.
 
@@ -32,7 +31,7 @@ The two now sit at deliberately different thresholds:
 - **Coverage** stays on the store's own dedup gate. That is the point of the
   metric: it asks whether memory contains the fact *under the same lens
   distillation writes through*, so a drift in what that lens accepts is
-  exactly what should show up in ``distill_coverage``.
+  exactly what should show up in the miss count.
 - **Repair** must clear a strictly stronger bar — it mutates the store, and
   writing a paraphrase of a present fact is worse than leaving a real miss
   unrepaired for one cycle. A candidate is written back only if it also fails
@@ -224,47 +223,6 @@ def _is_absent(store, content: str) -> bool:
     return True
 
 
-def _emit_coverage_observations(results: list[dict]) -> None:
-    """Fold per-fact coverage into the Candor ledger (fire-and-forget).
-
-    Labels and kinds only — fact prose never enters the append-only chain
-    (same rule as build_memory_observations)."""
-    if not settings.candor_enabled or not results:
-        return
-    try:
-        from core.extensions.candor.bridge import get_candor_bridge
-
-        ts_ms = int(time.time() * 1000)
-        observations: list[dict] = []
-        for r in results:
-            observations.append(
-                {
-                    "pred": "distill_coverage",
-                    "args": ["*"],
-                    "stmt_type": "frequency",
-                    "outcome": bool(r["covered"]),
-                    "ctx": {"kind": r["kind"]},
-                    "actor": "verifier:audit",
-                    "ts": ts_ms,
-                }
-            )
-            if not r["covered"]:
-                observations.append(
-                    {
-                        "pred": "distill_miss_kind",
-                        "args": ["*"],
-                        "stmt_type": "categorical",
-                        "value": r["kind"],
-                        "ctx": {},
-                        "actor": "verifier:audit",
-                        "ts": ts_ms,
-                    }
-                )
-        get_candor_bridge().record_nowait(observations)
-    except Exception as e:
-        logger.debug("distill audit: candor emission skipped: %s", e)
-
-
 async def run_audit(store, is_cancelled) -> dict:
     """One audit unit: pick a session, re-derive facts, score coverage, repair.
 
@@ -323,7 +281,6 @@ async def run_audit(store, is_cancelled) -> dict:
     out["facts"] = len(results)
     misses = [r for r in results if not r["covered"]]
     out["missed"] = len(misses)
-    _emit_coverage_observations(results)
 
     # Repair: write back only the misses the wider net also fails to find.
     # add_entry's gate cannot be the safety net here — it is the very function

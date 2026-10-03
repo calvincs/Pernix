@@ -114,13 +114,13 @@ class TurnState:
     # --- Tool bookkeeping ---
     # Cumulative per-tool execution summary for reflect diagnostic recovery
     # (LogAct-inspired). Accumulated by the agent loop across every attempt of
-    # the turn; read by reflect and Candor at turn end.
+    # the turn; read by reflect at turn end.
     tool_summary: dict = field(default_factory=dict)
     # Per-attempt view of the same calls (C2): list indexed by attempt-1, each
     # a {tool: {"calls": n, "failures": n}} dict. Exists because reflect's
     # scope-sensitive rules (thrashing's distinct-tool count, per-attempt
     # honesty) misgrade when they read multi-attempt totals — the cumulative
-    # dict above stays authoritative for Candor and the retry ladder.
+    # dict above stays authoritative for the turn summary and the retry ladder.
     tool_summary_attempts: list = field(default_factory=list)
 
     # --- Owned by other subsystems, declared here so the shape is visible ---
@@ -128,12 +128,6 @@ class TurnState:
     # a retry can reuse a prior failure when watch_paths are unchanged. Typed
     # Any to keep sessions/ from importing core.gates.
     gate_history: Any = None
-    # sessions.hooks._maybe_candor delta-tracking: {"turn": id, "tools": {...}}
-    # so a reflect-retry re-entry never double-observes the earlier attempt.
-    candor_emitted: dict | None = None
-    # (turn_id, verdict, failure_cause, experience) stashed by _maybe_reflect
-    # for _maybe_candor, which runs after it.
-    candor_reflect: tuple | None = None
     # Skill-proposal ids injected as trial hints this turn; the post-verdict
     # success bump reads them back.
     injected_trial_proposals: list = field(default_factory=list)
@@ -151,7 +145,7 @@ class TurnState:
 def turn_state(session_obj) -> TurnState:
     """Read a session-like object's TurnState, tolerating objects that have none.
 
-    The peripheral hooks (Candor, the executor's retry-exclusion guard,
+    The peripheral hooks (the executor's retry-exclusion guard,
     the canary runner) accept duck-typed or partially-built session objects and
     used `getattr(session, "<field>", <default>)` for exactly that reason.
     Returning a throwaway TurnState preserves that forgiveness now that the

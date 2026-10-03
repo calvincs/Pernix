@@ -112,35 +112,6 @@ def test_reroute_ignores_categorical_or_missing_prediction(bridge):
 
 
 # ---------------------------------------------------------------------------
-# _record_fetch
-# ---------------------------------------------------------------------------
-
-
-def test_record_fetch_emits_domain_and_aggregate(bridge):
-    web._record_fetch("cnbc.com", True, method="http")
-    assert len(bridge.recorded) == 1
-    obs = bridge.recorded[0]
-    assert {tuple(o["args"]) for o in obs} == {("cnbc.com",), ("*",)}
-    for o in obs:
-        assert o["pred"] == "fetch_ok"
-        assert o["outcome"] is True
-        assert o["ctx"]["method"] == "http"
-    aggregate = next(o for o in obs if o["args"] == ["*"])
-    assert aggregate["ctx"]["target"] == "cnbc.com"
-
-
-def test_record_fetch_inert_without_candor(bridge, monkeypatch):
-    monkeypatch.setattr(settings, "candor_enabled", False)
-    web._record_fetch("cnbc.com", True, method="http")
-    assert bridge.recorded == []
-
-
-def test_record_fetch_skips_none_domain(bridge):
-    web._record_fetch(None, True, method="browse")
-    assert bridge.recorded == []
-
-
-# ---------------------------------------------------------------------------
 # http_get integration (no network: httpx and _validate_url are stubbed)
 # ---------------------------------------------------------------------------
 
@@ -218,41 +189,6 @@ def test_http_get_force_overrides_reroute(bridge, offline_http):
     out, status = web.http_get("https://forbes.com/article", force=True)
     assert out == "real content"
     assert status["fetch_status"] == "ok"
-    assert len(bridge.recorded) == 1
-    assert all(o["outcome"] is True for o in bridge.recorded[0])
-
-
-def test_http_get_records_success(bridge, offline_http):
-    bridge.prediction = None  # no admitted fact yet — first contact
-    _FakeClient.page = "a normal page"
-    assert web.http_get("https://example.com/") == ("a normal page", _ok("https://example.com/", 13))
-    assert len(bridge.recorded) == 1
-    assert all(o["outcome"] is True for o in bridge.recorded[0])
-
-
-def test_http_get_records_bot_wall_as_failure(bridge, offline_http):
-    # Bot walls answer 200 with challenge HTML — that is a failed fetch.
-    bridge.prediction = None
-    _FakeClient.page = "<html>Checking your browser before accessing…</html>"
-    out, _ = web.http_get("https://example.com/")
-    assert "Checking your browser" in out
-    assert len(bridge.recorded) == 1
-    assert all(o["outcome"] is False for o in bridge.recorded[0])
-
-
-def test_http_get_records_http_error_as_failure(bridge, offline_http, monkeypatch):
-    bridge.prediction = None
-
-    class _ErrClient(_FakeClient):
-        def stream(self, method, url, timeout=None):
-            raise RuntimeError("boom 503")
-
-    monkeypatch.setattr("httpx.Client", _ErrClient)
-    out, status = web.http_get("https://example.com/")
-    assert out.startswith("Error fetching")
-    assert status["fetch_status"] == "error"
-    assert len(bridge.recorded) == 1
-    assert all(o["outcome"] is False for o in bridge.recorded[0])
 
 
 def test_http_get_policy_block_records_nothing(bridge, monkeypatch):

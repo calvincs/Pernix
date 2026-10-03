@@ -424,45 +424,6 @@ _TEXTUAL_CONTENT_TYPES = {
 }
 
 
-def _record_fetch(domain: str | None, ok: bool, method: str) -> None:
-    """Log a fetch outcome to Candor. Fire-and-forget — never blocks the fetch.
-
-    Only actual attempts land here: SSRF/policy blocks and user cancellations
-    say nothing about the domain and must not count against it.
-    """
-    if domain is None or not settings.candor_enabled:
-        return
-    try:
-        from core.extensions.candor.bridge import get_candor_bridge
-
-        ts = int(time.time() * 1000)
-        ctx = {"method": method}
-        get_candor_bridge().record_nowait(
-            [
-                {
-                    "pred": "fetch_ok",
-                    "args": [domain],
-                    "stmt_type": "frequency",
-                    "outcome": ok,
-                    "ctx": ctx,
-                    "actor": "agent:pernix",
-                    "ts": ts,
-                },
-                {
-                    "pred": "fetch_ok",
-                    "args": ["*"],
-                    "stmt_type": "frequency",
-                    "outcome": ok,
-                    "ctx": {**ctx, "target": domain},
-                    "actor": "agent:pernix",
-                    "ts": ts,
-                },
-            ]
-        )
-    except Exception as e:
-        logger.debug("fetch_ok emission failed: %s", e)
-
-
 def _reliability_reroute(domain: str | None) -> str | None:
     """Deterministic pre-flight: refuse a raw fetch of a domain whose calibrated
     fetch_ok rate is below threshold, before spending a timeout on its bot wall.
@@ -621,7 +582,6 @@ def http_get(url: str, force: bool = False, _context: dict | None = None):
                 # from inside an exchange the deadline had already ended.
                 op = _http_op_timeout(deadline - time.monotonic())
                 if op is None:
-                    _record_fetch(domain, False, method="http")
                     return _fetch_outcome(
                         f"Error fetching {url}: exceeded the {_HTTP_GET_DEADLINE_S:.0f}s overall fetch deadline",
                         "deadline",
@@ -642,7 +602,6 @@ def http_get(url: str, force: bool = False, _context: dict | None = None):
 
                     declared = resp.headers.get("content-length")
                     if declared and declared.isdigit() and int(declared) > cap * _OVERSIZE_FACTOR:
-                        _record_fetch(domain, False, method="http")
                         return _fetch_outcome(
                             f"Error fetching {url}: response is {int(declared)} bytes, over the fetch cap",
                             "refused",
@@ -652,7 +611,6 @@ def http_get(url: str, force: bool = False, _context: dict | None = None):
 
                     ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
                     if ctype and not (ctype.startswith("text/") or ctype in _TEXTUAL_CONTENT_TYPES):
-                        _record_fetch(domain, False, method="http")
                         return _fetch_outcome(
                             f"Error fetching {url}: content-type {ctype} is not text",
                             "refused",
@@ -690,23 +648,19 @@ def http_get(url: str, force: bool = False, _context: dict | None = None):
                     raw = b"".join(chunks)
                     content = raw.decode(resp.encoding or "utf-8", errors="replace")
 
-                if stop_status != "cancelled":
-                    _record_fetch(domain, not _WALL_RE.search(content[:8000]), method="http")
                 if len(content) > cap and not stop_reason:
                     stop_reason, stop_status = f"the {cap:,}-byte fetch cap", "capped"
                 return _finish_fetch(url, content, cap, stop_reason, stop_status, declared)
-            _record_fetch(domain, False, method="http")
             return _fetch_outcome(f"Error fetching {url}: too many redirects", "error", url, source_complete=False)
     except ValueError as e:
         return _fetch_outcome(f"Error: redirect blocked: {e}", "refused", url, source_complete=False)
     except Exception as e:
         if _fetch_cancelled(_context):
-            # A socket torn down by our own unwind is not a fact about the
-            # domain, and must not count against its fetch_ok rate.
+            # A socket torn down by our own unwind is a cancellation, not a
+            # fetch failure: say so.
             return _fetch_outcome(
                 f"Error fetching {url}: cancelled during acquisition ({e})", "cancelled", url, source_complete=False
             )
-        _record_fetch(domain, False, method="http")
         status = "deadline" if isinstance(e, httpx.TimeoutException) else "error"
         return _fetch_outcome(f"Error fetching {url}: {e}", status, url, source_complete=False)
 
@@ -1081,15 +1035,9 @@ def browse_web(url: str, _context: dict | None = None) -> str:
         fut.cancel()
         result = f"Error: browse_web timed out after {settings.browser_timeout}s for {url}"
     except _futures.CancelledError:
-        # A cancellation says nothing about the domain — don't record it.
         return "Error: browse_web was cancelled"
     except Exception as e:
         result = f"Error navigating to {url}: {e}"
-    _record_fetch(
-        _fetch_domain(url),
-        not result.startswith("Error") and not _WALL_RE.search(result[:8000]),
-        method="browse",
-    )
     return result
 
 
