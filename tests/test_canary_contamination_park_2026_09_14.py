@@ -26,17 +26,8 @@ import pytest
 from core.canary.contamination import contamination_record
 from core.canary.maintain import _CONTAMINATION_WINDOW, check_suite_health, run_maintenance
 from core.canary.parser import load_canary, scan_canaries
-from core.canary.propose import isolation_violation, materialize_canary, queue_canary_proposals
+from core.canary.propose import isolation_violation, materialize_canary
 from db import models as db
-
-
-def _proposal_rows() -> int:
-    """Rows in the retired adaptive proposal queue (the table outlived it)."""
-    from db.database import connect_sessions
-
-    with connect_sessions() as conn:
-        return conn.execute("SELECT COUNT(*) FROM adaptive_proposals").fetchone()[0]
-
 
 _SPEC = {
     "name": "clean-task",
@@ -52,7 +43,6 @@ def _canaries_tmp(monkeypatch, tmp_path):
     monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
     monkeypatch.setattr("config.settings.canary_enabled", True)
     monkeypatch.setattr("config.settings.canary_auto_maintain", True)
-    monkeypatch.setattr("config.settings.canary_auto_admit", False)
     monkeypatch.setattr("config.settings.canary_vetting_runs", 3)
     monkeypatch.setattr("config.settings.canary_park_after_passes", 5)
 
@@ -64,7 +54,11 @@ def _base() -> Path:
 
 
 def _mk(name: str, vetting: bool = False) -> None:
-    got, err = materialize_canary(dict(_SPEC, name=name), vetting=vetting)
+    got, err = materialize_canary(dict(_SPEC, name=name))
+    if got and vetting:
+        from core.canary.maintain import _rewrite_frontmatter
+
+        _rewrite_frontmatter(_base() / name / "CANARY.md", {"flaky": True, "tags": ["auto-admitted", "vetting"]})
     assert got == name, err
 
 
@@ -125,16 +119,6 @@ def test_a_contaminated_proposal_never_becomes_a_file():
     assert got is None
     assert "breaks canary isolation" in err
     assert load_canary("workspace-organizer-evidence-gate", base=_base()) is None
-
-
-def test_the_rejection_is_logged_not_queued():
-    """Until 3.2 an isolation-breaking spec was filed as a resolved
-    'rejected' proposal; the proposal queue went with the adaptive layer, so
-    it is now logged and dropped."""
-    bad = dict(_SPEC, name="workspace-organizer", prompt="Organise ./data/workspace by evidence type.")
-    assert queue_canary_proposals([bad], "skill-change", session_id="s-1") == 0
-    assert _proposal_rows() == 0
-    assert load_canary("workspace-organizer", base=_base()) is None
 
 
 # ---------------------------------------------------------------------------

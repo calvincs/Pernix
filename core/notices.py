@@ -95,7 +95,6 @@ CATEGORIES: dict[str, Category] = {
     "canary.suite_chronic": Category("log"),
     "canary.suite_unhealthy": Category("bell", coalesce=True, legacy_urgency="high"),
     "canary.maintenance": Category("log", dedup_daily=True),
-    "canary.auto_admitted": Category("log"),
     "canary.stale": Category("log"),
     # --- skills --------------------------------------------------------------
     "skills.verify_unsafe": Category("bell"),

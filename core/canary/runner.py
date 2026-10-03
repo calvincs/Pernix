@@ -40,14 +40,11 @@ _POLL_INTERVAL_S = 1.0
 # The canary sandbox: every canary session runs under this tool allowlist
 # (enforced at the agent schema intersection, scout filtering, and the
 # executor backstop — the same three points as scheduled-job charters).
-# Canary prompts include machine-authored content — auto-admitted tasks,
-# skill-verify runs whose injected SKILL.md may instruct mutating actions —
-# so the session gets computation and reads only: workspace/file/search
-# tools plus read-only skill/tool discovery, so a skill-verify canary can
-# load the skill under test. No workers, no jobs, no notifications, no
-# skill/tool mutation. Bash remains — the seed tasks need it — so this is a
-# strong fence, not a jail; the verify-gate allowlist proof narrows what
-# machine-authored canaries can make of it.
+# A canary may load a skill whose SKILL.md instructs mutating actions, so
+# the session gets computation and reads only: workspace/file/search tools
+# plus read-only skill/tool discovery, so a canary can load the skill under
+# test. No workers, no jobs, no notifications, no skill/tool mutation. Bash
+# remains — the seed tasks need it — so this is a strong fence, not a jail.
 #
 # Three names were REMOVED by the 2026-09-04 trust-loop hardening (W5):
 #

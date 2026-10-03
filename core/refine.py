@@ -331,12 +331,10 @@ def _latest_reflect_verdict(messages: list[dict]) -> dict | None:
     return None
 
 
-def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], bool]:
-    """Parse the LLM JSON into (proposals, lessons, canary_proposals,
-    nothing_actionable). Tolerates fences. canary_proposals (§12.2) ride the
-    same call and the same parse — an empty array while canaries are off or
-    nothing qualifies. A stray `adaptive_edits` key (the contract retired in
-    3.2) is ignored."""
+def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], bool]:
+    """Parse the LLM JSON into (proposals, lessons, nothing_actionable).
+    Tolerates fences. Stray `adaptive_edits` and `canary_proposals` keys
+    (contracts retired in 3.2) are ignored."""
     text = (raw or "").strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -345,20 +343,17 @@ def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], 
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning("refine: could not parse LLM output as JSON: %s\n%s", e, text[:500])
-        return [], [], [], False
+        return [], [], False
     if not isinstance(data, dict):
-        return [], [], [], False
+        return [], [], False
     proposals = data.get("proposals", []) or []
     lessons = data.get("lessons", []) or []
-    canary_proposals = data.get("canary_proposals", []) or []
     if not isinstance(proposals, list):
         proposals = []
     if not isinstance(lessons, list):
         lessons = []
-    if not isinstance(canary_proposals, list):
-        canary_proposals = []
     nothing_actionable = bool(data.get("nothing_actionable"))
-    return proposals, lessons, canary_proposals, nothing_actionable
+    return proposals, lessons, nothing_actionable
 
 
 def _build_user_content(
@@ -519,10 +514,6 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
     client = get_llm_client()
 
     system_prompt = REFINE_PROMPT
-    if settings.canary_enabled:
-        from core.canary.propose import CANARY_PROPOSALS_PROMPT
-
-        system_prompt = system_prompt + CANARY_PROPOSALS_PROMPT
 
     try:
         response = await client.chat(
@@ -539,16 +530,8 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
         stats["skipped_reason"] = f"llm_error:{type(e).__name__}"
         return stats
 
-    proposals, lessons, canary_proposals, nothing_actionable = _parse_refine_output(raw)
+    proposals, lessons, nothing_actionable = _parse_refine_output(raw)
     stats["nothing_actionable"] = nothing_actionable
-
-    if canary_proposals and settings.canary_enabled:
-        try:
-            from core.canary.propose import queue_canary_proposals
-
-            stats["canary_proposed"] = queue_canary_proposals(canary_proposals, "refine", session_id=session_id)
-        except Exception as e:
-            logger.warning("refine: canary proposal queueing failed: %s", e)
 
     # Persist proposals only when an active skill is identified. Since the
     # watermark re-arms (a session can be refined again after it grows),

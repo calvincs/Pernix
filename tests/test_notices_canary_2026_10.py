@@ -1,7 +1,7 @@
 """Canary and skill-verify producers go through core/notices.py (2026-10).
 
 Before the registry these sites wrote bell rows directly, each picking its own
-urgency: every contaminated run, retired probe, auto-admission, stale nudge and
+urgency: every contaminated run, retired probe, stale nudge and
 maintenance summary landed in the bell, which is why ~95% of bell items were
 self-maintenance receipts. Pinned here: each producer's category and the tier
 it lands in, that the two pre-existing dedup keys still write (and honour) the
@@ -25,7 +25,7 @@ from core.canary import contamination
 from core.canary.contamination import contamination_record
 from core.canary.maintain import _CONTAMINATION_WINDOW, _report_suite_health, run_maintenance
 from core.canary.parser import load_canary
-from core.canary.propose import materialize_canary, queue_canary_proposals
+from core.canary.propose import materialize_canary
 from db import models as db
 
 _SPEC = {
@@ -42,7 +42,6 @@ def _canaries_tmp(monkeypatch, tmp_path):
     monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
     monkeypatch.setattr("config.settings.canary_enabled", True)
     monkeypatch.setattr("config.settings.canary_auto_maintain", True)
-    monkeypatch.setattr("config.settings.canary_auto_admit", False)
     monkeypatch.setattr("config.settings.canary_vetting_runs", 3)
     monkeypatch.setattr("config.settings.canary_park_after_passes", 5)
 
@@ -54,7 +53,7 @@ def _base() -> Path:
 
 
 def _mk(name: str) -> None:
-    got, err = materialize_canary(dict(_SPEC, name=name), vetting=False)
+    got, err = materialize_canary(dict(_SPEC, name=name))
     assert got == name, err
 
 
@@ -105,7 +104,7 @@ def test_a_contaminated_run_is_a_log_line_with_its_session():
 def test_a_retired_probe_is_a_log_line():
     _mk("probe-x")
     md = _base() / "probe-x" / "CANARY.md"
-    md.write_text(md.read_text().replace("flaky: false", "flaky: false\nmax_runs: 1", 1))
+    md.write_text(md.read_text().replace("timeout: 600", "timeout: 600\nmax_runs: 1", 1))
     db.add_canary_run(task="probe-x", trigger="scheduled", session_id=None, gate_results_json="[]", passed=True)
     run_maintenance()
     rows = _rows("canary.probe_retired")
@@ -141,14 +140,6 @@ def test_maintenance_summary_is_a_log_line():
     rows = _rows("canary.maintenance")
     assert len(rows) == 1 and rows[0]["tier"] == "log"
     assert _bell("canary.maintenance") == []
-
-
-def test_auto_admission_is_a_log_line(monkeypatch):
-    monkeypatch.setattr("config.settings.canary_auto_admit", True)
-    monkeypatch.setattr("core.extensions.scheduling.enqueue_manual_canary", lambda name: True)
-    assert queue_canary_proposals([dict(_SPEC, name="admitted")], "refine", session_id="s-1") == 1
-    rows = _rows("canary.auto_admitted")
-    assert len(rows) == 1 and rows[0]["tier"] == "log" and rows[0]["subject"] == "admitted"
 
 
 async def test_the_stale_nudge_is_a_log_line_and_keeps_its_marker(monkeypatch):

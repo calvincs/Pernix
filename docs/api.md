@@ -1044,7 +1044,7 @@ POST /api/canary
 ```json
 { "raw": "---\nname: my-canary\nprompt: ...\ngates: [...]\n---\nnotes" }
 ```
-Raw `CANARY.md` text (or a structured spec: `name`, `prompt`, `gates`, optional `files`/`tags`/`timeout`). Validated by a parse round-trip; gate commands are checked against the auto-admission allowlist proof and the verdicts returned as `warnings` — advisory, never a blocker. `400` on invalid content or a duplicate name.
+Raw `CANARY.md` text (or a structured spec: `name`, `prompt`, `gates`, optional `files`/`tags`/`timeout`). Validated by a parse round-trip; gate commands are checked against the allowlist proof and the verdicts returned as `warnings` — advisory, never a blocker. `400` on invalid content or a duplicate name.
 
 ### Read / Edit / Park / Review / Retire
 ```

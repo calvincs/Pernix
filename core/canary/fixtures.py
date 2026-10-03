@@ -28,7 +28,7 @@ memorised last week's answer.
 TRUST: ``generate.py`` is imported and executed in-process, the same trust
 level as the gate shell commands it produces (``core/gates.py`` jails the
 cwd, not the command). Generated canaries are therefore a hand-authored,
-repository-reviewed surface — auto-admission never writes one.
+repository-reviewed surface.
 """
 
 from __future__ import annotations

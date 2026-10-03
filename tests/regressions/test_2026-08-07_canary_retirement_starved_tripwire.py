@@ -60,7 +60,7 @@ def _base() -> Path:
 
 
 def _mk(name: str) -> None:
-    got, err = materialize_canary(dict(_SPEC, name=name), vetting=False)
+    got, err = materialize_canary(dict(_SPEC, name=name))
     assert got == name, err
 
 

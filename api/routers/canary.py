@@ -97,7 +97,7 @@ async def trigger_run(body: dict = {}):
 async def create_canary(body: dict = {}):
     """Create a canary from raw CANARY.md text or a structured spec.
 
-    Gate commands are checked against the auto-admission allowlist proof and
+    Gate commands are checked against the allowlist proof and
     the verdicts come back as warnings — advisory, never a blocker: a human
     creating a canary by hand is the authority the proof substitutes for.
     """
