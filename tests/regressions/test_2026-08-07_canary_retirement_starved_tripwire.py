@@ -110,31 +110,6 @@ async def test_parked_canary_still_runs_on_full_and_named_sweeps(monkeypatch):
     assert ran == ["pin"]
 
 
-async def test_parked_canary_is_excluded_from_the_heartbeat(monkeypatch):
-    from core.canary import runner as runner_mod
-    from core.canary.parser import CanaryDef
-
-    parked = CanaryDef(
-        name="parked-one", prompt="x", gates=[{"name": "g", "command": "true", "watch_paths": []}], parked=True
-    )
-    active = CanaryDef(name="active-one", prompt="x", gates=[{"name": "g", "command": "true", "watch_paths": []}])
-
-    ran: list[str] = []
-
-    async def _fake_run(c, trigger="manual", batch_id=None):
-        ran.append(c.name)
-        from core.canary.runner import CanaryRunResult
-
-        return CanaryRunResult(task=c.name, passed=True, trigger=trigger)
-
-    monkeypatch.setattr(runner_mod, "run_canary", _fake_run)
-    monkeypatch.setattr(runner_mod, "scan_canaries", lambda *a, **k: [parked, active])
-    monkeypatch.setattr("config.settings.canary_heartbeat_per_night", 2)
-
-    await runner_mod.run_sweep(trigger="scheduled")
-    assert ran == ["active-one"]
-
-
 def test_goodhart_lock_still_wins_over_parking():
     """The invariant parking must not disturb: a canary whose LATEST run
     failed is untouchable — except that a red run may UNPARK, because that

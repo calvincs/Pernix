@@ -12,10 +12,8 @@ value exists nowhere the agent can read it.
 
 Sweeps run canaries sequentially and one sweep runs at a time (the scheduler
 holds the lock) — a sweep is a background measurement, not a throughput
-problem. Selection is change-driven: the nightly `scheduled` trigger is a
-small least-recently-run heartbeat over the non-parked canaries, `full`
-(model swap, deploy, "Run all") runs everything, and `manual` runs the
-caller's explicit names.
+problem. Nothing runs on a wall clock: a sweep is either the-world-changed
+(model swap, deploy, "Run all" — everything) or the caller's explicit names.
 """
 
 from __future__ import annotations
@@ -386,37 +384,14 @@ async def run_canary(
     return result
 
 
-def _heartbeat_pick(defs: list[CanaryDef], k: int) -> list[CanaryDef]:
-    """The k least-recently-run active canaries — the nightly heartbeat.
-
-    Least-recently-run is self-healing under park/unpark/create/retire and
-    bounds every active canary's history staleness, which the per-task
-    tripwire's green precondition depends on. Never-run canaries sort first;
-    ties break by name for determinism.
-    """
-    from db import models as db
-
-    def last_run_at(d: CanaryDef) -> str:
-        rows = db.list_canary_runs(task=d.name, limit=1)
-        return rows[0].get("created_at") or "" if rows else ""
-
-    return sorted(defs, key=lambda d: (last_run_at(d), d.name))[: max(1, k)]
-
-
 async def run_sweep(
-    trigger: str = "scheduled",
+    trigger: str = "manual",
     batch_id: str | None = None,
     names: list[str] | None = None,
 ) -> list[CanaryRunResult]:
-    """Run a selection of the suite sequentially.
-
-    Selection by trigger: `scheduled` is the nightly heartbeat — the
-    canary_heartbeat_per_night least-recently-run non-parked canaries, just
-    enough to keep every active canary's history warm. `full` runs
-    everything including parked canaries (model swaps, deploys, "Run all" —
-    the world changed, so every canary gets to speak). `manual` runs the
-    caller's explicit `names` (or everything, absent one) — a human asking
-    for a run means now.
+    """Run a selection of the suite sequentially: the caller's explicit
+    `names`, or every canary when none are given. `trigger` is only the
+    label recorded on each run row.
     """
     if not settings.canary_enabled:
         logger.info("Canary sweep skipped: canary_enabled is off")
@@ -425,11 +400,6 @@ async def run_sweep(
     if names:
         wanted = set(names)
         defs = [d for d in defs if d.name in wanted]
-    elif trigger == "scheduled":
-        active = [d for d in defs if not d.parked]
-        defs = _heartbeat_pick(active, settings.canary_heartbeat_per_night) if active else []
-        if defs:
-            logger.info("Canary heartbeat: %s", ", ".join(d.name for d in defs))
     if not defs:
         logger.info("Canary sweep: no canaries to run")
         return []

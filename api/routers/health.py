@@ -284,7 +284,6 @@ _SETTING_BOUNDS = {
     "dream_journal_retention_days": (2, 365),
     "dream_rlm_probe_interval_days": (1, 90),
     "canary_retention_days": (1, 365),
-    "canary_heartbeat_per_night": (1, 10),
     "canary_park_after_passes": (3, 200),
     # Mirrors scripts/backup.py's KEEP_MIN/KEEP_MAX so the API rejects what the
     # backup run would have clamped anyway. 0 disables scheduled backups.
@@ -567,7 +566,7 @@ async def update_settings(body: dict):
 
             enqueue_full_sweep("model-swap", delay_s=60)
         except Exception:
-            pass  # Non-critical — the nightly heartbeat still measures
+            pass  # Non-critical — the next deploy or a manual run still measures
 
     restart_required = bool(_RESTART_FIELDS & set(updated))
 

@@ -179,7 +179,7 @@ async def switch_model(body: dict):
 
             enqueue_full_sweep("model-swap", delay_s=60)
         except Exception:
-            pass  # Non-critical — the nightly heartbeat still measures
+            pass  # Non-critical — the next deploy or a manual run still measures
 
     return {
         "switched": True,
