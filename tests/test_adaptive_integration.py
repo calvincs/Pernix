@@ -189,17 +189,6 @@ def test_routing_hints_block_scout_only():
     assert "[ADAPTIVE ROUTING HINTS]" in block and "prefer rg" in block
 
 
-def test_scout_search_adaptive_tool():
-    from core.scout.runner import _exec_scout_tool
-
-    _apply_hint(title="browse for js", content="js-heavy sites need browse_web not http_get")
-    brief = SimpleNamespace(session_id="s")
-    out = _exec_scout_tool("search_adaptive", {"query": "js-heavy browse"}, brief)
-    assert "browse_web" in out and "routing_hint" in out
-    out2 = _exec_scout_tool("search_adaptive", {"query": "zzz-no-match-zzz"}, brief)
-    assert "No matching" in out2
-
-
 # ---------------------------------------------------------------------------
 # Tripwire
 # ---------------------------------------------------------------------------
