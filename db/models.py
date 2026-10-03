@@ -2368,8 +2368,6 @@ def ledger_snapshot(session_id: str, anchor_iso: str) -> dict:
         "inflight": {},
         "last_verdict": None,
         "open_questions": [],
-        "agent_proposals": [],
-        "adaptive_changes": [],
         "canary_fails": [],
         "boot": {},
     }
@@ -2443,29 +2441,6 @@ def ledger_snapshot(session_id: str, anchor_iso: str) -> dict:
                        WHERE session_id = ? AND answered_at IS NULL
                        ORDER BY created_at DESC LIMIT 2""",
                     (session_id,),
-                ).fetchall()
-            ]
-        except Exception:
-            pass
-        try:
-            out["agent_proposals"] = [
-                dict(r)
-                for r in conn.execute(
-                    """SELECT id, created_at FROM adaptive_proposals
-                       WHERE status = 'pending' AND producer = 'agent'
-                       ORDER BY created_at DESC LIMIT 2""",
-                ).fetchall()
-            ]
-        except Exception:
-            pass
-        try:
-            out["adaptive_changes"] = [
-                dict(r)
-                for r in conn.execute(
-                    """SELECT entry_id, action, actor FROM adaptive_events
-                       WHERE created_at > ? AND action IN ('create', 'update', 'delete')
-                       ORDER BY id DESC LIMIT 6""",
-                    (anchor_iso,),
                 ).fetchall()
             ]
         except Exception:

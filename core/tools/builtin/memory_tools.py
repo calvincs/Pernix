@@ -106,26 +106,6 @@ def _federated_sections(query: str) -> str:
         return ""
     sections: list[str] = []
 
-    # Adaptive store — the rules currently shaping behavior.
-    try:
-        from db.models import connect_sessions
-
-        like = " OR ".join("(lower(title) LIKE ? OR lower(content) LIKE ?)" for _ in words)
-        params: list[str] = []
-        for w in words:
-            params += [f"%{w}%", f"%{w}%"]
-        with connect_sessions() as conn:
-            rows = conn.execute(
-                f"SELECT id, kind, source, title, content FROM adaptive_entries "
-                f"WHERE status = 'active' AND ({like}) LIMIT {_FED_PER_SOURCE}",
-                params,
-            ).fetchall()
-        for r in rows:
-            body = " ".join(str(r["content"]).split())[:_FED_SNIPPET_CHARS]
-            sections.append(f"[adaptive/{r['kind']} · {r['source']}] {r['title']}: {body}")
-    except Exception:
-        pass
-
     # Skills — procedural knowledge that may already cover the topic.
     try:
         from core.skills.registry import get_skill_registry
@@ -805,8 +785,8 @@ def register(reg) -> None:
         description=(
             "LLM-backed memory search with synthesis, FEDERATED across every knowledge "
             "store: long-term memory (FTS5 + ripgrep, query reformulation, attributed "
-            "answer) plus provenance-tagged hits from adaptive entries, "
-            "skills, and session transcripts — one query instead of guessing which store "
+            "answer) plus provenance-tagged hits from "
+            "skills and session transcripts — one query instead of guessing which store "
             "to ask. Use when: recall() returns empty/weak results, the query is complex, "
             "or cross-file synthesis is needed. Pass context= to focus the search. "
             "include_seen=true bypasses the per-session dedup ledger (only affects "
