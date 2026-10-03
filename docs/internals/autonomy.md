@@ -59,8 +59,8 @@ the expected type spelled out, enum membership included (checked *after*
 coercion, so `"5"` still matches an integer enum) and per-element array item
 types. It runs on every call regardless of `gates_enabled` — dispatch
 hygiene, not a user-authored check — and emits
-`tool.call.intercepted {name, action, reason}` so the UI and the adaptive
-layer can see what it corrected.
+`tool.call.intercepted {name, action, reason}` so the UI can show what it
+corrected.
 
 ## Goals — intent that outlives a turn
 
@@ -315,8 +315,8 @@ Every turn on a `normal` or `cron` session opens with a
 workers and background jobs that finished since the agent last looked, the
 Reflect verdict on the agent's *own* previous turn (which otherwise lands
 about five minutes after the turn ends, so without the ledger the agent
-learns its own grade a turn late or never), self-modifications the adaptive
-layer applied, canary regressions, platform restarts. It is delta-based and
+learns its own grade a turn late or never), questions it asked that are
+still open, canary regressions, platform restarts. It is delta-based and
 silent when nothing changed — a quiet system renders nothing, and the block
 is the empty string when the setting is off. Canary sessions never see it
 (platform state leaking into a synthetic measurement turn would contaminate
@@ -326,8 +326,7 @@ The `agent_state` tool (`core/extensions/session_tools/__init__.py`) is the
 on-demand companion for everything the ledger doesn't push automatically:
 one call answers what used to take several separate lookups — work in
 flight (sessions, background jobs, RLM runs), this session's recent Reflect
-verdicts, recent notifications, adaptive-layer counts, recent canary
-gate-fails, cron health and memory-store size.
+verdicts, recent notifications, recent canary gate-fails, cron health and memory-store size.
 `data/workspace/SYSTEM-MAP.md` (`core/context/system_map.py`, regenerated at
 every boot) goes deeper still: the real schema of the tables the agent is
 likely to query, the data-directory layout, and the live FastAPI route
@@ -350,7 +349,7 @@ a legitimate block. The push-notification path alerts you, the goal stays
 is guided to prefer `notify_user` for progress reports and reserve `ask_user`
 for genuine decisions.
 
-The [canary suite](canary-and-adaptive.md) is built to coexist with this:
+The [canary suite](canary.md) is built to coexist with this:
 canary sweeps are snooze-transparent and workspace-isolated, so an overnight
 autonomous goal and the nightly measurement baseline can share the box.
 

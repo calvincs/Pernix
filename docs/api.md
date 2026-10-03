@@ -1014,7 +1014,7 @@ Returns the deterministic gates registered on the session: name, command, watch 
 
 ## Canary Suite
 
-Golden-task canaries — see [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md). Listing works even when `canary_enabled` is off; triggering a run requires it on.
+Golden-task canaries — see [internals/canary.md](internals/canary.md). Listing works even when `canary_enabled` is off; triggering a run requires it on.
 
 ### List the Suite
 ```

@@ -59,7 +59,7 @@ Beyond the localhost-only default. Read these before exposing Pernix to anything
 - [internals/rlm.md](internals/rlm.md) — recursive long-input processing (sandboxed REPL + sub-LLM broker)
 - [internals/dream.md](internals/dream.md) — idle-time introspection: hypotheses about itself, falsified against the record
 - [internals/autonomy.md](internals/autonomy.md) — long-running autonomy: gates, goals, and the persistent session kernel
-- [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md) — the self-improvement loop: golden-task canaries and the governed adaptive policy store
+- [internals/canary.md](internals/canary.md) — the golden-task canary suite and the Trust tab
 
 ## I want to contribute
 

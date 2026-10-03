@@ -51,7 +51,7 @@ The mechanics stay true to the store's design:
 
 ### Federated reads with `deep_recall`
 
-`deep_recall` doesn't stop at the memory store. Alongside its LLM-synthesized answer (or the raw fallback if that call fails) it appends a short, provenance-tagged **"related in other stores"** section pulled from wherever else Pernix keeps knowledge: active adaptive rules, matching skills, and raw session transcripts the curated memory store never saw. Each source is best-effort — one that's off or broken just contributes nothing, never an error — so you get one read surface instead of having to know which of several stores might hold the answer.
+`deep_recall` doesn't stop at the memory store. Alongside its LLM-synthesized answer (or the raw fallback if that call fails) it appends a short, provenance-tagged **"related in other stores"** section pulled from wherever else Pernix keeps knowledge: matching skills and raw session transcripts the curated memory store never saw. Each source is best-effort — one that's off or broken just contributes nothing, never an error — so you get one read surface instead of having to know which of several stores might hold the answer.
 
 If the session belongs to a [space](spaces.md), both `recall` and `deep_recall` also resolve that space and surface its `pernix.space.<slug>.*` entries first — ordering only, never an inflated score, so the same search from outside the space still finds them on merit.
 
