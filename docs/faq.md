@@ -185,7 +185,7 @@ There's no built-in coordination between instances — they're fully independent
 
 ### Why didn't I get a notification for X? / Why is the bell so quiet?
 
-On purpose. Only things that need you — a question, a failed job, a turn that stopped and needs a reply, a goal out of budget — interrupt you. Self-maintenance (skill auto-applies, dream corrections, canary sweep results) is written to the **Activity** tab of the bell instead, where you can read it when you want; dismissing an item never deletes it. Everything is listed in [guides/notifications.md](guides/notifications.md), including how to promote or demote a whole area in Settings → Integrations → Notification tiers.
+On purpose. Only things that need you — a question, a failed job, a turn that stopped and needs a reply, a goal out of budget — interrupt you. Self-maintenance (skill rollbacks, dream corrections, canary sweep results) is written to the **Activity** tab of the bell instead, where you can read it when you want; dismissing an item never deletes it. Everything is listed in [guides/notifications.md](guides/notifications.md), including how to promote or demote a whole area in Settings → Integrations → Notification tiers.
 
 ### How do I make Pernix talk less / more / differently?
 

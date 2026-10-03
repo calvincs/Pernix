@@ -137,7 +137,7 @@ async def reject_proposal(proposal_id: str):
 async def rollback_proposal_route(proposal_id: str):
     """Undo an applied proposal by restoring the backup taken at apply time.
 
-    The counterpart to apply: a veto window plus a timestamped backup is only
+    The counterpart to apply: a timestamped backup is only
     half an undo while restoring it means a human copying a file by hand.
     Restores the backup stamped at or before THIS apply (not merely the
     newest), marks the proposal 'rolled_back', and backs up the state it

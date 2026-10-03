@@ -55,8 +55,7 @@ Before the main agent runs, a **scout** runs first. Scout runs on the Background
 What scout does:
 
 - Reads the user's new message
-- Searches your persistent memory for relevant prior facts
-- Lists available tools and skills
+- Gets a preloaded baseline: memory search results, relevant tools and skills, cross-session findings, workspace state and available models
 - Decides which tools the main agent should be aware of, which skills to load, and what the high-level approach should be
 - Submits a `ScoutReport` — the structured plan handed off to the main agent
 
@@ -66,7 +65,7 @@ Why this matters:
 - Scout has a fresh context, so its judgment isn't biased by long conversation history.
 - If you have 30 skills installed, scout decides which 1–2 to load full instructions for, rather than always paying that token cost.
 
-Scout is a real LLM agent — it can call its own (read-only) tools to investigate before submitting the report. It's defined in `core/scout/runner.py`.
+By default scout gets **one round** (`scout_max_rounds = 1`): everything it needs is preloaded and it is offered only `submit_report`, because the turn waits on it — on the reference box a one-round scout ran at a p50 of about 9 s, against about 30 s when it was allowed six rounds of searching. Raise `scout_max_rounds` (up to 6) and scout becomes a multi-round LLM agent again: it can call its own read-only tools (`search_memory`, `search_skills`, `read_skill_instructions`, `search_post_mortems`, …) and a self-check can send its report back for revision before it submits. Either way, if scout produces nothing usable the turn runs on a deterministic fallback report, and the `scout.done` event records why (`fallback_reason`: `bypass` or `degraded`). It's defined in `core/scout/runner.py`.
 
 The tool list scout curates isn't limited to Pernix's own extensions: Pernix ships a native **MCP** (Model Context Protocol) client, on by default (`mcp_enabled=true`) but inert with zero servers configured — connect one under Settings → Integrations → MCP Servers and its tools register as ordinary entries (`mcp_<server>_<tool>`) that scout picks from and the safety gate governs exactly like a builtin. See `core/extensions/mcp/` and [mcp.md](mcp.md).
 

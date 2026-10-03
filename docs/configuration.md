@@ -119,12 +119,13 @@ This used to be an unconditional hardcode: every tool result over 300 characters
 
 ## Scout (Planning Phase)
 
-The scout is a fast sub-agent that runs at the start of each turn to plan the approach: it searches memory, picks tools, and selects skills before handing off to the main agent.
+The scout is a fast sub-agent that runs at the start of each turn to plan the approach: it reads the preloaded memory, tool and skill baseline, picks tools, and selects skills before handing off to the main agent.
 
 | Setting | Default | Description |
 |---|---|---|
 | `scout_enabled` | `true` | Enable/disable the scout phase. Disable only for debugging; the scout significantly improves response quality. |
 | `scout_timeout` | `90` | Seconds before the scout is abandoned and the main agent runs without its guidance. |
+| `scout_max_rounds` | `1` | LLM rounds the scout may use before the turn starts (1–6; Settings → Agent → **Scout Rounds**). At `1` scout gets the preloaded baseline (memory, tools, skills, cross-session findings) and is offered only `submit_report` — fastest, since the turn waits on scout. Raise it to give scout its search tools (`search_memory`, `search_skills`, `read_skill_instructions`, …) and the self-check revision loop back; each extra round adds a few seconds and re-sends the whole scout prompt. |
 | `scout_retry_on_empty_approach` | `true` | Retry scout once if it returns no guidance (empty plan). |
 | `scout_preload_memory_char_limit` | `600` | Characters per memory result in the scout's auto-injected baseline. Only affects the preload phase — active recall tool calls return full entry content. |
 
@@ -245,13 +246,7 @@ Golden-task canaries: canned tasks with deterministic gates, run headlessly thro
 
 ## Skill Self-Healing
 
-When a skill fails and the session running it finds a workaround, refine can fold that fix back into the skill's `SKILL.md` — a veto window, not an approval gate: a pending proposal older than the window is machine-validated (skill exists and is enabled, change bounded, frontmatter preserved) and applied with a timestamped backup under `data/skill_backups/<skill>/`. Reject any proposal from the Explorer's Capabilities → Skills tab inside the window. The window and the daily cap have no Settings UI control; set them via `POST /api/settings` or `data/settings.json`. The rollback toggle does: Settings → Autonomy & idle work → **Skill Self-healing**.
-
-| Setting | Default | Description |
-|---|---|---|
-| `skill_proposal_auto_apply_after_hours` | `24` | Veto window before a pending SKILL.md proposal auto-applies. `0` disables auto-apply (manual Apply only). |
-| `skill_proposal_max_auto_applies_per_day` | `5` | Cap on auto-applied skill proposals per day. |
-| `skill_proposal_auto_rollback` | `false` | The undo for an auto-apply: a skill whose `verify:` canary fails within 7 days of one is restored from the backup taken before that apply, and you are notified. Off, a bad auto-apply stays until you roll it back by hand. |
+When a skill fails and the session running it finds a workaround, refine can propose folding that fix back into the skill's `SKILL.md`. Proposals are suggestions with no settings: review and apply them from the Explorer's Capabilities → Skills tab (each apply takes a timestamped backup under `data/skill_backups/<skill>/`, and rollback restores it). Pending proposals older than 30 days are archived. The 3.1 settings `skill_proposal_auto_apply_after_hours`, `skill_proposal_max_auto_applies_per_day` and `skill_proposal_auto_rollback` were removed in 3.2; stale keys in `data/settings.json` are ignored.
 
 ---
 

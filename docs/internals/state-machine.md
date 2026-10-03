@@ -414,7 +414,7 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 50); when the ca
 
 - **Model** — the Background role, `settings.background_model` (fast, cheap; empty ⇒ `llm_model`), **fresh context** (no main convo history — session brief only). When scout exhausts its retries it makes one last attempt on the Backup role, `settings.fallback_model` (`runner.py:1265-1290`), before falling through to a deterministic stub report
 - **Tools** — read-only discovery, 7 tools: `search_memory`, `search_sessions`, `search_post_mortems`, `search_skills`, `search_tools`, `read_skill_instructions`, `submit_report` (`runner.py:270-395`)
-- **Budget** — 6 rounds max (`SCOUT_MAX_ROUNDS`, `runner.py:957`); must call `submit_report` by round 5 (`runner.py:150`)
+- **Budget** — `settings.scout_max_rounds` LLM rounds (default 1, clamped to `SCOUT_MAX_ROUNDS_CAP` = 6 by `_scout_max_rounds()`). The last round offers only `submit_report`, so at 1 round scout answers from the preloaded baseline with no search tools; above 1 the prompt states the budget and asks for `submit_report` by the second-to-last round
 - **Output** — `ScoutReport` with `recommended_tools`, `recommended_skills` (0-3), `approach_guidance`, `deliverables_plan` (used by Reflect), optional `recommended_model`. SOUL.md/RULES.md/SESSIONS.md are NOT part of the report: the context compiler injects those files whole into the fixed prefix of every system prompt (`_build_agent_directives_block`) — scout reads them to shape its plan but never retypes them
 - **Caching** — report cached on `session.last_scout_report`; retries (reflect/eval) re-run scout with `reflect_lessons` prepended
 

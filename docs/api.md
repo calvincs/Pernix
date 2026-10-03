@@ -870,24 +870,23 @@ Returns the skill's metadata, rendered `instructions`, the raw `raw_content` of 
 
 ### Skill Improvement Proposals
 
-Written by reflect and refine when a skill visibly under-performs. A pending
-proposal reaches `SKILL.md` one of two ways: you approve-then-apply it
-yourself, or — past `skill_proposal_auto_apply_after_hours` (default 24; `0`
-disables) — a snooze sweep applies it on its own once it passes machine
-validation (skill exists and is enabled, change ≤ 4,000 chars, confidence ≥
-0.6), day-capped (`skill_proposal_max_auto_applies_per_day`, default 5), with
-a timestamped backup under `data/skill_backups/<skill>/` and status stamped
-`auto_applied` — reject it before the window closes to veto.
+Written by reflect and refine when a skill visibly under-performs. Proposals
+are suggestions: one reaches `SKILL.md` only when you apply it (`/apply`, or
+Apply in the skill editor), which writes a timestamped backup under
+`data/skill_backups/<skill>/` first. A pending proposal older than 30 days is
+archived by snooze (status `archived`). `auto_applied` rows are history from
+the 3.1 veto-window sweep, removed in 3.2; they can still be rolled back.
 
 ```
 GET    /api/skills/proposals                 List proposals (default status=pending)
 POST   /api/skills/proposals/{id}/approve    Mark approved (you edit the skill yourself)
 POST   /api/skills/proposals/{id}/reject     Dismiss
 POST   /api/skills/proposals/{id}/apply      Write the change into the target SKILL.md
+POST   /api/skills/proposals/{id}/rollback   Restore the backup taken when it was applied
 ```
 
 Filter with `?skill_name=`, `?status=` (`pending` | `approved` | `rejected` |
-`applied` | `auto_applied`), `?source_origin=` (`session` for post-turn
+`applied` | `auto_applied` | `archived` | `rolled_back`), `?source_origin=` (`session` for post-turn
 reflect, `refine` for the authoring pass).
 
 > These lived under `/api/workflows/proposals` before the workflow engine was
