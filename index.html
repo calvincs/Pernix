@@ -87,7 +87,7 @@
       <a href="#workflows">use cases</a>
       <a href="#anatomy">workspace</a>
       <a href="#toolbelt">capabilities</a>
-      <a href="https://github.com/calvincs/Pernix/tree/next-3.2-testing/docs" target="_blank" rel="noopener">docs ↗</a>
+      <a href="https://github.com/calvincs/Pernix/tree/main/docs" target="_blank" rel="noopener">docs ↗</a>
       <a href="#start">get started</a>
       <a class="ghub" href="https://github.com/calvincs/Pernix" target="_blank" rel="noopener">github <span id="nav-stars"></span>&#8599;</a>
     </nav>
@@ -102,10 +102,10 @@
 
   <div class="hero-inner">
     <div class="hero-copy">
-      <p class="hero-category reveal">A self-hosted AI workspace · 3.2 preview</p>
-      <p class="release-notice">Preview of <code>next-3.2-testing</code>, preparing for main.
+      <p class="hero-category reveal">A self-hosted AI workspace · 3.2</p>
+      <p class="release-notice"><strong>3.2 is available.</strong> Released on <code>main</code>.
         <a href="#release">What changed in 3.2</a> ·
-        <a href="https://github.com/calvincs/Pernix/tree/main">Current main branch</a>.</p>
+        <a href="https://github.com/calvincs/Pernix/tree/v3.2.0">Get v3.2.0</a>.</p>
       <h1 class="hero-title reveal">
         <span class="ht-line">Your model.</span>
         <span class="ht-line">Your memory.</span>
@@ -128,7 +128,7 @@
           <span class="install-label">clone &middot; install &middot; run</span>
           <button class="copy-btn" type="button" id="copy-install">copy</button>
         </div>
-        <pre class="install-body" id="install-body"><span class="il"><span class="p">$</span> git clone --branch next-3.2-testing https://github.com/calvincs/Pernix.git &amp;&amp; cd Pernix</span>
+        <pre class="install-body" id="install-body"><span class="il"><span class="p">$</span> git clone --branch main https://github.com/calvincs/Pernix.git &amp;&amp; cd Pernix</span>
 <span class="il"><span class="p">$</span> python3 -m venv .venv &amp;&amp; . .venv/bin/activate</span>
 <span class="il"><span class="p">$</span> pip install -r requirements.txt &amp;&amp; python run.py</span></pre>
       </div>
@@ -201,7 +201,7 @@
   <h2 class="section-title reveal">See the work. <em>Keep the result.</em></h2>
   <p class="section-sub reveal">Conversations, tool output, project files, and a code editor in one browser workspace. Follow a task from the first request to the saved result.</p>
   <div class="window-mock reveal">
-    <div class="window-chrome"><span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span><span class="window-url">Pernix · 3.2 preview</span>
+    <div class="window-chrome"><span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span><span class="window-url">Pernix · 3.2</span>
       <span class="shot-tabs" role="tablist" aria-label="Screen size">
         <button class="shot-tab active" type="button" role="tab" id="tab-desktop" aria-selected="true" aria-controls="shot-desktop" data-shot="desktop">Desktop</button>
         <button class="shot-tab" type="button" role="tab" id="tab-phone" aria-selected="false" aria-controls="shot-phone" data-shot="phone" tabindex="-1">Phone</button>
@@ -382,8 +382,8 @@
   <p class="section-label reveal">Review &amp; improve</p><h2 class="section-title reveal">Useful feedback. <em>Recoverable changes.</em></h2>
   <p class="section-sub reveal">Review the outcome, correct the signal, and improve the procedure. Your feedback can correct a model grade; skill proposals turn useful lessons into editable instructions.</p>
   <div class="review-grid">
-    <article class="review-card reveal"><div class="review-copy"><h3>Check what the review is based on.</h3><p>Trust shows agreement with your feedback, where outcomes came from, and whether self-checks stayed clean. Hold-out results keep ungraded cases visible.</p><p>Ordinary chat reviews run in the background. Factual corrections need matching tool evidence; model judgments can still be wrong.</p><a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/internals/canary.md">Self-checks &amp; Trust →</a></div><figure><a href="img/shots/trust-32.webp" target="_blank" rel="noopener" aria-label="Open Trust screenshot at full size"><img src="img/shots/trust-32.webp" loading="lazy" decoding="async" width="360" height="740" alt="Pernix 3.2 Trust panel showing grader agreement, outcome sources, and self-check contamination. Empty metrics in an isolated demo."></a><figcaption>Trust · fresh demo, no grading history.</figcaption></figure></article>
-    <article class="review-card reveal"><div class="review-copy"><h3>Improve a skill. Keep a way back.</h3><p>Skill self-healing is on by default, with a waiting period, size and confidence checks, and per-skill limits. Exact backups support rollback while protecting newer edits.</p><p>Turn auto-apply off to review each proposal yourself. Start with a Markdown procedure you can read and edit.</p><a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/authoring/writing-skills.md">Write &amp; maintain a skill →</a></div><figure><a href="img/shots/skills-32.webp" target="_blank" rel="noopener" aria-label="Open skill recovery screenshot at full size"><img src="img/shots/skills-32.webp" loading="lazy" decoding="async" width="360" height="740" alt="Pernix 3.2 skill details showing a synthetic CSV review procedure, recent changes, and a Roll back action."></a><figcaption>Skills · synthetic change with a journaled backup.</figcaption></figure></article>
+    <article class="review-card reveal"><div class="review-copy"><h3>Check what the review is based on.</h3><p>Trust shows agreement with your feedback, where outcomes came from, and whether self-checks stayed clean. Hold-out results keep ungraded cases visible.</p><p>Ordinary chat reviews run in the background. Factual corrections need matching tool evidence; model judgments can still be wrong.</p><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/internals/canary.md">Self-checks &amp; Trust →</a></div><figure><a href="img/shots/trust-32.webp" target="_blank" rel="noopener" aria-label="Open Trust screenshot at full size"><img src="img/shots/trust-32.webp" loading="lazy" decoding="async" width="360" height="740" alt="Pernix 3.2 Trust panel showing grader agreement, outcome sources, and self-check contamination. Empty metrics in an isolated demo."></a><figcaption>Trust · fresh demo, no grading history.</figcaption></figure></article>
+    <article class="review-card reveal"><div class="review-copy"><h3>Improve a skill. Keep a way back.</h3><p>Skill self-healing is on by default, with a waiting period, size and confidence checks, and per-skill limits. Exact backups support rollback while protecting newer edits.</p><p>Turn auto-apply off to review each proposal yourself. Start with a Markdown procedure you can read and edit.</p><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/authoring/writing-skills.md">Write &amp; maintain a skill →</a></div><figure><a href="img/shots/skills-32.webp" target="_blank" rel="noopener" aria-label="Open skill recovery screenshot at full size"><img src="img/shots/skills-32.webp" loading="lazy" decoding="async" width="360" height="740" alt="Pernix 3.2 skill details showing a synthetic CSV review procedure, recent changes, and a Roll back action."></a><figcaption>Skills · synthetic change with a journaled backup.</figcaption></figure></article>
   </div>
 </section>
 
@@ -800,13 +800,13 @@ and communicate clearly.
   <p class="section-label reveal">The first run</p>
   <h2 class="section-title reveal">Bring a model. <em>Make room to work.</em></h2>
   <p class="section-sub reveal">Use Python 3.11+ on a dedicated Linux VM, container, or spare machine. Choose Ollama for local inference, a cloud API, or an OpenAI-compatible server. A capable tool-using model matters; local hardware needs depend on the model you choose.</p>
-  <aside class="safety-note reveal"><strong>This is experimental host-executing software.</strong> Pernix can run shell commands, write files, and make network requests. Back up important data, give it a contained environment, and do not expose it directly to the public internet. Prompt rules and tool approval gates are not a security sandbox. <a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/security.md" target="_blank" rel="noopener">Read the security model</a>.</aside>
+  <aside class="safety-note reveal"><strong>This is experimental host-executing software.</strong> Pernix can run shell commands, write files, and make network requests. Back up important data, give it a contained environment, and do not expose it directly to the public internet. Prompt rules and tool approval gates are not a security sandbox. <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/security.md" target="_blank" rel="noopener">Read the security model</a>.</aside>
 
   <div class="start-grid">
     <ol class="steps">
       <li class="reveal"><span class="step-n">01</span><div><h4>Choose a model provider</h4><p>Install <a class="link" href="https://ollama.ai" target="_blank" rel="noopener">Ollama</a> and pull a model for local use, or configure an OpenRouter/OpenAI API key or an OpenAI-compatible endpoint. Ollama is optional. Cloud inference and external services may charge for usage.</p></div></li>
       <li class="reveal"><span class="step-n">02</span><div><h4>Clone & install</h4><p>Standard Python: clone, venv, <code>pip install -r requirements.txt</code>. Optional: copy <code>.env.example</code> for OpenRouter or Tavily keys.</p></div></li>
-      <li class="reveal"><span class="step-n">03</span><div><h4>Configure and start a conversation</h4><p><code>python run.py</code>. Open <code>localhost:8090</code>, then Settings &rarr; Providers &amp; models. Set your endpoint and Primary model. <a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/deployment/llm-providers.md" target="_blank" rel="noopener">Provider setup guide</a>.</p></div></li>
+      <li class="reveal"><span class="step-n">03</span><div><h4>Configure and start a conversation</h4><p><code>python run.py</code>. Open <code>localhost:8090</code>, then Settings &rarr; Providers &amp; models. Set your endpoint and Primary model. <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/deployment/llm-providers.md" target="_blank" rel="noopener">Provider setup guide</a>.</p></div></li>
       <li class="reveal"><span class="step-n">04</span><div><h4>Start small, then extend</h4><p>Create a Space, add project instructions, and try a small task with an observable result. Add skills, MCP servers, and schedules as needed. Enable optional goals, Dream or self-checks after reading their controls.</p></div></li>
     </ol>
 
@@ -815,7 +815,7 @@ and communicate clearly.
         <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
         <span class="term-title">~/pernix</span>
       </div>
-      <pre class="term-body"><span class="ln"><span class="prompt">$</span> git clone --branch next-3.2-testing <span class="path">https://github.com/calvincs/Pernix.git</span></span>
+      <pre class="term-body"><span class="ln"><span class="prompt">$</span> git clone --branch main <span class="path">https://github.com/calvincs/Pernix.git</span></span>
 <span class="ln"><span class="prompt">$</span> cd Pernix</span>
 <span class="ln"><span class="prompt">$</span> python3 -m venv .venv && source .venv/bin/activate</span>
 <span class="ln"><span class="prompt">$</span> pip install -r requirements.txt</span>
@@ -832,10 +832,10 @@ and communicate clearly.
 </section>
 
 <section class="release" id="release">
-  <p class="section-label reveal">Release notes</p><h2 class="section-title reveal">3.2 preview. <em>Built to keep going.</em></h2>
-  <p class="section-sub reveal">Available on <code>next-3.2-testing</code>, ahead of promotion to main. The install commands on this page select the preview.</p>
+  <p class="section-label reveal">Release notes</p><h2 class="section-title reveal">3.2. <em>Built to keep going.</em></h2>
+  <p class="section-sub reveal">Version <code>3.2.0</code> is available on <code>main</code>. The install commands on this page use main; choose <a class="link" href="https://github.com/calvincs/Pernix/tree/v3.2.0">the v3.2.0 tag</a> for this exact release.</p>
   <ul class="release-benefits"><li class="reveal"><span>01</span><h3>Long work, fewer loose ends.</h3><p>Stronger cancellation, queued turns, worker delivery, and stream recovery. Maintenance resumes interrupted work and reports degraded state.</p></li><li class="reveal"><span>02</span><h3>Safer skill changes.</h3><p>Exact backups and guarded rollback keep recovery available. Settings and schedules save atomically.</p></li><li class="reveal"><span>03</span><h3>Clearer review.</h3><p>Evidence-backed factual corrections, complete hold-out totals, and separate Needs you / Activity notifications.</p></li></ul>
-  <p class="release-links reveal"><a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/changelog.md">Full change summary →</a><a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/upgrade.md">Upgrade &amp; migration guide →</a><a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/operations.md">Operations guide →</a></p>
+  <p class="release-links reveal"><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/changelog.md">Full change summary →</a><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md">Upgrade &amp; migration guide →</a><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/operations.md">Operations guide →</a></p>
   <p class="section-note reveal">Upgrading an existing installation? Back up first and read the migration and legacy skill-recovery notes in the upgrade guide.</p>
 </section>
 
@@ -866,7 +866,7 @@ and communicate clearly.
         <span class="dim">·</span>
         <span class="dim">no accounts</span>
         <span class="dim">·</span>
-        <a class="dim" href="https://github.com/calvincs/Pernix/tree/next-3.2-testing/docs" target="_blank" rel="noopener">docs ↗</a>
+        <a class="dim" href="https://github.com/calvincs/Pernix/tree/main/docs" target="_blank" rel="noopener">docs ↗</a>
       </div>
       <p class="footer-fine"><em>per&middot;nix</em> — Latin, <em>nimble</em>. A familiar that lives on your hardware.</p>
 
