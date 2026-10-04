@@ -9,7 +9,6 @@ import asyncio
 import json
 import logging
 import threading
-import time
 
 from starlette.responses import StreamingResponse
 

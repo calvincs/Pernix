@@ -399,3 +399,9 @@ def test_update_scheduled_job_keeps_last_fired_at_when_the_schedule_is_unchanged
 
     scheduling.update_scheduled_job("j1", prompt="new wording")
     assert captured["extra_meta"].get("last_fired_at") == "2026-08-18T00:00:00+00:00"
+
+
+import pytest
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

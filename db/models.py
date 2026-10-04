@@ -3076,26 +3076,6 @@ def goal_token_usage(goal_id: int) -> int:
         return int(row["t"]) if row else 0
 
 
-def goal_token_usage_since(goal_id: int, since_iso: str) -> int:
-    """Windowed goal spend — the telos binding monitor's real-budget input."""
-    with connect_sessions() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(SUM(total_tokens), 0) AS t FROM token_usage WHERE goal_id = ? AND created_at >= ?",
-            (goal_id, since_iso),
-        ).fetchone()
-        return int(row["t"]) if row else 0
-
-
-def total_token_usage_since(since_iso: str) -> int:
-    """Windowed total spend across every session and goal."""
-    with connect_sessions() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(SUM(total_tokens), 0) AS t FROM token_usage WHERE created_at >= ?",
-            (since_iso,),
-        ).fetchone()
-        return int(row["t"]) if row else 0
-
-
 # ---------------------------------------------------------------------------
 # Goal continuation outbox (harness review 3.2.1 / H12)
 # ---------------------------------------------------------------------------
@@ -4878,22 +4858,66 @@ def get_skill_proposal(proposal_id: str) -> dict | None:
         return dict(row) if row else None
 
 
-def resolve_skill_proposal(proposal_id: str, status: str) -> bool:
-    """Mark a proposal as approved, rejected, applied, auto_applied, or
-    archived. Returns True if row existed.
+def resolve_skill_proposal(proposal_id: str, status: str, *, expected: tuple[str, ...] | None = None) -> bool:
+    """Transition a proposal without overwriting a concurrent decision.
 
-    'applied' = a human clicked Apply; 'auto_applied' = the veto-window
-    sweep applied it (core/skills/proposals.py:auto_apply_ripe_proposals).
-    Distinct statuses so the daily auto-apply cap can count its own work.
+    Human decisions and archival only act on pending/approved suggestions.
+    Application completion and rollback supply their exact predecessor state.
     """
-    if status not in ("approved", "rejected", "applied", "auto_applied", "archived"):
+    if status not in ("pending", "approved", "rejected", "applied", "auto_applied", "archived", "rolled_back"):
         raise ValueError(f"Invalid proposal status: {status!r}")
+    expected = expected or (("pending",) if status == "archived" else ("pending", "approved"))
+    placeholders = ",".join("?" for _ in expected)
     with connect_sessions() as conn:
         cur = conn.execute(
-            "UPDATE skill_improvement_proposals SET status = ?, resolved_at = ? WHERE id = ?",
-            (status, _now(), proposal_id),
+            f"UPDATE skill_improvement_proposals SET status = ?, resolved_at = ? WHERE id = ? AND status IN ({placeholders})",
+            (status, _now(), proposal_id, *expected),
         )
         return cur.rowcount > 0
+
+
+def claim_skill_proposal(
+    proposal_id: str, expected: str, backup_name: str, before_revision: str, after_revision: str
+) -> bool:
+    """Durable intent before file replacement; an interrupted apply can be rolled back."""
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "UPDATE skill_improvement_proposals SET status='applying', backup_name=?, before_revision=?, after_revision=? "
+            "WHERE id=? AND status=?",
+            (backup_name, before_revision, after_revision, proposal_id, expected),
+        )
+        return cur.rowcount == 1
+
+
+def iter_pending_skill_proposals(before: str | None = None):
+    """Page oldest-first by immutable keys, so mutations cannot skip older suggestions."""
+    cursor = None
+    while True:
+        clauses = ["status='pending'"]
+        params = []
+        if before is not None:
+            clauses.append("created_at < ?")
+            params.append(before)
+        if cursor is not None:
+            clauses.append("(created_at, id) > (?, ?)")
+            params.extend(cursor)
+        with connect_sessions() as conn:
+            rows = conn.execute(
+                "SELECT * FROM skill_improvement_proposals WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY created_at, id LIMIT 200",
+                params,
+            ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            yield dict(row)
+        cursor = (rows[-1]["created_at"], rows[-1]["id"])
+
+
+def count_pending_skill_proposals() -> int:
+    with connect_sessions() as conn:
+        return conn.execute("SELECT COUNT(*) FROM skill_improvement_proposals WHERE status='pending'").fetchone()[0]
 
 
 def count_auto_applied_skill_proposals_since(cutoff_iso: str, skill_name: str | None = None) -> int:

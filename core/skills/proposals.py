@@ -26,9 +26,11 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 
 from config import settings
+from core.tools.atomic import atomic_write, content_revision, file_revision, target_lock
 from db import models as db
 
 logger = logging.getLogger("pernix.skills.proposals")
@@ -138,19 +140,8 @@ def _body_chars(text: str) -> int:
     return len(_FRONTMATTER_RE.sub("", text, count=1))
 
 
-# Backup filenames are SKILL.md.<UTC %Y%m%d-%H%M%S>. Rollback picks the
-# newest backup taken at or before the apply, with a little slack: the copy
-# and the DB resolve are separate statements and only second-granularity
-# apart, so an exact <= would occasionally miss the file it just wrote.
 BACKUP_STAMP_FORMAT = "%Y%m%d-%H%M%S"
-BACKUP_MATCH_SLACK_S = 5
-# Apply-time backups only: `<stamp>` or `<stamp>-<n>` for a same-second
-# collision. A `.pre-rollback` copy stays recoverable by hand but is never
-# what a rollback restores.
-_APPLY_BACKUP_RE = re.compile(r"^\d{8}-\d{6}(-\d+)?$")
-
-# The statuses a rollback may act on — both took a backup on the way in.
-ROLLBACK_FROM_STATUSES = ("applied", "auto_applied")
+ROLLBACK_FROM_STATUSES = ("applied", "auto_applied", "applying")
 
 
 class ProposalApplyError(Exception):
@@ -260,15 +251,14 @@ def _insert_under_section(body: str, section_name: str, change: str) -> tuple[st
 
 def _backup_skill_md(skill_name: str, skill_md: Path, kind: str = "") -> Path | None:
     """Copy SKILL.md to data/skill_backups/<skill>/SKILL.md.<UTC ts> before a
-    write mutates it. Returns the backup path, or None on failure (the write
-    proceeds — the atomic replace is still safe, the backup is the rollback
-    convenience, not the integrity mechanism).
+    write mutates it. Returns the backup path, or None on failure. Callers must refuse
+    to modify the skill if its recovery copy cannot be created.
 
     The stamp is second-granularity, so two writes in the same second used to
     silently overwrite each other — which meant a rollback's own safety copy
     destroyed the very backup it was about to restore. Collisions now get a
     `-N` suffix, and `kind` marks a copy that is NOT an apply-time backup
-    (`.pre-rollback`) so _backup_for never restores one by accident.
+    (`.pre-rollback`); recovery uses the exact apply-time filename journaled in SQLite.
     """
     try:
         backup_root = _backup_dir(skill_name)
@@ -280,71 +270,54 @@ def _backup_skill_md(skill_name: str, skill_md: Path, kind: str = "") -> Path | 
         while dest.exists():
             dest = backup_root / f"SKILL.md.{ts}-{n}{tail}"
             n += 1
-        dest.write_bytes(skill_md.read_bytes())
+        atomic_write(dest, skill_md.read_bytes().decode("utf-8"))
         return dest
     except OSError as e:
         logger.warning("Skill backup failed for '%s': %s", skill_name, e)
         return None
 
 
-def _resolve_status(proposal_id: str, status_label: str) -> None:
-    """Stamp a proposal status, tolerating a DB helper that predates the label.
-
-    resolve_skill_proposal whitelists its statuses, so a newer label ('rolled_back')
-    raises on an older deployment. Same fallback apply_proposal has used since
-    'auto_applied' was introduced.
-    """
-    try:
-        db.resolve_skill_proposal(proposal_id, status_label)
-    except ValueError:
-        logger.debug("resolve_skill_proposal rejected %r — using raw update", status_label)
-        from db.models import _now, connect_sessions
-
-        with connect_sessions() as conn:
-            conn.execute(
-                "UPDATE skill_improvement_proposals SET status=?, resolved_at=? WHERE id=?",
-                (status_label, _now(), proposal_id),
-            )
-
-
 def _backup_dir(skill_name: str) -> Path:
     return Path(settings.skills_dir).parent / "skill_backups" / skill_name
 
 
-def _backup_for(skill_name: str, applied_at: str) -> Path | None:
-    """The backup this apply took: the newest one stamped at or before it.
+def _serialized_skill_change(fn):
+    @wraps(fn)
+    def wrapped(proposal_id, *args, **kwargs):
+        from core.skills.registry import get_skill_registry
 
-    Never "the newest backup": a skill with several applies would otherwise
-    roll back to the wrong generation, silently reinstating a change the
-    caller meant to keep.
-    """
-    root = _backup_dir(skill_name)
-    if not root.is_dir():
-        return None
+        proposal = db.get_skill_proposal(proposal_id)
+        if not proposal:
+            raise ProposalApplyError(f"Proposal '{proposal_id}' not found")
+        skill = get_skill_registry().get(proposal.get("skill_name") or "")
+        if skill is None:
+            raise ProposalApplyError(f"Skill '{proposal.get('skill_name')}' not found in registry")
+        with target_lock(skill.path / "SKILL.md"):
+            return fn(proposal_id, *args, **kwargs)
+
+    return wrapped
+
+
+def _rescan_after_change(reg) -> None:
     try:
-        cutoff = datetime.fromisoformat(applied_at)
-        if cutoff.tzinfo is None:
-            cutoff = cutoff.replace(tzinfo=timezone.utc)
-        cutoff += timedelta(seconds=BACKUP_MATCH_SLACK_S)
-    except (TypeError, ValueError):
-        cutoff = None
-
-    candidates: list[tuple[datetime, str, Path]] = []
-    for f in root.glob("SKILL.md.*"):
-        stamp = f.name.split("SKILL.md.", 1)[-1]
-        if not _APPLY_BACKUP_RE.match(stamp):
-            continue  # a .pre-rollback copy is recoverable by hand, never auto-restored
-        try:
-            when = datetime.strptime(stamp[:15], BACKUP_STAMP_FORMAT).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if cutoff is None or when <= cutoff:
-            candidates.append((when, f.name, f))
-    if not candidates:
-        return None
-    return max(candidates)[2]
+        reg.rescan(Path(settings.skills_dir))
+    except Exception as exc:
+        # The mutation is already durably completed. A scan failure must not
+        # invite the caller to repeat it; a later list/scan refreshes metadata.
+        logger.warning("Skill registry reload failed after a completed change: %s", exc)
 
 
+def _auto_apply_blocked() -> bool:
+    try:
+        from sessions.manager import get_manager
+
+        return get_manager().has_active_work(strict=True)
+    except Exception:
+        # An unavailable idle check cannot authorize an unattended mutation.
+        return True
+
+
+@_serialized_skill_change
 def restore_skill_backup(proposal_id: str, actor: str = "user") -> dict:
     """Undo one applied skill proposal by restoring its pre-apply backup.
 
@@ -385,40 +358,35 @@ def restore_skill_backup(proposal_id: str, actor: str = "user") -> dict:
         raise ProposalApplyError(f"Skill '{skill_name}' not found in registry")
 
     skill_md = skill.path / "SKILL.md"
-    backup = _backup_for(skill_name, proposal.get("resolved_at") or proposal.get("created_at") or "")
-    if backup is None:
+    name = proposal.get("backup_name")
+    if not name or Path(name).name != name or not proposal.get("after_revision"):
+        raise ProposalApplyError("No exact backup record for this legacy proposal; restore its backup manually")
+    backup = _backup_dir(skill_name) / name
+    if not backup.is_file():
+        raise ProposalApplyError(f"No backup for '{skill_name}': {backup}")
+    current = skill_md.read_bytes().decode("utf-8") if skill_md.exists() else ""
+    restored = backup.read_bytes().decode("utf-8")
+    if content_revision(restored) != proposal.get("before_revision"):
+        raise ProposalApplyError("Backup content changed; refusing rollback")
+    revision = file_revision(skill_md)
+    # The before revision also permits completing an interrupted rollback
+    # whose file replacement succeeded but whose DB finalization failed.
+    allowed = {proposal["after_revision"], proposal["before_revision"]}
+    if revision not in allowed:
         raise ProposalApplyError(
-            f"No backup for '{skill_name}' at or before the apply — nothing to restore "
-            f"(looked in {_backup_dir(skill_name)})"
+            "Skill changed since this proposal was applied; roll back newer edits first or restore manually"
         )
-
-    current = skill_md.read_text(encoding="utf-8") if skill_md.exists() else ""
-    restored = backup.read_text(encoding="utf-8")
-
-    # Journal the state we are leaving before we leave it: a rollback that
-    # cannot itself be undone is a second one-way door.
-    if skill_md.exists():
-        _backup_skill_md(skill_name, skill_md, kind="pre-rollback")
-
-    tmp = skill_md.with_suffix(".md.rollback-tmp")
+    if _backup_skill_md(skill_name, skill_md, kind="pre-rollback") is None:
+        raise ProposalApplyError("Backup failed; rollback cancelled")
+    if file_revision(skill_md) != revision:
+        raise ProposalApplyError("Skill changed during rollback; no changes made")
     try:
-        tmp.write_text(restored, encoding="utf-8")
-        tmp.replace(skill_md)
+        atomic_write(skill_md, restored)
     except OSError as e:
         raise ProposalApplyError(f"Failed to restore SKILL.md: {e}") from e
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-
-    _resolve_status(proposal_id, "rolled_back")
-
-    try:
-        reg.rescan() if hasattr(reg, "rescan") else None
-    except Exception as e:
-        logger.debug("Skill registry rescan failed after rollback: %s", e)
+    if not db.resolve_skill_proposal(proposal_id, "rolled_back", expected=(status,)):
+        raise ProposalApplyError("Proposal changed during rollback; inspect its recovery record")
+    _rescan_after_change(reg)
 
     result = {
         "proposal_id": proposal_id,
@@ -457,6 +425,7 @@ def restore_skill_backup(proposal_id: str, actor: str = "user") -> dict:
     return result
 
 
+@_serialized_skill_change
 def apply_proposal(proposal_id: str, status_label: str = "applied", unwrap: bool = False) -> ApplyResult:
     """Apply a proposal to its target SKILL.md.
 
@@ -477,8 +446,17 @@ def apply_proposal(proposal_id: str, status_label: str = "applied", unwrap: bool
         raise ProposalApplyError(f"Proposal '{proposal_id}' not found")
 
     status = proposal.get("status", "pending")
-    if status in ("applied", "auto_applied"):
-        raise ProposalApplyError(f"Proposal '{proposal_id}' has already been applied")
+    allowed = ("pending",) if status_label == "auto_applied" else ("pending", "approved")
+    if status not in allowed:
+        raise ProposalApplyError(f"Proposal '{proposal_id}' cannot be applied from status '{status}'")
+    if status_label not in ("applied", "auto_applied"):
+        raise ProposalApplyError("Invalid application status")
+    if status_label == "auto_applied":
+        if not settings.skill_proposal_auto_apply or _auto_apply_blocked():
+            raise ProposalApplyError("Auto-apply deferred while work is active or disabled")
+        reason = _validate_for_auto_apply(proposal)
+        if reason:
+            raise ProposalApplyError(reason)
 
     skill_name = proposal.get("skill_name") or ""
     if not skill_name:
@@ -499,7 +477,7 @@ def apply_proposal(proposal_id: str, status_label: str = "applied", unwrap: bool
     if not skill_md.exists():
         raise ProposalApplyError(f"SKILL.md not found for '{skill_name}' at {skill_md}")
 
-    body = skill_md.read_text(encoding="utf-8")
+    body = skill_md.read_bytes().decode("utf-8")
     section = (proposal.get("section") or "Notes").strip() or "Notes"
     change = (proposal.get("proposed_change") or "").strip()
     if unwrap:
@@ -513,31 +491,26 @@ def apply_proposal(proposal_id: str, status_label: str = "applied", unwrap: bool
     if new_body == body:
         raise ProposalApplyError("No change would be made (empty proposed_change?)")
 
-    _backup_skill_md(skill_name, skill_md)
-
-    # Atomic write: temp file + rename
-    tmp = skill_md.with_suffix(".md.tmp")
+    before_revision = content_revision(body)
+    backup = _backup_skill_md(skill_name, skill_md)
+    if backup is None:
+        raise ProposalApplyError("Backup failed; proposal not applied")
+    if content_revision(backup.read_bytes()) != before_revision or file_revision(skill_md) != before_revision:
+        raise ProposalApplyError("Skill changed during application; no changes made")
+    if status_label == "auto_applied" and (not settings.skill_proposal_auto_apply or _auto_apply_blocked()):
+        raise ProposalApplyError("Auto-apply deferred while work is active or disabled")
+    if not db.claim_skill_proposal(proposal_id, status, backup.name, before_revision, content_revision(new_body)):
+        raise ProposalApplyError("Proposal changed before application; no changes made")
     try:
-        tmp.write_text(new_body, encoding="utf-8")
-        tmp.replace(skill_md)
+        atomic_write(skill_md, new_body)
     except OSError as e:
+        db.resolve_skill_proposal(proposal_id, status, expected=("applying",))
         raise ProposalApplyError(f"Failed to write SKILL.md: {e}") from e
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-
-    # Mark applied in DB (the helper whitelists a small set of labels).
-    _resolve_status(proposal_id, status_label)
-
-    # Reload the skill registry so the edit is visible to subsequent calls
-    # without requiring a server restart.
-    try:
-        reg.rescan() if hasattr(reg, "rescan") else None
-    except Exception as e:
-        logger.debug("Skill registry rescan failed after apply: %s", e)
+    # If this commit fails, the durable 'applying' record holds the exact
+    # backup and revisions. Rollback can safely recover an interrupted apply.
+    if not db.resolve_skill_proposal(proposal_id, status_label, expected=("applying",)):
+        raise ProposalApplyError("Could not finalize application; use rollback to recover")
+    _rescan_after_change(reg)
 
     return ApplyResult(
         proposal_id=proposal_id,
@@ -566,7 +539,7 @@ def archive_stale_skill_proposals(days: int = STALE_PROPOSAL_DAYS) -> list[str]:
         return []
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     archived: list[str] = []
-    for prop in db.list_skill_proposals(status="pending", limit=1000):
+    for prop in db.iter_pending_skill_proposals(before=cutoff):
         if (prop.get("created_at") or "") >= cutoff:
             continue
         pid = str(prop.get("id"))
@@ -626,7 +599,7 @@ def _validate_for_auto_apply(proposal: dict) -> str | None:
         return "skip:reads as an instruction to an editor, not skill text (needs human review)"
 
     try:
-        body = skill_md.read_text(encoding="utf-8")
+        body = skill_md.read_bytes().decode("utf-8")
     except OSError as e:
         return f"skip:SKILL.md unreadable ({e})"
     section = (proposal.get("section") or "").strip()
@@ -665,46 +638,32 @@ def auto_apply_ripe_proposals() -> dict:
         return out
     window_hours = max(0, settings.skill_proposal_auto_apply_after_hours)
 
-    pending = db.list_skill_proposals(status="pending", limit=500)
-    if not pending:
+    pending_count = db.count_pending_skill_proposals()
+    if not pending_count:
         return out
-
-    # Idle-only: never mutate a skill out from under a session that might
-    # be reading it mid-task.
-    try:
-        from sessions.manager import get_manager
-
-        if get_manager().has_active_work():
-            out["deferred"] = len(pending)
-            return out
-    except Exception:
-        pass
-
+    if _auto_apply_blocked():
+        out["deferred"] = pending_count
+        return out
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(hours=window_hours)).isoformat()
-    ripe = sorted(
-        (p for p in pending if (p.get("created_at") or "") < cutoff),
-        key=lambda p: p.get("created_at") or "",
-    )
-    if not ripe:
-        return out
+    ripe = db.iter_pending_skill_proposals(before=cutoff)
 
     used = db.count_auto_applied_skill_proposals_since((now - timedelta(hours=24)).isoformat())
     budget = max(0, settings.skill_proposal_max_auto_applies_per_day - used)
     if budget <= 0:
-        out["deferred"] = len(ripe)
+        out["deferred"] = pending_count
         logger.info("Skill auto-apply deferred: daily cap reached (%d)", used)
         return out
 
     for prop in ripe:
-        if budget <= 0:
+        if budget <= 0 or _auto_apply_blocked() or not settings.skill_proposal_auto_apply:
             break
         pid = str(prop.get("id"))
         reason = _validate_for_auto_apply(prop)
         if reason is not None:
             if reason.startswith("expire:"):
-                db.resolve_skill_proposal(pid, "archived")
-                out["archived"].append(pid)
+                if db.resolve_skill_proposal(pid, "archived"):
+                    out["archived"].append(pid)
                 logger.info("Skill auto-apply archived %s: %s", pid, reason)
             else:
                 out["skipped"] += 1
@@ -724,7 +683,7 @@ def auto_apply_ripe_proposals() -> dict:
             out["skipped"] += 1
             logger.warning("Skill auto-apply failed for %s: %s", pid, e)
 
-    out["deferred"] = max(0, len(ripe) - len(out["applied"]) - len(out["archived"]) - out["skipped"])
+    out["deferred"] = max(0, pending_count - len(out["applied"]) - len(out["archived"]) - out["skipped"])
     if out["applied"]:
         logger.info(
             "Skill proposals: auto-applied %d past the %dh veto window (%s)",

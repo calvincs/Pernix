@@ -213,3 +213,7 @@ def test_the_lifespan_closes_admission_before_it_collects_anything():
     browser = src.index("_close_browser")
     assert close < stop_producer < drain, "producers stop before the final collection"
     assert drain < browser, "and everything admitted drains before resources close"
+
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

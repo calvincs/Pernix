@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-from core.memory.store import MTIME_TOLERANCE_S, MemoryVersionConflict
+from core.memory.store import MemoryVersionConflict
 
 router = APIRouter(tags=["memory"])
 

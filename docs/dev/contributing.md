@@ -163,3 +163,20 @@ If you're new to the codebase, this is the rough mental map:
 | Settings | `config.py` |
 
 A more conceptual tour lives in [../architecture.md](../architecture.md); the formal state-machine spec with file:line citations is [../internals/state-machine.md](../internals/state-machine.md).
+
+
+### Test isolation and focused coverage
+
+Scheduler/admission tests that install a fake agent should request `mock_scout`
+so they do not call a configured provider before reaching that agent. Scout tests
+retain the real scout runner and mock its provider instead. The shared data
+fixture restores every settings field, including mutable containers, after each
+test. Set temporary save destinations freely: settings writes create their
+staging file beside the destination, so `/tmp` may be a separate filesystem.
+
+The coverage gate measures Python lines, not branches or browser rendering.
+Use `pytest --cov --cov-branch` when investigating decision coverage, retain
+behaviorally distinct concurrency regressions even when their lines overlap,
+and run the JavaScript behavior tests (Node required) for client changes.
+Production Ruff checks now enforce F401/F841; deliberate exports use explicit
+aliases. The exceptions for unused test scaffolding are scoped to `tests/**`.

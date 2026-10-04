@@ -283,7 +283,7 @@ def test_v43_resolves_open_adaptive_rows_and_nothing_else(tmp_path, monkeypatch)
     from db import database
 
     full = list(database.MIGRATIONS)
-    assert full[-1][0] == 43
+    assert any(m[0] == 43 for m in full)
     monkeypatch.setattr("config.settings.db_path", str(tmp_path / "v42.db"))
     monkeypatch.setattr(database, "MIGRATIONS", [m for m in full if m[0] <= 42])
     database.init_sessions_db()
@@ -309,7 +309,9 @@ def test_v43_resolves_open_adaptive_rows_and_nothing_else(tmp_path, monkeypatch)
             r["id"]: (r["dismissed_at"], r["resolved_at"])
             for r in conn.execute("SELECT id, dismissed_at, resolved_at FROM notifications")
         }
-        assert int(conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]) == 43
+        assert (
+            int(conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]) == full[-1][0]
+        )
     assert set(got) == {"open", "log", "dismissed", "resolved", "other"}
     assert got["open"][1] and got["log"][1]
     assert got["dismissed"] == ("2026-09-30T01:00:00+00:00", None)

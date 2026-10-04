@@ -20,7 +20,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from config import settings
-from core import notices
 from core.pools import run_background
 from db import models as db
 

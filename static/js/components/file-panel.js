@@ -2652,6 +2652,38 @@ async function viewSkill(name) {
     }
 }
 
+function renderSkillProposalHistory(container, data) {
+    const history = data.proposal_history || [];
+    if (!history.length) return;
+    const labels = { applied: 'Applied', auto_applied: 'Applied automatically', applying: 'Unfinished change', rolled_back: 'Rolled back' };
+    const section = el('div', { class: 'fp-proposal-callout' });
+    section.appendChild(el('div', { class: 'fp-proposal-callout-label' }, [text('Recent skill changes')]));
+    for (const proposal of history) {
+        const row = el('div', { class: 'fp-proposal-callout-row' }, [
+            text(`${labels[proposal.status] || proposal.status} · ${proposal.section || 'Notes'}: ${proposal.problem || ''}`),
+        ]);
+        if (proposal.status !== 'rolled_back' && proposal.can_rollback) {
+            const button = el('button', { class: 'fp-btn', type: 'button' }, [text('Roll back')]);
+            button.addEventListener('click', async () => {
+                button.disabled = true;
+                try {
+                    await post(`/api/skills/proposals/${encodeURIComponent(proposal.id)}/rollback`, {});
+                    await viewSkill(data.name);
+                } catch (error) {
+                    notify('error', `Could not roll back: ${error.message || error}`);
+                } finally {
+                    button.disabled = false;
+                }
+            });
+            row.appendChild(button);
+        } else if (proposal.status !== 'rolled_back') {
+            row.appendChild(el('span', {}, [text(' · Older change: restore its backup manually.')]));
+        }
+        section.appendChild(row);
+    }
+    container.appendChild(section);
+}
+
 function renderSkillViewer(container) {
     const file = _state.currentFile;
     if (!file || !file.skillData) return;
@@ -2733,9 +2765,9 @@ function renderSkillViewer(container) {
                 file.pendingProposal = null;
                 const delta = (res.bytes_after || 0) - (res.bytes_before || 0);
                 console.log(`[skills] proposal applied: +${delta} bytes into ${res.skill_md_path}`);
-                // Reload file data so the editor shows the updated skill body
+                // Reload the body and the recovery actions together.
                 await loadSkills();
-                renderSkills();
+                await viewSkill(proposal.skill_name);
             } catch (e) {
                 notify('error', `Could not apply the proposal: ${e.message || e}`);
             }
@@ -2759,6 +2791,8 @@ function renderSkillViewer(container) {
         callout.appendChild(actions);
         container.appendChild(callout);
     }
+
+    renderSkillProposalHistory(container, data);
 
     // Skill info card
     const info = el('div', { class: 'fp-skill-info' });

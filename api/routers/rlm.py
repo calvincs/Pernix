@@ -124,7 +124,8 @@ def _run_detail(run: dict) -> dict:
     answer_path = run_dir / "answer.txt"
     if run["status"] != "running" and answer_path.exists():
         try:
-            answer = answer_path.read_text(encoding="utf-8", errors="replace")[:_ANSWER_INLINE_LIMIT]
+            with answer_path.open("rb") as stream:
+                answer = stream.read(_ANSWER_INLINE_LIMIT).decode("utf-8", errors="ignore")
         except OSError:
             answer = None
 

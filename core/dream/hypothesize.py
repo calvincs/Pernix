@@ -15,7 +15,6 @@ generated: it rested on Candor reliability evidence, which was retired in
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re

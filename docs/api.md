@@ -875,7 +875,14 @@ Written by reflect and refine when a skill visibly under-performs. With
 that passes the machine checks after `skill_proposal_auto_apply_after_hours`
 (status `auto_applied`); otherwise it waits for `/apply` (status `applied`).
 Either way a timestamped backup lands under `data/skill_backups/<skill>/`
-first, and `/rollback` restores it. A pending proposal older than 30 days is
+first. Each new application journals its exact backup and file revisions.
+`/rollback` restores it only if the current skill still matches that application
+(or a rollback already restored its original contents before an interruption).
+Undo newer changes first; legacy proposals without an exact journal require manual
+restoration. Failed backups prevent writes. Approval/rejection after an application
+has been claimed returns HTTP 409. An interrupted application remains `applying`
+and can be recovered through `/rollback`; GET `/api/skills/{name}` exposes recent
+`proposal_history` with recovery actions. A pending proposal older than 30 days is
 archived by snooze (status `archived`).
 
 ```
@@ -887,7 +894,7 @@ POST   /api/skills/proposals/{id}/rollback   Restore the backup taken when it wa
 ```
 
 Filter with `?skill_name=`, `?status=` (`pending` | `approved` | `rejected` |
-`applied` | `auto_applied` | `archived` | `rolled_back`), `?source_origin=` (`session` for post-turn
+`applied` | `auto_applied` | `applying` | `archived` | `rolled_back`), `?source_origin=` (`session` for post-turn
 reflect, `refine` for the authoring pass).
 
 > These lived under `/api/workflows/proposals` before the workflow engine was

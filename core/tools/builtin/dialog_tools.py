@@ -121,7 +121,6 @@ def ask_user(
     session_obj = manager.get(session_id)
     if session_obj is not None:
         from core.events import call_on_loop
-        from db import models as _db_models
         from sessions import state_v2 as sv2
 
         try:

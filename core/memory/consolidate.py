@@ -518,11 +518,6 @@ def build_budgeted_merge_prompt(
     return render(parts_by_file), total <= room
 
 
-def build_llm_merge_prompt(cluster: list[str], store, budget_tokens: int | None = None) -> str:
-    """Build LLM prompt for ambiguous merge decisions, budgeted to the model."""
-    return build_budgeted_merge_prompt(cluster, store, budget_tokens)[0]
-
-
 def largest_overlap_pair(cluster: list[str], sig_map: dict[str, FileSignature]) -> list[str]:
     """The two files in `cluster` that overlap most, by the clustering score.
 
@@ -620,7 +615,7 @@ def execute_merge(store, decision: MergeDecision) -> dict:
 
     Moves kept entries to target, archives source files, logs to DB.
     """
-    from core.memory.format import format_entry, parse_entries_from_markdown
+    from core.memory.format import parse_entries_from_markdown
     from db.database import connect_memory
 
     stats = {

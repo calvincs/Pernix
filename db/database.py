@@ -1286,6 +1286,16 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
                WHERE category LIKE 'adaptive.%' AND resolved_at IS NULL AND dismissed_at IS NULL""",
         ],
     ),
+    (
+        44,
+        "journal exact skill proposal backups and file revisions",
+        [
+            "ALTER TABLE skill_improvement_proposals ADD COLUMN backup_name TEXT",
+            "ALTER TABLE skill_improvement_proposals ADD COLUMN before_revision TEXT",
+            "ALTER TABLE skill_improvement_proposals ADD COLUMN after_revision TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_skill_proposals_pending ON skill_improvement_proposals(status, created_at, id)",
+        ],
+    ),
 ]
 
 

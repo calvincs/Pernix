@@ -1307,3 +1307,7 @@ def test_no_positional_indexing_of_queue_entries():
     src = pathlib.Path("sessions/manager.py").read_text()
     bad = [ln.strip() for ln in src.splitlines() if re.search(r"\bentry\[\d\]|\b_e\[\d\]|\be\[\d\]", ln)]
     assert not bad, f"positional access to queue entries remains: {bad}"
+
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

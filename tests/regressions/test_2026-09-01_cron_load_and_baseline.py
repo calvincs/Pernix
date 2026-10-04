@@ -47,7 +47,7 @@ def test_one_bad_entry_does_not_drop_the_others(cron_file, monkeypatch):
 
     sched._load_jobs()
     assert added == ["first", "third"], "a job after the bad one must still be scheduled"
-    assert caught == [3], "and the catch-up must still run"
+    assert caught == [2], "catch-up runs for the successfully loaded jobs only"
 
 
 def test_resume_rebaselines_the_fire_clock(cron_file, monkeypatch):

@@ -209,7 +209,6 @@ def main():
         rebuild_start()
 
     # Ensure agent identity dir exists and SOUL.md has a birthdate stamp.
-    import re as _re
     from datetime import datetime, timezone
 
     Path("data").mkdir(parents=True, exist_ok=True)

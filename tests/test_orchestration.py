@@ -571,6 +571,9 @@ def test_await_workers_drains_pending_worker_id_appends(mgr, monkeypatch):
 def test_spawn_worker_extends_parent_session_budget(mgr, monkeypatch):
     """spawn_worker must extend the parent session's LLM budget, mirroring
     the batch-scaled timeout pattern orchestrators rely on."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(mgr, "prompt", AsyncMock())
     parent_id = mgr.create_session(title="Parent orchestrator")
     # spawn_worker now requires the parent to be in PROCESSING state.
     from sessions import state_v2 as sv2
@@ -625,12 +628,17 @@ def test_spawn_worker_extends_parent_session_budget(mgr, monkeypatch):
     assert sid2 == parent_id
     assert secs2 == 3 * 1800.0, f"second spawn should extend by 3*base, got {secs2}"
 
+    loop.run_until_complete(asyncio.sleep(0))
     loop.close()
+    asyncio.set_event_loop(None)
 
 
 def test_spawn_worker_budget_extension_capped_at_24h(mgr, monkeypatch):
     """The extension is hard-capped at 24h. Use a huge base_timeout so a
     single spawn would compute beyond the cap without the min()."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(mgr, "prompt", AsyncMock())
     parent_id = mgr.create_session(title="Pathological parent")
     from sessions import state_v2 as sv2
 
@@ -655,7 +663,9 @@ def test_spawn_worker_budget_extension_capped_at_24h(mgr, monkeypatch):
         title="W",
         _context={"session_id": parent_id, "_loop": loop},
     )
+    loop.run_until_complete(asyncio.sleep(0))
     loop.close()
+    asyncio.set_event_loop(None)
 
     assert extend_calls, "spawn_worker must call extend_session_budget"
     _sid, secs = extend_calls[0]

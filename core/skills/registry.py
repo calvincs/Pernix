@@ -216,6 +216,8 @@ class SkillRegistry:
     """
 
     def __init__(self):
+        self._skills_dir: Path | None = None
+        self._validation_cache: dict = {}
         self._skills: dict[str, SkillDef] = {}
         # Skills that failed pre-flight validation, name -> issue strings.
         # A dict (not a set) so load_skill can surface the concrete reason
@@ -232,15 +234,15 @@ class SkillRegistry:
         Returns the number of skills found.
         """
         if skills_dir is None:
-            skills_dir = Path("data/skills")
+            from config import settings
 
-        if not skills_dir.is_dir():
-            logger.debug("Skills directory does not exist: %s", skills_dir)
-            return 0
+            skills_dir = self._skills_dir or Path(settings.skills_dir)
 
+        skills_dir = skills_dir.resolve()
         count = 0
         with self._lock:
-            for skill_dir in sorted(skills_dir.iterdir()):
+            skills, invalid, cache = {}, {}, {}
+            for skill_dir in sorted(skills_dir.iterdir()) if skills_dir.is_dir() else []:
                 if not skill_dir.is_dir() or skill_dir.name.startswith((".", "_")):
                     continue
 
@@ -270,21 +272,29 @@ class SkillRegistry:
                         version=frontmatter.get("version", "1.0"),
                         scripts_meta=scripts_meta,
                     )
-                    self._skills[skill.name] = skill
+                    skills[skill.name] = skill
                     # Pre-flight validation: warn and track invalid skills
-                    issues = self._validate(skill)
+                    key = self._validation_key(skill)
+                    prior = self._validation_cache.get(str(skill.path))
+                    issues = list(prior[1]) if prior and prior[0] == key else self._validate(skill)
+                    cache[str(skill.path)] = (key, list(issues))
                     if issues:
-                        self._invalid[skill.name] = issues
+                        invalid[skill.name] = issues
                         for issue in issues:
                             logger.warning("Skill '%s' validation: %s", skill.name, issue)
                     else:
-                        self._invalid.pop(skill.name, None)
+                        invalid.pop(skill.name, None)
                     count += 1
                     logger.debug("Scanned skill: %s%s", skill.name, " [INVALID]" if issues else "")
                 except (SkillParseError, OSError) as e:
                     logger.warning("Failed to parse skill in %s: %s", skill_dir, e)
 
-            self.index.rebuild(self._skills)
+            index = SkillIndex()
+            index.rebuild(skills)
+            # Readers retain the previous complete map during validation.
+            self._skills, self._invalid, self.index = skills, invalid, index
+            self._validation_cache = cache
+            self._skills_dir = skills_dir
             # Remember dir for save_disabled, then reload disabled state so
             # toggle persists across rescans (which happen on PUT/PATCH/DELETE).
             self._disabled_path = skills_dir / ".disabled.json"
@@ -309,10 +319,6 @@ class SkillRegistry:
 
     def rescan(self, skills_dir: Path | None = None) -> int:
         """Re-scan skills directory (after new skills added). Thread-safe."""
-        with self._lock:
-            self._skills.clear()
-            self._invalid.clear()
-            # Note: don't clear _disabled — scan() reloads it from disk.
         return self.scan(skills_dir)
 
     # --- Enable/Disable -----------------------------------------------------
@@ -386,11 +392,29 @@ class SkillRegistry:
         """Return only currently-enabled skills."""
         return [s for s in self._skills.values() if s.name not in self._disabled]
 
+    def _validation_key(self, skill: SkillDef) -> tuple:
+        """Track script/requirements revisions and installed-package changes."""
+        from config import settings
+
+        paths = [skill.path / "requirements.txt", skill.path / "scripts"]
+        scripts = skill.path / "scripts"
+        if scripts.is_dir():
+            paths.extend(sorted(scripts.iterdir()))
+        lib = Path(settings.workspace_dir).resolve() / ".venv" / "lib"
+        paths.append(lib)
+        if lib.is_dir():
+            paths.extend(sorted(lib.glob("python*/site-packages")))
+        stamps = []
+        for path in paths:
+            try:
+                stat = path.stat()
+                stamps.append((str(path), stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
+            except FileNotFoundError:
+                stamps.append((str(path), None))
+        return tuple(stamps)
+
     def _validate(self, skill: SkillDef) -> list[str]:
         """Run pre-flight validation on a skill. Returns a list of issue strings (empty = valid)."""
-        import py_compile
-        import tempfile
-
         issues: list[str] = []
 
         # Requirements satisfaction: a skill declaring requirements.txt whose
@@ -415,27 +439,12 @@ class SkillRegistry:
                 issues.append(f"script '{script.name}' is empty")
                 continue
             if script.suffix == ".py":
-                tf_path = None
                 try:
-                    # Write to temp file so py_compile doesn't write .pyc into skill dir
-                    with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as tf:
-                        tf.write(script.read_bytes())
-                        tf_path = tf.name
-                    py_compile.compile(tf_path, doraise=True)
-                except py_compile.PyCompileError as e:
-                    # Strip the temp path from the error message for clarity
-                    msg = str(e).replace(tf_path or "", script.name)
-                    issues.append(f"script '{script.name}' has syntax error: {msg}")
+                    compile(script.read_bytes(), str(script), "exec")
+                except SyntaxError as e:
+                    issues.append(f"script '{script.name}' has syntax error: {e.msg} (line {e.lineno})")
                 except Exception as e:
                     issues.append(f"script '{script.name}' could not be checked: {e}")
-                finally:
-                    if tf_path:
-                        try:
-                            import os as _os
-
-                            _os.unlink(tf_path)
-                        except Exception:
-                            pass
             elif script.suffix == ".sh":
                 import subprocess
 

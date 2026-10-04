@@ -1239,8 +1239,9 @@ def test_rollback_picks_the_backup_from_this_apply_not_the_newest(tmp_path, monk
     # A second, later backup that must NOT be the one restored.
     from core.skills.proposals import _backup_skill_md
 
-    md.write_text(after_first + "\nSecond change.\n", encoding="utf-8")
-    later = _backup_skill_md("heal-me", md)
+    unrelated = tmp_path / "unrelated.md"
+    unrelated.write_text(after_first + "\nSecond change.\n", encoding="utf-8")
+    later = _backup_skill_md("heal-me", unrelated)
     later = later.rename(later.with_name("SKILL.md.20991231-235959"))
     assert "Second change." in later.read_text(encoding="utf-8")
 

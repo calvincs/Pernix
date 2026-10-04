@@ -459,3 +459,9 @@ async def test_an_unfinished_run_that_never_settles_is_uncertain_after_a_restart
     session = mgr.get(row["session_id"])
     if session is not None and session.task is not None:
         await asyncio.wait({session.task})
+
+
+import pytest
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

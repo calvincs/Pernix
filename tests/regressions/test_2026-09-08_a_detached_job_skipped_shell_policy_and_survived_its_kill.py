@@ -260,10 +260,15 @@ def test_a_killed_job_still_records_an_exit_code(jobs):
 
     out = jobs_tool.job_kill(job_id, _context=jobs.ctx)
 
-    # The wrapper is spared on the first pass precisely so it outlives its
-    # child and writes the sidecar; 143 is SIGTERM.
-    assert "exit 143" in out, out
-    assert db.get_job(job_id)["exit_code"] == 143
+    # The sidecar records GNU timeout's exit status, not a synthesized child
+    # status: timeout itself receives TERM with the workload and may return
+    # 124; versions/timing that preserve the child status return 143.
+    # The lifecycle state must still distinguish an explicit kill from expiry.
+    recorded = jobs_tool._exit_sidecar(db.get_job(job_id))
+    assert recorded in (124, 143)
+    assert f"exit {recorded}" in out, out
+    assert db.get_job(job_id)["exit_code"] == recorded
+    assert _session_pids(jobs.leader(job_id)) == []
     assert db.get_job(job_id)["state"] == "killed"
 
 

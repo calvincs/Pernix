@@ -472,7 +472,6 @@ class OllamaProvider:
             return _DEFAULT_INFO(model, self.name)
 
         model_info = data.get("model_info", {})
-        details = data.get("details", {})
 
         # Context length
         ctx = 128_000

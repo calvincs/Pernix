@@ -9,8 +9,6 @@ from __future__ import annotations
 import importlib
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Callable
 
 from core.tools.registry import ToolRegistry
 

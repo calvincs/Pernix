@@ -14,7 +14,6 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from config import settings
 from db import models as db
 from sessions.manager import get_manager
 
