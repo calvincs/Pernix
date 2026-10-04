@@ -18,7 +18,7 @@ This prepares the release; it does not merge main or announce a tagged release.
   3.2 preview links while main remains on 3.1.
 - [x] Validate local documentation links/anchors, site links/assets, JavaScript,
   and desktop/mobile rendering and interactions. Record remaining limitations.
-- [ ] Commit and push documentation to next-3.2-testing and site changes to
+- [x] Commit and push documentation to next-3.2-testing and site changes to
   gh-pages; verify GitHub Pages publication. Leave main unchanged.
 
 ## Review findings
@@ -75,3 +75,17 @@ upgrade, API, skills, autonomy, canary/Trust and Reflect/Snooze guides. Added
 3. Update gh-pages preview labels and install commands to main; switch its doc
    URLs from next-3.2-testing to main before retiring the testing branch.
 4. Verify main's installation, migration and published doc links for the release.
+
+## Publication result
+
+- Documentation: `20fb1d0`, pushed to `next-3.2-testing`.
+- Website: `a44987d`, pushed to `gh-pages`; GitHub Pages workflow
+  [37233609326](https://github.com/calvincs/Pernix/actions/runs/37233609326)
+  completed successfully.
+- [pernix.cc](https://pernix.cc/) returned HTTP 200 and its HTML matched the
+  published source byte-for-byte. Release summary, upgrade, operations and
+  canary guide destinations returned HTTP 200 on the preview branch.
+- Main remains `f715753`. No runtime version bump, main merge, release tag or
+  Pernix service redeployment was performed.
+- The isolated site worktree is retained for the later main-promotion wording
+  change; the local preview server is stopped after verification.
