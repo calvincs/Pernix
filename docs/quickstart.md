@@ -21,8 +21,6 @@ You can use both at the same time, but you only need one of them to start.
 ```bash
 git clone https://github.com/calvincs/Pernix.git
 cd Pernix
-# Select the 3.2 preview while promotion to main is pending:
-git switch next-3.2-testing
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

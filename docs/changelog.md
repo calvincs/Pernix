@@ -6,11 +6,10 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
-## 3.2 preview — preparing for main
+## v3.2.0 — 2026-10-04
 
-This documentation describes `next-3.2-testing`. The branch is being prepared
-for promotion; `main` still carries the 3.1 version identifier. This is not a
-3.2 release announcement. See [upgrade.md](upgrade.md) before switching versions.
+Version 3.2.0 is released on `main` and tagged as `v3.2.0`.
+See [upgrade.md](upgrade.md) before updating an existing installation.
 
 - **A smaller supported surface.** Telos, Candor, adaptive policies/trials,
   heartbeats, toolmaker, skillmaker and the feature-evaluation loop are retired.
@@ -42,7 +41,7 @@ for promotion; `main` still carries the 3.1 version identifier. This is not a
   and access logs are separate, with 35 compressed daily archives per stream.
 
 Migrations **v36–v44** run on startup when upgrading from 3.1. Removed settings
-are ignored; historical adaptive tables are retained. The [upgrade guide](upgrade.md#preparing-for-32)
+are ignored; historical adaptive tables are retained. The [upgrade guide](upgrade.md#upgrading-to-32)
 explains backups, removed integrations and legacy skill recovery.
 
 ## v3.1.0 — 2026-09-03

@@ -6,10 +6,10 @@ For the full list of changes by date, see [changelog.md](changelog.md). For DB s
 
 ---
 
-## Preparing for 3.2
+## Upgrading to 3.2
 
-The preview lives on `next-3.2-testing`; main promotion and a version/release tag
-are separate release steps. Review the [3.2 summary](changelog.md#32-preview--preparing-for-main)
+Version 3.2.0 is available on `main` and tagged as `v3.2.0`.
+Review the [3.2 summary](changelog.md#v320--2026-10-04)
 and [removed surfaces](#whats-gone-in-32) before updating prompts or integrations.
 
 1. Make a complete backup generation with `python scripts/backup.py`. Preserve
@@ -18,7 +18,8 @@ and [removed surfaces](#whats-gone-in-32) before updating prompts or integration
 2. Review your own skills, cron prompts and `RULES.md` for removed tools. Export
    historical adaptive entries if wanted. Save local edits to shipped canaries
    before restoring or replacing them; do not discard your only copy.
-3. Update dependencies and start the chosen branch. From 3.1, migrations v36–v44
+3. Update `main` (or check out `v3.2.0` for this exact release), update
+   dependencies, and start Pernix. From 3.1, migrations v36–v44
    run automatically. **v44** adds the exact skill-application backup/revision
    journal; it cannot reconstruct missing associations for old applications.
 4. For Docker, rebuild the image: `docker compose up -d --build pernix`. A pull

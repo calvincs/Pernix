@@ -22,13 +22,12 @@ It is **not** a polished commercial product. It is a working personal tool with 
 
 ---
 
-## Preparing for 3.2
+## Version 3.2
 
-`next-3.2-testing` contains the 3.2 preview; promotion to `main` is still pending.
-Read the [change summary](docs/changelog.md#32-preview--preparing-for-main),
-[upgrade checklist](docs/upgrade.md#preparing-for-32), and
-[operations guide](docs/operations.md). The application version remains 3.1.0
-until the release step.
+Version **3.2.0** is available on `main`, tagged as `v3.2.0`.
+Read the [change summary](docs/changelog.md#v320--2026-10-04),
+[upgrade checklist](docs/upgrade.md#upgrading-to-32), and
+[operations guide](docs/operations.md) before upgrading an existing installation.
 
 ## Features
 
@@ -88,8 +87,6 @@ until the release step.
 # Clone and enter the project
 git clone https://github.com/calvincs/Pernix.git
 cd Pernix
-# Select the 3.2 preview while promotion to main is pending:
-git switch next-3.2-testing
 
 # Create and activate a virtual environment
 python3 -m venv .venv
@@ -268,7 +265,7 @@ Most-visited entry points:
 
 ## Credits
 
-Pernix is built by Calvin ([@calvincs](https://github.com/calvincs)) with **Claude** (Anthropic) as pair programmer — and with **Pernix itself** in the loop: the reference deployment runs the field campaigns, surfaces its own failures, and validates the fixes that shape each release. The v3.1.0 release is the work of all three.
+Pernix is built by Calvin ([@calvincs](https://github.com/calvincs)) with **Claude** (Anthropic) as pair programmer — and with **Pernix itself** in the loop: the reference deployment runs the field campaigns, surfaces its own failures, and validates the fixes that shape each release. The release history reflects the work of all three.
 
 ---
 
