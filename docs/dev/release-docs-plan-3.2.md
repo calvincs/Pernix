@@ -89,3 +89,25 @@ upgrade, API, skills, autonomy, canary/Trust and Reflect/Snooze guides. Added
   Pernix service redeployment was performed.
 - The isolated site worktree is retained for the later main-promotion wording
   change; the local preview server is stopped after verification.
+
+## Main release finalization — 2026-10-04
+
+PR #3 merged the reviewed testing branch into main at `81cde3a`. The release
+finalization sets `APP_VERSION` to `3.2.0` and uses the existing annotated-tag
+convention, `v3.2.0`, for the resulting main commit. README, installation,
+quickstart, changelogs, upgrade and operations guides now describe the release.
+Historical development and audit records above retain their original context.
+
+The website layout refresh was published on gh-pages as `efa0539`: the hero
+design was preserved, repeated copy was consolidated, and the app preview,
+Trust and skill-recovery screenshots were refreshed using labeled demo data.
+Release finalization removes preview labels, directs installation and docs to
+main, and links the exact `v3.2.0` source tag.
+
+Validation: 258 local documentation links and anchors resolve; 12 focused
+configuration, health and settings tests pass. An isolated smoke check confirms
+the configuration, FastAPI metadata and health response all report `3.2.0`.
+Desktop/mobile site checks cover the release notice, main-branch clipboard
+command, release navigation, and absence of obsolete testing-branch links.
+This finalization changes release metadata and documentation, not runtime
+behavior or the running Pernix service on the deployment host.

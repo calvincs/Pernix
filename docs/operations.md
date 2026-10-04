@@ -1,7 +1,7 @@
 # Operations and maintenance
 
-This guide covers the 3.2 preview. For upgrade steps and backup scope, see
-[upgrade.md](upgrade.md#preparing-for-32); settings are in
+This guide covers Pernix 3.2. For upgrade steps and backup scope, see
+[upgrade.md](upgrade.md#upgrading-to-32); settings are in
 [configuration.md](configuration.md#operational-maintenance-and-logs).
 
 ## Check the service and the work separately

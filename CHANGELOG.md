@@ -1,13 +1,13 @@
 # Changelog
 
 
-## Unreleased — 3.2 preview
+## v3.2.0 — 2026-10-04
 
 ### Current release scope
 
-See [the user-facing 3.2 summary](docs/changelog.md#32-preview--preparing-for-main)
-and [upgrade checklist](docs/upgrade.md#preparing-for-32) for the final behavior.
-The application version is not bumped and main is not promoted by this docs update.
+See [the user-facing 3.2 summary](docs/changelog.md#v320--2026-10-04)
+and [upgrade checklist](docs/upgrade.md#upgrading-to-32) for the final behavior.
+Released on `main` as `v3.2.0`; application and API version: `3.2.0`.
 
 - fix(skills): migration v44 journals exact application backups and revisions;
   application claims and writes are serialized, failed backups prevent changes,
