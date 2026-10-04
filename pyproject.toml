@@ -76,6 +76,7 @@ ignore = [
     "E501",   # line-too-long — black handles line length
     "E402",   # module-level import not at top — intentional in some files
     "E741",   # ambiguous-variable-name — noisy for math-style vars
-    "F401",   # unused-import — too many intentional re-exports
-    "F841",   # unused-variable — common in tests and debug scaffolding
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["F401", "F841"]

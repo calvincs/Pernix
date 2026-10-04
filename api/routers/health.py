@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
 
 from config import APP_VERSION, Settings, settings
 

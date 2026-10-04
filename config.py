@@ -701,10 +701,10 @@ class Settings:
         """Persist settings to JSON, excluding machine-specific fields."""
         import tempfile
 
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         data = {k: v for k, v in asdict(self).items() if k not in _NO_PERSIST | _RUNTIME_ONLY}
         # Atomic write: temp file + rename prevents corruption on concurrent saves
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(DATA_DIR), suffix=".tmp")
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(SETTINGS_PATH.parent), suffix=".tmp")
         try:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(data, f, indent=2)

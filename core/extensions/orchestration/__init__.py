@@ -10,11 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from config import settings
 from db import models as db
@@ -1744,8 +1742,6 @@ def retry_worker(
     _context: dict | None = None,
 ) -> str:
     """Retry a failed worker with fresh context. Spawns a replacement."""
-    ctx = _context or {}
-    parent_id = ctx.get("session_id", "")
 
     # Get old worker's output
     old_output = get_worker_result(worker_id)[:2000]

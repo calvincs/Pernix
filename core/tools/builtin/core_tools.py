@@ -13,15 +13,19 @@ from pathlib import Path
 from config import settings
 from core.tools.atomic import TargetBusy, atomic_write, file_revision, target_lock
 from core.tools.paths import (
-    PROTECTED_DIRS,
-    PROTECTED_FILES,
-    root_mismatch_hint,
+    PROTECTED_DIRS as PROTECTED_DIRS,
+)
+from core.tools.paths import (
+    PROTECTED_FILES as PROTECTED_FILES,
 )
 from core.tools.paths import (
     allowed_read_roots as _allowed_roots,
 )
 from core.tools.paths import (
     build_shell_env as _build_shell_env,
+)
+from core.tools.paths import (
+    root_mismatch_hint,
 )
 from core.tools.paths import (
     safe_read_path as _safe_path,
@@ -658,7 +662,6 @@ def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
         resolved = _safe_path(path)
         if not resolved.exists():
             # If it's a directory, list contents
-            p = Path(path)
             for root in _allowed_roots():
                 candidate = (root / path).resolve()
                 if candidate.is_dir() and candidate.is_relative_to(root):
@@ -1074,7 +1077,6 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
 
     try:
         import resource
-        import signal
 
         as_limit = int(getattr(settings, "shell_address_space_limit_bytes", 0) or 0)
         fsize_limit = int(getattr(settings, "shell_fsize_limit_bytes", 0) or 0)

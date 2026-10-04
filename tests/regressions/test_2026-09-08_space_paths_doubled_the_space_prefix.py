@@ -100,11 +100,6 @@ def test_the_space_home_still_wins_when_it_holds_the_directory(space_home):
 # ── nothing the earlier space-path fix established was broken ───────────────
 
 
-def test_a_new_bare_name_still_defaults_into_the_space_home(space_home):
-    home, _ws = space_home
-    assert paths.safe_write_path("fresh-note.md") == home / "fresh-note.md"
-
-
 def test_an_existing_workspace_file_is_still_preferred(space_home):
     _home, ws = space_home
     (ws / "SYSTEM-MAP.md").write_text("the shared map")

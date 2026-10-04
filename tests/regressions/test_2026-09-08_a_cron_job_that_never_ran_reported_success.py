@@ -395,3 +395,7 @@ async def test_cancelling_the_queue_settles_the_work_it_dropped(cron):
 
     release.set()
     await asyncio.wait({session.task})
+
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

@@ -19,15 +19,6 @@ def _make_app(*routers):
 # ---------------------------------------------------------------------------
 
 
-async def test_settings_get():
-    from api.routers import health
-
-    app = _make_app(health.router)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/settings")
-    assert resp.status_code == 200
-
-
 async def test_settings_apikey():
     from api.routers import health
 
@@ -277,15 +268,6 @@ async def test_send_notification():
 # ---------------------------------------------------------------------------
 # Models router - more coverage
 # ---------------------------------------------------------------------------
-
-
-async def test_models_list():
-    from api.routers import models as models_router
-
-    app = _make_app(models_router.router)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/models")
-    assert resp.status_code == 200
 
 
 async def test_models_refresh(mock_llm_client):

@@ -157,3 +157,7 @@ async def test_a_session_not_awaiting_user_just_drops_the_row(mgr):
 
 async def test_an_unknown_question_is_still_a_no_op(mgr):
     assert await dismiss_question("no-such-question") == {"status": "dismissed"}
+
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

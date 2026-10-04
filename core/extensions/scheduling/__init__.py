@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import threading
 import time
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import settings
+from core.tools.atomic import atomic_write
 from db import models as db
 
 logger = logging.getLogger("pernix.ext.scheduling")
@@ -92,7 +92,7 @@ def _drop_retired_heartbeats(jobs: list) -> list:
     if dropped:
         logger.warning("Dropped %d retired heartbeat job(s) from %s", dropped, CRON_PATH)
         with _json_lock:
-            CRON_PATH.write_text(json.dumps(kept, indent=2))
+            atomic_write(CRON_PATH, json.dumps(kept, indent=2))
     return kept
 
 
@@ -102,16 +102,21 @@ def _load_jobs():
         return
     try:
         jobs = json.loads(CRON_PATH.read_text())
+        if not isinstance(jobs, list):
+            raise ValueError("cron jobs must be a JSON list")
         jobs = _drop_retired_heartbeats(jobs)
+        loaded = []
         for job in jobs:
             # Round-trip every non-structural field verbatim — dropping
             # unknown keys here silently erased job variants on restart.
-            extra = {k: v for k, v in job.items() if k not in _ENTRY_STRUCTURAL_KEYS}
             # Guarded per entry. One bad record — a missing "prompt" key, an
             # expression this APScheduler rejects — used to abort the loop, so every job AFTER it went
             # unscheduled and the coalesced catch-up never ran for any of
             # them, all behind a single "Failed to load cron jobs" line.
             try:
+                if not isinstance(job, dict):
+                    raise ValueError("job must be an object")
+                extra = {k: v for k, v in job.items() if k not in _ENTRY_STRUCTURAL_KEYS}
                 _add_job_internal(
                     job["name"],
                     job["cron_expr"],
@@ -121,8 +126,13 @@ def _load_jobs():
                     extra_meta=extra,
                 )
             except Exception as job_err:
-                logger.warning("Skipping cron job %r: %s", job.get("name", "<unnamed>"), job_err)
+                logger.warning(
+                    "Skipping cron job %r: %s",
+                    job.get("name", "<unnamed>") if isinstance(job, dict) else "<invalid>",
+                    job_err,
+                )
                 continue
+            loaded.append(job)
             # Restore paused state
             if job.get("paused") and _scheduler:
                 try:
@@ -136,7 +146,7 @@ def _load_jobs():
     # Outside the try: a catch-up failure must not read as a load failure,
     # and a load that partially succeeded still deserves its catch-up.
     try:
-        _schedule_coalesced_catchup(jobs)
+        _schedule_coalesced_catchup(loaded)
     except Exception as e:
         logger.warning("Coalesced catch-up scheduling failed: %s", e)
 
@@ -198,7 +208,7 @@ def _save_jobs():
                     entry[k] = v
             jobs.append(entry)
         CRON_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CRON_PATH.write_text(json.dumps(jobs, indent=2))
+        atomic_write(CRON_PATH, json.dumps(jobs, indent=2))
 
 
 def _update_job_field(name: str, field: str, value) -> None:
@@ -211,7 +221,7 @@ def _update_job_field(name: str, field: str, value) -> None:
             if job["name"] == name:
                 job[field] = value
                 break
-        CRON_PATH.write_text(json.dumps(jobs, indent=2))
+        atomic_write(CRON_PATH, json.dumps(jobs, indent=2))
 
 
 def _read_jobs_json() -> list[dict]:
@@ -941,23 +951,6 @@ def ensure_grader_holdout_schedule() -> None:
         logger.info("Grader hold-out scheduled: %s", settings.grader_holdout_schedule)
     except Exception as e:
         logger.warning("Failed to schedule the grader hold-out: %s", e)
-
-
-def enqueue_grader_holdout() -> bool:
-    """Run the hold-out ASAP without blocking the caller (manual trigger)."""
-    scheduler = _get_scheduler()
-    if not scheduler:
-        return False
-    from apscheduler.triggers.date import DateTrigger
-
-    scheduler.add_job(
-        _execute_grader_holdout_job,
-        trigger=DateTrigger(run_date=datetime.now(timezone.utc)),
-        id="_grader_holdout_manual",
-        replace_existing=True,
-        kwargs={"meta": {"kind": "grader_holdout", "transient": True, "trigger": "manual"}},
-    )
-    return True
 
 
 # ---------------------------------------------------------------------------

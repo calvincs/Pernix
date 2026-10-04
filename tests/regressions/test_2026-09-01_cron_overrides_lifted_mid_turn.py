@@ -95,3 +95,7 @@ def test_a_deleted_pinned_session_falls_back_instead_of_erroring(mgr):
 def test_an_existing_pinned_session_is_still_reused(mgr):
     sid = mgr.create_session(title="attended")
     assert sched._ensure_dispatch_session(sid, title="Cron: nightly") == sid
+
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

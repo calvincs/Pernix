@@ -53,7 +53,9 @@ def _skill_needs_human(prop: dict) -> bool:
 
 def count_review_pending() -> int:
     """Pending skill proposals that wait for a human and never auto-apply."""
-    return sum(1 for prop in db.list_skill_proposals(status="pending", limit=500) if _skill_needs_human(prop))
+    if not settings.skill_proposal_auto_apply:
+        return db.count_pending_skill_proposals()
+    return sum(1 for prop in db.iter_pending_skill_proposals() if _skill_needs_human(prop))
 
 
 def _body(n: int) -> str:

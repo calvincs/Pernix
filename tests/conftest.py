@@ -3,6 +3,8 @@
 import asyncio
 import os
 import tempfile
+from copy import deepcopy
+from dataclasses import fields
 
 import pytest
 
@@ -14,6 +16,12 @@ os.environ.setdefault("CAI_TEST", "1")
 @pytest.fixture(autouse=True)
 def isolate_data(tmp_path, monkeypatch):
     """Isolate each test with temp data directories."""
+    import config
+
+    # API tests mutate the singleton directly. Restore every field (including
+    # nested containers) after each test, not just its filesystem paths.
+    for field in fields(config.settings):
+        monkeypatch.setattr(config.settings, field.name, deepcopy(getattr(config.settings, field.name)))
     monkeypatch.setattr("config.settings.db_path", str(tmp_path / "sessions.db"))
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path / "workspace"))
     monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))

@@ -142,3 +142,7 @@ async def test_a_job_with_no_options_is_still_not_absorbed(busy):
     assert admission.outcome == "queued"
     assert db.get_message(row)["content"] == "what is the weather"
     assert len(session.pending_messages) == 1
+
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

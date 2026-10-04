@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import shutil
 import unicodedata
-import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile

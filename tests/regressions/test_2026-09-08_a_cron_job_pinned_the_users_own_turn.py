@@ -232,3 +232,7 @@ async def test_a_rejected_dispatch_never_touches_the_session(mgr):
     assert result.error == "cancelling"
     assert session.model_override == "user/pinned-model"
     assert session.tool_allowlist is None
+
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

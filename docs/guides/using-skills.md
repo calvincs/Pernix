@@ -111,3 +111,11 @@ If you find yourself wishing for a skill but the task is small or one-off, you h
 - **Author a skill** if it's a procedure you'd want to reuse across sessions or share with others. See [../authoring/writing-skills.md](../authoring/writing-skills.md) for the full format.
 
 Skills are especially valuable for **multi-step procedures with specific tools or APIs** — calling a particular service, formatting output a particular way, walking through a checklist that's hard to fit into a single prompt.
+
+
+Rollback preserves newer edits: undo more recent proposals first, or restore a
+backup manually if you have edited the skill since application. Open a skill to
+see **Recent skill changes**, including unfinished applications that can be
+recovered with **Roll back**. Applications made before exact backup tracking was
+introduced require manual restoration; Pernix will not guess which old backup
+belongs to them. If a backup cannot be created, the skill is left unchanged.
