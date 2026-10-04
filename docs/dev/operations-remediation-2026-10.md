@@ -21,7 +21,7 @@ Baseline: `85824d6e`, `next-3.2-testing`. Scope is O1–O5 in
 - [x] Keep at least 35 daily application-log archives, compress rotations, and
   separate routine access logs without deleting existing history.
 - [x] Run focused regressions, full suite with coverage, formatting and lint.
-- [ ] Commit and push the branch; back up the box, deploy, verify the code,
+- [x] Commit and push the branch; back up the box, deploy, verify the code,
   lifecycle repairs, service health and a completed maintenance cycle.
 
 ## Constraints
@@ -73,3 +73,25 @@ Automatic reconciliation repaired all 11 legacy running jobs (nine done, one
 timeout, one lost). Their unknown finish times remain unknown. The rebuilt
 container was healthy, preserved `--dangerous`, and matched local runtime
 SHA-256 checksums. Session listing returned in 46 ms after deployment.
+
+### Final verification — 2026-10-04 20:27 UTC
+
+Runtime commits `57eb5f8` and `5faa480` are pushed on `next-3.2-testing`
+and rebuilt on `box.ventibean.com`. The final runtime SHA-256 verification
+passed and the launch override remains intact. Two verification cycles yielded
+to normal session activity, then the next completed normally at
+`2026-10-04T20:27:33.883746+00:00`: **outcome=ran, degraded=false, no activity
+failures**. Consolidation took 2.470 seconds; rerouting took 0.371 seconds;
+splitting moved another 50 entries in 10.959 seconds. Later refinement,
+retention and dream activities completed. The large scans intentionally retain
+cursors for future batches; this is not a claim that the entire memory backlog
+was processed in one cycle.
+
+Final complete suite on `5faa480`: **4,250 passed in 115.23 seconds, 79.31%
+coverage**. Black, Ruff, Flake8 and diff whitespace checks passed. No tests were
+removed in this operational remediation; the added cases reproduce the newly
+observed failures and protect the bounded-work behavior.
+
+All planned implementation and deployment steps are complete. The saved
+pre-deployment backup remains on the host. Unknown historical job finish times
+and already-discarded historical logs cannot be reconstructed.
