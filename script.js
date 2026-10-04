@@ -760,13 +760,25 @@
   if (shotTabs.length) {
     const mock = document.querySelector('.window-mock');
     const panes = document.querySelectorAll('.shot-pane');
-    shotTabs.forEach((tab) => {
+    shotTabs.forEach((tab, index) => {
+      tab.addEventListener('keydown', (event) => {
+        let next;
+        if (event.key === 'ArrowRight') next = (index + 1) % shotTabs.length;
+        if (event.key === 'ArrowLeft') next = (index - 1 + shotTabs.length) % shotTabs.length;
+        if (event.key === 'Home') next = 0;
+        if (event.key === 'End') next = shotTabs.length - 1;
+        if (next === undefined) return;
+        event.preventDefault();
+        shotTabs[next].focus();
+        shotTabs[next].click();
+      });
       tab.addEventListener('click', () => {
         const want = tab.dataset.shot;
         shotTabs.forEach((t) => {
           const on = t === tab;
           t.classList.toggle('active', on);
           t.setAttribute('aria-selected', on ? 'true' : 'false');
+          t.tabIndex = on ? 0 : -1;
         });
         panes.forEach((pane) => {
           pane.classList.toggle('hidden', pane.id !== 'shot-' + want);
