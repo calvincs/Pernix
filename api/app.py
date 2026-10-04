@@ -25,26 +25,9 @@ async def lifespan(app: FastAPI):
     # Skip if run.py already configured the root logger (the normal path);
     # this branch covers test imports and other entry points that load the
     # app without going through run.py.
-    root = logging.getLogger()
-    if not root.handlers:
-        from logging.handlers import RotatingFileHandler
-        from pathlib import Path as _P
+    from core.logging_setup import setup_logging
 
-        log_dir = _P("data/logs")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-        root.setLevel(logging.INFO)
-        console = logging.StreamHandler()
-        console.setFormatter(log_fmt)
-        root.addHandler(console)
-        file_h = RotatingFileHandler(
-            log_dir / "pernix.log",
-            maxBytes=10_000_000,
-            backupCount=3,
-            encoding="utf-8",
-        )
-        file_h.setFormatter(log_fmt)
-        root.addHandler(file_h)
+    setup_logging()
     logger.info("Pernix starting on %s:%d", settings.host, settings.port)
 
     # 0. Capture the main event loop so tool threads can marshal event

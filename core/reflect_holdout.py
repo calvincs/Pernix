@@ -128,7 +128,7 @@ async def _grade_evidence(evidence: str, model: str):
     meant to stay out of. Tests monkeypatch this function.
     """
     from core.llm.client import get_llm_client
-    from core.reflect import REFLECT_PROMPT, _result_from_data, _try_repair_json
+    from core.reflect import REFLECT_PROMPT, _result_from_data, _try_repair_json, guard_factual_correction
 
     start = time.monotonic()
     response = await get_llm_client().chat(
@@ -149,7 +149,9 @@ async def _grade_evidence(evidence: str, model: str):
         data = _try_repair_json(raw)
         if data is None:
             raise
-    return _result_from_data(data, model, latency_ms)
+    result = _result_from_data(data, model, latency_ms)
+    guard_factual_correction(result, evidence)
+    return result
 
 
 async def run_holdout(directory: Path | str | None = None) -> dict:
@@ -170,6 +172,7 @@ async def run_holdout(directory: Path | str | None = None) -> dict:
     by_case: dict[str, dict] = {}
     graded = 0
     correct = 0
+    attempted = 0
 
     for fx in fixtures:
         case_id = str(fx.get("id") or "")
@@ -177,8 +180,17 @@ async def run_holdout(directory: Path | str | None = None) -> dict:
         if not model:
             by_case[case_id] = {"expected": expected, "got": None, "ok": False, "error": "no model configured"}
             continue
+        attempted += 1
         try:
             result = await _grade_evidence(build_evidence(fx), model)
+            if getattr(result, "correction_rejected", ""):
+                by_case[case_id] = {
+                    "expected": expected,
+                    "got": None,
+                    "ok": False,
+                    "error": "unsupported factual correction",
+                }
+                continue
         except Exception as e:
             logger.warning("Grader hold-out: %s could not be graded: %s", case_id, e)
             by_case[case_id] = {"expected": expected, "got": None, "ok": False, "error": type(e).__name__}
@@ -192,6 +204,14 @@ async def run_holdout(directory: Path | str | None = None) -> dict:
     report = {
         "accuracy": round(correct / graded, 4) if graded else None,
         "n": graded,
+        "total": len(fixtures),
+        "attempted": attempted,
+        "graded": graded,
+        "correct": correct,
+        "failed": graded - correct,
+        "ungradable": len(fixtures) - graded,
+        "success_rate": round(correct / len(fixtures), 4) if fixtures else None,
+        "completion_rate": round(graded / len(fixtures), 4) if fixtures else None,
         "by_case": by_case,
         "ran_at": datetime.now(timezone.utc).isoformat(),
         "model": model,

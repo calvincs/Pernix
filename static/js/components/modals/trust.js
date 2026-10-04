@@ -102,7 +102,11 @@ function graderSection(grader) {
         if (holdout.n != null) parts.push(`${plural(num(holdout.n), 'fixture', 'fixtures')}`);
         if (holdout.model) parts.push(String(holdout.model));
         if (holdout.ran_at) parts.push(relTime(holdout.ran_at));
-        out.push(stat('Hold-out accuracy', pct(holdout.accuracy) ?? '—', parts.join(' · ')));
+        out.push(stat('Accuracy on graded cases', pct(holdout.accuracy) ?? '—', parts.join(' · ')));
+        if (holdout.total != null) {
+            out.push(stat('Whole-suite success', pct(holdout.success_rate) ?? '—', `${holdout.correct}/${holdout.total} correct · ${holdout.ungradable} ungradable`));
+            out.push(stat('Grading completion', pct(holdout.completion_rate) ?? '—', `${holdout.graded}/${holdout.total} graded`));
+        }
     }
     return out;
 }

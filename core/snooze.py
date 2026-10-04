@@ -33,8 +33,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -48,6 +51,10 @@ logger = logging.getLogger("pernix.snooze")
 # sweep may hold open at once (its own origin only — deliberately NOT the
 # global dream_max_pending, see _sweep_skill_content_changes).
 SKILL_SWEEP_MAX_PENDING = 30
+
+# Captured by child tasks and worker contexts; a new cycle cannot revive old work.
+_CANCEL_SCOPES = contextvars.ContextVar("snooze_cancel_scopes", default=())
+RUNG_TIMEOUTS = {"consolidate_files": 60, "dedup_sweep": 60, "reroute_misplaced_entries": 60, "split_file": 120}
 
 
 # Session types snooze looks straight through (plan §5, pass-3 F3): they
@@ -104,6 +111,7 @@ class SnoozeRunner:
         self._cancel_generation: int = 0  # bumped by request_cancel()
         self._cycle_generation: int = -1  # set to _cancel_generation at cycle start
         self._running = False
+        self._thread_cancel = threading.Event()
         self._stats = {
             "cycles": 0,
             "cycles_skipped": 0,
@@ -113,6 +121,15 @@ class SnoozeRunner:
             "entries_enriched": 0,
             "last_cycle": None,
         }
+        try:
+            from db import models as db
+
+            saved = json.loads(db.get_snooze_state("snooze_health") or "{}")
+            for key in ("last_successful_cycle", "last_outcome", "degraded"):
+                if key in saved:
+                    self._stats[key] = saved[key]
+        except Exception:
+            pass
         self._activity_since_last_cycle: bool = True  # first cycle always runs
         self._last_cycle_time: float = 0.0
         # Per-cycle abort signal: fresh Event each cycle (no clear() races),
@@ -130,6 +147,7 @@ class SnoozeRunner:
         """
         if self._running:
             self._cancel_generation += 1
+            self._thread_cancel.set()
             evt = self._cancel_event
             if evt is not None:
                 evt.set()
@@ -271,7 +289,8 @@ class SnoozeRunner:
         return base
 
     def _is_cancelled(self) -> bool:
-        return self._cancel_generation != self._cycle_generation
+        scopes = _CANCEL_SCOPES.get()
+        return any(event.is_set() for event in scopes) if scopes else self._cancel_generation != self._cycle_generation
 
     def _llm_available(self) -> bool:
         """Check if LLM semaphore is fully available (no contention)."""
@@ -341,6 +360,10 @@ class SnoozeRunner:
         # before this point will make _is_cancelled() return True immediately.
         self._cycle_generation = self._cancel_generation
         self._cancel_event = asyncio.Event()
+        self._thread_cancel = threading.Event()
+        scope_token = _CANCEL_SCOPES.set((self._thread_cancel,))
+        self._stats["rung_failures"] = {}
+        self._stats["rung_durations_ms"] = {}
         self._running = True
         logger.info("Snooze cycle starting")
 
@@ -372,9 +395,11 @@ class SnoozeRunner:
                 # re-raise. Swallowing this meant the maintenance tick
                 # carried on into WAL checkpoint/vacuum while shutdown
                 # waited. The finally below still runs, bookkeeping intact.
+                self._thread_cancel.set()
                 cycle_task.cancel()
                 with contextlib.suppress(BaseException):
                     await cycle_task
+                outcome = "cancelled"
                 logger.debug("Snooze cycle cancelled")
                 raise
             if cycle_task in done:
@@ -382,8 +407,11 @@ class SnoozeRunner:
                 if exc is not None:
                     outcome = "error"
                     logger.error("Snooze cycle error: %s", exc, exc_info=exc)
+                elif self._stats["rung_failures"]:
+                    outcome = "partial"
             else:
                 yielded = self._cancel_event.is_set()
+                self._thread_cancel.set()
                 cycle_task.cancel()
                 with contextlib.suppress(BaseException):
                     await cycle_task
@@ -400,11 +428,24 @@ class SnoozeRunner:
                         backstop,
                     )
         finally:
+            self._thread_cancel.set()
+            _CANCEL_SCOPES.reset(scope_token)
             waiter.cancel()
             self._cancel_event = None
             self._running = False
             self._stats["cycles"] += 1
             self._stats["last_cycle"] = datetime.now(timezone.utc).isoformat()
+            self._stats["last_outcome"] = outcome
+            if outcome not in ("yielded", "cancelled"):
+                self._stats["degraded"] = outcome in ("partial", "backstop", "error")
+            if outcome == "ran":
+                self._stats["last_successful_cycle"] = self._stats["last_cycle"]
+            try:
+                from db import models as db
+
+                await asyncio.to_thread(db.set_snooze_state, "snooze_health", json.dumps(self._stats))
+            except Exception:
+                logger.debug("Could not persist snooze health", exc_info=True)
             # Only clear on a cycle that actually ran to an end. A cycle that
             # YIELDED was preempted by a user prompt, and the prompt sets this
             # flag on its way in — clobbering it here made the interrupted
@@ -429,16 +470,34 @@ class SnoozeRunner:
         cycle for as long as the fault persisted, and the only sign was a
         single "Snooze cycle error" line.
         """
+        started = time.monotonic()
+        event = threading.Event()
+        token = _CANCEL_SCOPES.set((*_CANCEL_SCOPES.get(), event))
+        self._stats["active_rung"] = label
+        logger.info("Snooze activity %s starting", label)
         try:
+            if label in RUNG_TIMEOUTS:
+                return await asyncio.wait_for(coro, timeout=RUNG_TIMEOUTS[label])
             return await coro
         except asyncio.CancelledError:
-            coro_close = getattr(coro, "close", None)
-            if coro_close:
-                coro_close()
             raise
         except Exception as e:
-            logger.error("Snooze activity %r failed (cycle continues): %s", label, e, exc_info=True)
+            reason = "timeout" if isinstance(e, TimeoutError) else type(e).__name__
+            self._stats.setdefault("rung_failures", {})[label] = reason
+            logger.warning(
+                "Snooze activity %s failed (%s); continuing later activities",
+                label,
+                reason,
+                exc_info=not isinstance(e, TimeoutError),
+            )
             return default
+        finally:
+            event.set()
+            _CANCEL_SCOPES.reset(token)
+            duration = int((time.monotonic() - started) * 1000)
+            self._stats.setdefault("rung_durations_ms", {})[label] = duration
+            self._stats["active_rung"] = None
+            logger.info("Snooze activity %s finished in %dms", label, duration)
 
     async def _do_cycle(self) -> None:
         """Execute activities in priority order."""

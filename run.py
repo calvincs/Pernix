@@ -134,27 +134,9 @@ def _setup_logging() -> None:
     """Configure root logger before uvicorn boots so uvicorn's loggers
     (which propagate to root when log_config=None) emit with the same
     format as the rest of the app."""
-    import logging
-    from logging.handlers import RotatingFileHandler
+    from core.logging_setup import setup_logging
 
-    root = logging.getLogger()
-    if root.handlers:
-        return
-    log_dir = Path("data/logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    root.setLevel(logging.INFO)
-    console = logging.StreamHandler()
-    console.setFormatter(log_fmt)
-    root.addHandler(console)
-    file_h = RotatingFileHandler(
-        log_dir / "pernix.log",
-        maxBytes=10_000_000,
-        backupCount=3,
-        encoding="utf-8",
-    )
-    file_h.setFormatter(log_fmt)
-    root.addHandler(file_h)
+    setup_logging()
 
 
 def _get_lan_ip() -> str:

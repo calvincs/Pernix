@@ -71,6 +71,7 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
   Ground every field in transcript evidence: the user's actual words and reactions, not your judgment of the work's quality.
 
 RULES:
+- FACTUAL CORRECTIONS REQUIRE PROVENANCE: A claim that the answer used wrong, fabricated, mislabeled or contradictory facts must set failure_kind="factual" and include failure_evidence: [{"subject":"exact entity or identifier", "tool_call_id":"observed call ID", "quote":"verbatim result", "expected_tool_call_id":"later verification call ID", "expected_quote":"verbatim contradicting result"}]. Both calls must concern that same subject; an earlier abandoned request is not evidence against a later corrected fetch. Use the TOOL PROVENANCE ledger. Never substitute your own knowledge for a retrieved correction. If the ledger cannot establish a contradiction, use pass with verification="unknown" and explain the uncertainty; do not invent a corrective strategy. These citations are checked by the harness. Task incompleteness, user corrections and deterministic gate failures remain separate grounds for non-pass.
 - MATERIALITY BAR FOR NON-PASS VERDICTS: A retry is warranted only when a concrete user-facing deliverable is missing, incomplete, or factually false — or when a success claim (file written, job scheduled, memory saved, command executed) is unsupported by verifiable evidence. Plan-literalism (deviating from the scout plan when the outcome was delivered), tone/length mismatches, and defensible judgment calls are PASS — record them in the lessons fields and in `experience`, never as a retry. A non-pass verdict MUST name a concrete, checkable failure_cause; if you cannot name one, the verdict is "pass".
 - COMPLETED WORK IS NEVER RETRIED FOR PROCESS VIOLATIONS: when everything the user's request requires is verifiably done, violations of efficiency or procedure rules — call/budget caps exceeded, forbidden re-reads, redundant tool calls, a stray formatting artifact in otherwise-correct output — are a PASS with the violation recorded in what_failed and experience. A retry re-executes finished work, and the retry attempt has nothing left to do (field case: an attempt-2 with zero tool calls was then failed for "not verifying" prior work its charter forbade it from re-reading — an unwinnable trap the first verdict created).
 - ESCALATE GRADES THE TURN, NOT THE SITUATION: escalate means THIS turn's deliverable cannot exist without user input. If the turn's work is complete, the verdict is pass even when a question for the user remains (a stalled loop, a pending decision, a follow-up worth raising) — note the question in experience.note; the agent has its own channels for surfacing questions. Field case: a cron run the verdict itself described as "delivered cleanly" was escalated to flag a stale thread — a failure statistic for a turn that never failed.
@@ -160,6 +161,9 @@ class ReflectResult:
     reflect_latency_ms: int = 0
 
     # Structured attribution (populated from reflect output; defaults are safe).
+    failure_kind: str = ""
+    failure_evidence: list = field(default_factory=list)
+    correction_rejected: str = ""
     failure_cause: str = "none"
     confidence: float = 0.0  # 0.0–1.0
 
@@ -384,7 +388,7 @@ def _format_message(msg: dict, tool_result_char_cap: int | None = None) -> str:
                         except (json.JSONDecodeError, ValueError):
                             pass
                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
-                    parts.append(f"[TOOL CALL: {name}]\nArguments: {args_str}")
+                    parts.append(f"[TOOL CALL: {name}] call_id={tc.get('id', 'unknown')}\nArguments: {args_str}")
             except (json.JSONDecodeError, TypeError):
                 pass
         return "\n".join(parts) if parts else "[ASSISTANT]\n(empty)"
@@ -1058,7 +1062,106 @@ def _build_evidence(
         grounding_out=grounding_out,
         next_user_message=next_user_message,
     )
+    scoped = _messages_since_attempt_start(messages, turn_user_msg_id)
+    evidence += "\n\nTOOL PROVENANCE (paired requests/results; later records supersede failed earlier fetches):\n"
+    evidence += tool_provenance(scoped)
     return user_request, evidence
+
+
+def tool_provenance(messages: list[dict]) -> str:
+    calls = {}
+    records = []
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            raw = msg.get("tool_calls") or []
+            try:
+                raw = json.loads(raw) if isinstance(raw, str) else raw
+            except ValueError:
+                raw = []
+            for call in raw if isinstance(raw, list) else []:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function") or call
+                args = fn.get("arguments", "")
+                calls[call.get("id")] = str(args)[:1500]
+        elif msg.get("role") == "tool" and msg.get("tool_call_id") in calls:
+            call_id = msg["tool_call_id"]
+            records.append({"call_id": call_id, "request": calls[call_id], "result": (msg.get("content") or "")[:2000]})
+    return "\n".join("PROVENANCE " + json.dumps(row, ensure_ascii=False) for row in records[-20:])
+
+
+def guard_factual_correction(result: ReflectResult, evidence: str) -> None:
+    """Withhold factual corrections without paired, attributable source evidence.
+
+    This verifies provenance, not arbitrary factual truth. Gates are enforced
+    separately afterwards. Unsupported grades must not become future lessons.
+    """
+    if result.verdict == "pass" and not _has_pass_with_lessons(result):
+        return
+    description = " ".join(str(getattr(result, f) or "") for f in ("reasoning", "what_failed", "strategy"))
+    factual = result.failure_kind == "factual" or bool(
+        re.search(
+            r"wrong (?:fund|ETF|product|data|source)|mislabell?ed|factually (?:false|wrong)|contradict.*(?:data|source|fact)",
+            description,
+            re.I,
+        )
+    )
+    if not factual:
+        return
+    records = []
+    for line in evidence.splitlines():
+        if line.startswith("PROVENANCE "):
+            try:
+                row = json.loads(line[11:])
+                if isinstance(row, dict):
+                    records.append(row)
+            except ValueError:
+                pass
+    by_id = {r.get("call_id"): (i, r) for i, r in enumerate(records)}
+    reason = "factual correction has no attributable contradictory evidence"
+    supported = 0 < len(result.failure_evidence) <= 10
+    for claim in result.failure_evidence[:10]:
+        if not isinstance(claim, dict):
+            supported = False
+            break
+        subject = claim.get("subject")
+        observed_id, expected_id = claim.get("tool_call_id"), claim.get("expected_tool_call_id")
+        if not isinstance(observed_id, str) or not isinstance(expected_id, str):
+            supported = False
+            break
+        observed = by_id.get(observed_id)
+        expected = by_id.get(expected_id)
+        if not isinstance(subject, str) or not subject or not observed or not expected:
+            supported = False
+            break
+        if expected[0] <= observed[0]:
+            supported = False
+            reason = "an earlier request cannot disprove a later recovered result"
+            break
+        for row, key in ((observed[1], "quote"), (expected[1], "expected_quote")):
+            quote = claim.get(key)
+            if not isinstance(quote, str) or len(quote.strip()) < 8 or quote not in row.get("result", ""):
+                supported = False
+            if subject not in row.get("request", "") and subject not in row.get("result", ""):
+                supported = False
+        if claim.get("quote") == claim.get("expected_quote"):
+            supported = False
+        # Do not grade superseded attempts when a subsequent request recovered.
+        if any(subject in r.get("request", "") for r in records[expected[0] + 1 :]):
+            supported = False
+            reason = "a later result for this subject supersedes the cited evidence"
+    if supported:
+        return
+    result.correction_rejected = reason
+    result.verdict, result.failure_cause = "pass", "none"
+    result.verification, result.verification_reason = "unknown", reason
+    result.confidence = 0.0
+    result.reasoning = "The grader proposed a factual correction that its cited evidence could not establish. No corrective action is warranted from this grade."
+    result.diagnostic = result.what_failed = result.strategy = result.missing = ""
+    result.turn_digest = {}
+    result.retry_without_tools = []
+    result.deliverables = []
+    result.experience = {}
 
 
 def _count_unmatched_braces(s: str) -> int:
@@ -1160,6 +1263,8 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
         missing=data.get("missing", ""),
         reflect_model=model,
         reflect_latency_ms=latency_ms,
+        failure_kind=str(data.get("failure_kind") or ""),
+        failure_evidence=data.get("failure_evidence") if isinstance(data.get("failure_evidence"), list) else [],
     )
     if result.verdict not in ("pass", "retry", "escalate"):
         # Coerce invalid verdict — but to "retry", NOT "pass". Defaulting to
@@ -1595,6 +1700,9 @@ def _write_post_mortem(
     try:
         payload = {
             "verdict": result.verdict,
+            "failure_kind": result.failure_kind,
+            "failure_evidence": result.failure_evidence,
+            "correction_rejected": result.correction_rejected,
             "reflect_mode": reflect_mode,
             "outcome_source": outcome_source,
             "reasoning": result.reasoning,
@@ -2060,6 +2168,8 @@ async def reflect_on_session(
                 result.failure_cause = "none"
                 result.verification = "unknown"
                 result.verification_reason = f"downgraded: {_phantom}"
+
+            guard_factual_correction(result, evidence)
 
             # Gate clamp (plan 3a): a failing deterministic gate makes `pass`
             # unreachable — mechanically, AFTER the LLM call, BEFORE the

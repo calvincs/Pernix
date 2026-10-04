@@ -146,7 +146,7 @@ After each agent turn, a lightweight reflect pass verifies that the agent actual
 | `reflect_nonpass_confidence_floor` | `0.5` | Materiality floor (2026-08-27 calibration audit): a `retry`/`escalate` verdict the grader itself rates below this confidence (0–1) is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous," and ambiguity should not burn a retry or fire an escalation. Coerced/malformed grades are exempt and stay conservative. `0` disables. |
 | `reflect_experience` | `true` | Parse reflect's per-turn experience read (sentiment, friction, user observations) and feed it to post-mortems and user-profile memory. |
 | `reflect_next_turn_grading` | `true` | A turn whose deferred grade is still pending when the user's next message arrives is graded *then*, with that message as evidence ("USER'S NEXT MESSAGE"): a correction, a repeat of the request or a complaint reads as a missed intent (non-pass, cause `agent`); moving on or thanking reads as a pass. A deterministic `next_msg_correction` pre-check is stored in the payload whatever the grader concludes. Off, the grade is dropped and the turn has no outcome at all. The 300 s idle grade still covers turns with no reply. |
-| `grader_holdout_enabled` | `true` | Nightly run of the reflect grader over the fixtures in `data/eval/grader/` — cases with a known verdict and failure cause, covering clean pass, phantom deliverable, refusal-as-completion, correct escalate and the over-strict trap. Fixtures are never written to memory or the workspace. The result (`{accuracy, n, by_case, ran_at, model}`) lands in snooze state as `trust.grader_holdout` and is what the Trust tab's hold-out accuracy reads. |
+| `grader_holdout_enabled` | `true` | Nightly run of the reflect grader over the fixtures in `data/eval/grader/` — cases with a known verdict and failure cause, covering clean pass, phantom deliverable, refusal-as-completion, correct escalate and the over-strict trap. Fixtures are never written to memory or the workspace. The result in `trust.grader_holdout` includes total, attempted, graded, correct, failed and ungradable counts. Trust displays accuracy among graded cases separately from whole-suite success and grading completion; unavailable grades never count as successes. |
 | `grader_holdout_schedule` | `30 3 * * *` | Cron for that run. |
 
 ---
@@ -556,3 +556,22 @@ For a deep dive into the session state machine, agent turn loop, compaction algo
 
 - **[internals/state-machine.md](internals/state-machine.md)** — detailed architectural walkthrough
 - **[api.md](api.md)** — REST API and SSE event reference
+
+### Operational maintenance and logs
+
+Memory consolidation uses resumable batches for stores larger than 64 files
+(up to 2,000 candidate pairs or 10 seconds per scan batch). Consolidation, dedup
+and rerouting each have a 60-second activity limit; splitting has 120 seconds.
+A timed-out activity marks the cycle partial and allows later activities to run.
+Snooze health exposes activity durations, failures and the last successful cycle.
+Workers retain their cancellation signal even after a later cycle starts.
+
+Failed splits use smaller batches and persistent per-file backoff (30 minutes
+through 24 hours), reset when the file revision changes. Other files remain
+eligible. Detached jobs reconcile in bounded pages each maintenance tick; old
+exit sidecars without a completion timestamp retain an unknown finish time.
+
+Application logs rotate daily at UTC midnight into 35 compressed archives.
+Routine HTTP access records use `data/logs/access.log`; application records use
+`data/logs/pernix.log`. Legacy numbered rotations are preserved. Retention starts
+with deployment and cannot recover logs already discarded by the old policy.
