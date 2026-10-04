@@ -99,6 +99,14 @@ Pending proposals show up as a banner on Explorer → Capabilities → Skills, o
 
 Proposals apply themselves by default (`skill_proposal_auto_apply`). After a 24-hour wait, a pending proposal is applied when it passes the checks: the change is at most 1,500 characters and its confidence at least 0.6; it reads as skill text (a note addressed to an editor, such as "Add a note under Usage: …", is unwrapped to the text inside, and refused when nothing usable is inside); its section does not nearly copy an existing heading; it does not push a skill that fits the 5,000-character prompt limit past it; and the skill has had fewer than 3 auto-applies in 30 days. At most five apply per day, and only while no session is working. Before it touches the file, a timestamped copy of the current `SKILL.md` lands in `data/skill_backups/<skill>/`, so an applied change is one **Roll back** away in the Skills tab. A proposal that fails a check waits for you there (one bell item counts them) and is archived after 30 days. Turn auto-apply off in Settings → Autonomy → Skill Self-healing to review every proposal yourself. Refine also writes the same knowledge as a lesson memory, which scout surfaces on the next relevant turn.
 
+
+Rollback preserves newer edits: undo more recent proposals first, or restore a
+backup manually if you have edited the skill since application. Open a skill to
+see **Recent skill changes**, including unfinished applications that can be
+recovered with **Roll back**. Applications made before exact backup tracking was
+introduced require manual restoration; Pernix will not guess which old backup
+belongs to them. If a backup cannot be created, the skill is left unchanged.
+
 A `verify:` block in `SKILL.md` used to become a managed canary (`skill--<name>`). Since 3.2 nothing syncs those blocks into the canary suite (the canary maintenance sweep that did is gone); a block in an old skill is harmless and ignored. See [../authoring/writing-skills.md](../authoring/writing-skills.md).
 
 ---
@@ -111,11 +119,3 @@ If you find yourself wishing for a skill but the task is small or one-off, you h
 - **Author a skill** if it's a procedure you'd want to reuse across sessions or share with others. See [../authoring/writing-skills.md](../authoring/writing-skills.md) for the full format.
 
 Skills are especially valuable for **multi-step procedures with specific tools or APIs** — calling a particular service, formatting output a particular way, walking through a checklist that's hard to fit into a single prompt.
-
-
-Rollback preserves newer edits: undo more recent proposals first, or restore a
-backup manually if you have edited the skill since application. Open a skill to
-see **Recent skill changes**, including unfinished applications that can be
-recovered with **Roll back**. Applications made before exact backup tracking was
-introduced require manual restoration; Pernix will not guess which old backup
-belongs to them. If a backup cannot be created, the skill is left unchanged.

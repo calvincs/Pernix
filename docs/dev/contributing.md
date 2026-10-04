@@ -11,8 +11,10 @@ If you're here to author **skills** (no Python required), you don't need any of 
 The basic steps are the same as [installation.md](../installation.md), with one extra step:
 
 ```bash
-git clone <repository-url>
-cd pernix
+git clone https://github.com/calvincs/Pernix.git
+cd Pernix
+# Select the 3.2 preview while promotion to main is pending:
+git switch next-3.2-testing
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -58,7 +60,7 @@ pytest -m "not slow"                                # skip slow-marked tests
 pytest --cov                                        # with coverage report
 ```
 
-Two pytest markers are defined: `slow` and `integration`. Most tests run in seconds; the `slow` markers are skipped in fast iterations.
+Two pytest markers are defined: `slow` and `integration`. The markers do not skip tests by themselves; use `-m "not slow"` for fast iterations. On memory-constrained hosts, use `-n 4` instead of one worker per reported CPU.
 
 ### Regression tests
 

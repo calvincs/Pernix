@@ -1,7 +1,39 @@
 # Changelog
 
 
-## Unreleased
+## Unreleased — 3.2 preview
+
+### Current release scope
+
+See [the user-facing 3.2 summary](docs/changelog.md#32-preview--preparing-for-main)
+and [upgrade checklist](docs/upgrade.md#preparing-for-32) for the final behavior.
+The application version is not bumped and main is not promoted by this docs update.
+
+- fix(skills): migration v44 journals exact application backups and revisions;
+  application claims and writes are serialized, failed backups prevent changes,
+  interrupted applications remain recoverable, and rollback refuses newer edits.
+- fix(maintenance): immutable worker cancellation, bounded resumable consolidation
+  and rerouting, inner-loop cancellation checks, activity timeouts and persisted
+  degraded/last-successful-cycle diagnostics. Splits use revision-aware backoff
+  and smaller validated batches so one failing file cannot monopolize the work.
+- fix(reflect): factual corrections require attributable paired tool results;
+  unsupported corrections cannot become notifications or retry lessons.
+- fix(trust): expose total, attempted, graded, correct, failed and ungradable
+  hold-out counts; separate conditional accuracy, whole-suite success and grading
+  completion. Withheld factual corrections are ungradable, never credited passes.
+- fix(jobs): bounded periodic reconciliation and atomic completion sidecars;
+  preserve unknown legacy finish times and concurrent kill decisions.
+- fix(operations): separate application/access logs with 35 compressed daily
+  archives, destination-local atomic settings writes, resilient atomic schedule
+  persistence, cached skill validation, bounded RLM previews and complete proposal
+  pagination. Four redundant tests were removed while distinct regression cases
+  were preserved; the final runtime suite passed 4,250 tests at 79.31% coverage.
+
+### Development history
+
+Entries below record intermediate branch changes, including systems subsequently
+retired before the 3.2 release. They are not a list of currently available features.
+
 
 - refactor(telos): Telos is retired. In its last month on the reference box it ran every idle cycle and the agent called its tools zero times. Removed: the `telos_status`/`telos_ask` tools, `/api/telos/*`, the Goals tab, the settings section and every `telos_*` key, snooze Activity 16, the daily slow-loop job, the post-task hook and the `[TELOS]` current-state line. `data/telos/` is left on disk, unread. See `docs/upgrade.md` → What's gone in 3.2.
 

@@ -212,4 +212,4 @@ If the queue fills, further submissions get rejected immediately with a `session
 
 Some tools require human input. The most common is `ask_user`: the agent describes a question or a proposed dangerous action; the session enters `AWAITING_USER` and stops consuming LLM time. As soon as you answer (in the UI or via `POST /api/questions/{id}/answer`), a new turn begins from Scout.
 
-The `ask_user` flow is what gates dangerous tools — see [../faq.md](../faq.md#why-does-the-agent-ask-me-to-confirm-things-like-web-searches-or-creating-a-skill).
+The `ask_user` flow is what gates dangerous tools — see [../faq.md](../faq.md#why-does-the-agent-ask-me-to-confirm-things-like-web-searches).

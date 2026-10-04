@@ -258,6 +258,13 @@ session, and run under the same rlimits as `bash`. The pattern composes with
 everything above: start the solver as a job, keep working the goal, read the
 log when the gate is ready to check it.
 
+Running detached-job records reconcile in pages of 100 on each maintenance tick
+(about 60 seconds), including the first tick after startup. Reconciliation reads
+exit sidecars and process state without sending signals, and cannot overwrite a
+concurrent kill. New wrappers atomically publish exit status and a UTC finish
+time. Legacy sidecars without that timestamp retain an unknown completion time;
+inspection time is never substituted as the job's duration.
+
 Scheduled cron jobs have a separate, unrelated validate-and-dry-run
 mechanism (`POST /api/jobs/{name}/validate`, `POST /api/jobs/{name}/test`) —
 see [../guides/scheduling-cron.md](../guides/scheduling-cron.md). This

@@ -6,6 +6,36 @@ For the full list of changes by date, see [changelog.md](changelog.md). For DB s
 
 ---
 
+## Preparing for 3.2
+
+The preview lives on `next-3.2-testing`; main promotion and a version/release tag
+are separate release steps. Review the [3.2 summary](changelog.md#32-preview--preparing-for-main)
+and [removed surfaces](#whats-gone-in-32) before updating prompts or integrations.
+
+1. Make a complete backup generation with `python scripts/backup.py`. Preserve
+   settings, secrets, skills and deployment overrides separately as described
+   below; a database-only copy is not a complete installation backup.
+2. Review your own skills, cron prompts and `RULES.md` for removed tools. Export
+   historical adaptive entries if wanted. Save local edits to shipped canaries
+   before restoring or replacing them; do not discard your only copy.
+3. Update dependencies and start the chosen branch. From 3.1, migrations v36–v44
+   run automatically. **v44** adds the exact skill-application backup/revision
+   journal; it cannot reconstruct missing associations for old applications.
+4. For Docker, rebuild the image: `docker compose up -d --build pernix`. A pull
+   alone does not replace baked application code. Preserve `.env`, data mounts
+   and any local `docker-compose.override.yml`.
+5. Check `/api/health`, session access and the maintenance diagnostics described
+   in [operations.md](operations.md). Verify the expected launch settings and
+   deployed commit/runtime files; the UI build ID alone is not a backend hash.
+
+New skill applications expose **Recent skill changes** and recovery for an
+interrupted apply. Rollback requires the exact saved backup and an unchanged
+current revision. Undo newer proposals first; manually restore older,
+unjournaled applications. Automatic canary-based skill rollback is removed.
+Legacy detached jobs reconcile after startup, but unknown finish times remain
+unknown. Daily compressed logging starts at upgrade; it cannot recover expired
+history. Old numbered logs are preserved.
+
 ## The standard upgrade path
 
 ```bash
@@ -99,7 +129,7 @@ Restoring a snapshot taken by an **older** Pernix is fine — migrations run for
 
 ## DB migrations
 
-The schema is at v43. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
+The schema is at v44. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
 
 If you ever need to downgrade Pernix to an older version (and therefore an older schema), the safe path is:
 
@@ -117,7 +147,7 @@ These are the upgrade points where something the user might have set up needs at
 
 ### What's gone in 3.2
 
-3.2 retires self-improvement systems that ran every day on the reference box without a measurable benefit (the evidence and decisions are in [dev/surface-prune-plan-2026-10.md](dev/surface-prune-plan-2026-10.md)). No table or row is dropped; the only migration is the data-only v43 below.
+3.2 retires self-improvement systems that ran every day on the reference box without a measurable benefit (the evidence and decisions are in [dev/surface-prune-plan-2026-10.md](dev/surface-prune-plan-2026-10.md)). Retired tables are retained. The retirement migration is data-only v43; the full 3.2 branch also includes earlier migrations and the v44 skill-application journal described above.
 
 - **Telos** (the operational question loop) is gone: the `telos_status` and `telos_ask` tools, `/api/telos/*`, the Explorer's Self-tuning → Goals tab, the Settings section, snooze Activity 16, the daily slow-loop job, the post-task hook and the `[TELOS]` line in the agent's current-state block. Every `telos_*` setting is removed; an old `data/settings.json` that still carries them loads fine (unknown keys are ignored). `data/telos/` is no longer read or written; move it aside or delete it. Old adaptive entries with `source: telos` stay in the (now retired) adaptive tables as history.
 - **Candor** (calibrated operational memory) is gone: the `predict_reliability`, `why_reliability` and `reliability_questions` tools, scout's `[OPERATIONAL INTEL]` brief, turn-end and memory-store emission, snooze Activity 12b and its adaptive routing-hint producer, dream's Candor evidence and `tool_pattern` hypotheses (a pending one expires with `method: candor_retired`), and the vendored wheel (`vendor/` is gone; `pip install -r requirements.txt` no longer installs `candor`). `http_get` no longer refuses domains with a poor logged fetch rate, and its `force` argument is gone (an old call that passes it still works; the argument is dropped). Settings removed: `candor_enabled`, `candor_scout_brief`, `candor_max_obs_per_turn`, `candor_store_dir`, `fetch_routing_enabled`, `fetch_routing_min_obs`, `fetch_routing_threshold`. `data/candor/` is no longer read or written; move it aside or delete it. Per-tool success and failure logging is unchanged: tool-message metadata, `post_mortems.tool_summary` and the scout's tool signals never went through Candor.
@@ -129,7 +159,7 @@ These are the upgrade points where something the user might have set up needs at
 - **Stale settings are ignored.** `eval_auto`, `eval_threshold`, `eval_max_retries`, `eval_browser_verify`, `plan_review_timeout` and `heartbeats_enabled` may remain in `data/settings.json`; `Settings.load()` ignores unknown keys, and the next save drops them.
 - **Your own `RULES.md`.** The shipped `data/agent/RULES.md` no longer mentions `create_tool` or `restore_tool_packages`, but a deployment with an edited copy may still tell the agent to use them. Remove those lines; the agent gets a "not found" hint if it tries.
 - **`/api/health`** no longer reports `database.artifacts`.
-- **Canaries** are change-driven, small and hand-curated. They run after a deploy (one sweep, 15 minutes after boot; restarts inside that window replace it), after a model swap, or when you press Run / Run all — there is no nightly heartbeat. Gone: the suite's self-growth (refine's canary proposals, auto-admission, vetting), its auto-maintenance (snooze Activity 12d: promotion, flap tagging, parking, one-off probe retirement, suite-health alerts, the maintenance summary), the 90-day staleness nudge, the skill-change targeted sweep (and with it the skill `verify:` sync), `PATCH /api/canary/{name}` (park/unpark), the agent's `canary_run` tool (`canary_status` stays), and the notices `canary.parked`, `canary.probe_retired`, `canary.suite_chronic`, `canary.suite_unhealthy`, `canary.maintenance`, `canary.auto_admitted`, `canary.stale` and `canary.contaminated`. A full sweep now posts one notice: `canary.sweep_failed` (a quiet bell item) when a canary gate-failed, else `canary.sweep_result` in Activity. A contaminated run is still recorded (`outcome='contaminated'`) and no longer notifies; its path heuristic is narrowed. Removed settings: `canary_schedule`, `canary_heartbeat_per_night`, `canary_auto_admit`, `canary_auto_maintain`, `canary_vetting_runs`, `canary_park_after_passes`, `canary_max_suite` (stale keys are ignored). Kept: `canary_enabled`, `canaries_dir`, `canary_retention_days`, `canary_purge_after_days` (retention now drains `.retired/`). The shipped suite is four canaries — `gen-file-create`, `gen-json-transform`, `link-digest` (a served page fetched with `http_get`) and `youtube-captions-digest` (needs the `youtube-whisper` skill in `data/skills/`; without it the run is a gate_fail). **On upgrade:** the eight removed seeds are deleted by the pull; if your copy of `data/canaries/` carries local edits (`parked: true` on the seeds), run `git checkout -- data/canaries` first. Untracked canaries you or the old auto-admission added (including managed `skill--*` ones) still load and run in Run all — retire the ones you do not want with `DELETE /api/canary/{name}`. `parked`, `max_runs` and `expires` keys still parse and are ignored. New CANARY.md keys: `serve:` (seed files served from `/workspace/.canary-serve/<token>/` for one run, with `{{SERVE_BASE}}` in the prompt and gates) and `tools:` (only `http_get` / `browse_web`). `http_get` to Pernix's own https host:port now verifies against Pernix's own certificate instead of failing.
+- **Canaries** are change-driven, small and hand-curated. They run after a deploy (one sweep, 15 minutes after boot; restarts inside that window replace it), after a model swap, or when you press Run / Run all — there is no nightly heartbeat. Gone: the suite's self-growth (refine's canary proposals, auto-admission, vetting), its auto-maintenance (snooze Activity 12d: promotion, flap tagging, parking, one-off probe retirement, suite-health alerts, the maintenance summary), the 90-day staleness nudge, the skill-change targeted sweep (and with it the skill `verify:` sync), `PATCH /api/canary/{name}` (park/unpark), the agent's `canary_run` tool (`canary_status` stays), and the notices `canary.parked`, `canary.probe_retired`, `canary.suite_chronic`, `canary.suite_unhealthy`, `canary.maintenance`, `canary.auto_admitted`, `canary.stale` and `canary.contaminated`. A full sweep now posts one notice: `canary.sweep_failed` (a quiet bell item) when a canary gate-failed, else `canary.sweep_result` in Activity. A contaminated run is still recorded (`outcome='contaminated'`) and no longer notifies; its path heuristic is narrowed. Removed settings: `canary_schedule`, `canary_heartbeat_per_night`, `canary_auto_admit`, `canary_auto_maintain`, `canary_vetting_runs`, `canary_park_after_passes`, `canary_max_suite` (stale keys are ignored). Kept: `canary_enabled`, `canaries_dir`, `canary_retention_days`, `canary_purge_after_days` (retention now drains `.retired/`). The shipped suite is four canaries — `gen-file-create`, `gen-json-transform`, `link-digest` (a served page fetched with `http_get`) and `youtube-captions-digest` (needs the `youtube-whisper` skill in `data/skills/`; without it the run is a gate_fail). **On upgrade:** the eight removed seeds are deleted by the pull; if your copy of `data/canaries/` carries local edits (`parked: true` on the seeds), save those edits outside the checkout before running `git restore -- data/canaries` to restore the tracked definitions. Untracked canaries you or the old auto-admission added (including managed `skill--*` ones) still load and run in Run all — retire the ones you do not want with `DELETE /api/canary/{name}`. `parked`, `max_runs` and `expires` keys still parse and are ignored. New CANARY.md keys: `serve:` (seed files served from `/workspace/.canary-serve/<token>/` for one run, with `{{SERVE_BASE}}` in the prompt and gates) and `tools:` (only `http_get` / `browse_web`). `http_get` to Pernix's own https host:port now verifies against Pernix's own certificate instead of failing.
 - **Skill self-healing: auto-apply now has checks.** Refine's SKILL.md proposals still apply themselves by default (`skill_proposal_auto_apply`, new, on), after the same 24-hour wait and 5-per-day cap, but only when they pass new checks: at most 1,500 characters, written as skill text (a note to an editor is unwrapped to the text inside, or refused), no near-copy of an existing heading, no push past the 5,000-character prompt limit, and at most 3 per skill per 30 days. A refused proposal waits in Explorer → Capabilities → Skills and is archived after 30 days — on an existing install the first cycle after upgrade may archive a backlog at once. Gone: the verify-canary automatic rollback and `core/canary/skill_verify.py` (a `verify:` block in SKILL.md is ignored), reflect's stuck-mode trial hints and the banner's trial tally, the setting `skill_proposal_auto_rollback`, and the notices `skills.auto_rolled_back` and `skills.verify_unsafe`. Rollback is manual: Roll back in the Skills tab. If an earlier auto-apply bloated a skill, its pre-apply copies are in `data/skill_backups/<skill>/`.
 - **Scout plans in one round by default** (`scout_max_rounds = 1`, new). Scout answers from its preloaded baseline and is offered only `submit_report`, which cuts the wait before a turn starts. Set `scout_max_rounds` (up to 6, Settings → Agent → **Scout Rounds**) to give it back its search tools and revision loop. The `scout.done` event carries a new `fallback_reason` field.
 

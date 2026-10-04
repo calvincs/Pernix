@@ -22,6 +22,14 @@ It is **not** a polished commercial product. It is a working personal tool with 
 
 ---
 
+## Preparing for 3.2
+
+`next-3.2-testing` contains the 3.2 preview; promotion to `main` is still pending.
+Read the [change summary](docs/changelog.md#32-preview--preparing-for-main),
+[upgrade checklist](docs/upgrade.md#preparing-for-32), and
+[operations guide](docs/operations.md). The application version remains 3.1.0
+until the release step.
+
 ## Features
 
 ### LLM Support
@@ -42,7 +50,7 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Skills system** — installable capability packs that teach the agent domain-specific procedures
 - **MCP client** ([docs](docs/mcp.md)) — plug in any Model Context Protocol server, local (stdio) or remote (Streamable HTTP); its tools register as first-class Pernix tools with scout curation, the safety gate, and health metrics, managed from the Explorer → Capabilities → Servers (MCP) tab with paste-compatible Claude Code / Cursor configs
 - **Cron scheduling** — run agents on a schedule for recurring tasks
-- **Reflect & retry** — a quality gate verifies each response and automatically retries if the agent missed the intent
+- **Reflect & retry** — model review checks responses against task evidence; ordinary chats are reviewed in the background by default, while worker and scheduled turns can use bounded retries. Unsupported factual corrections are withheld; model review is not proof of correctness
 - **Session kernel** — an optional persistent per-session Python REPL (`repl` tool) whose variables survive turns, compaction, and restarts; huge tool results auto-bind as variables instead of flooding context
 - **Spaces** ([guide](docs/guides/spaces.md)) — named, colored groups of long-lived sessions that share directives, memory, workspace, and kernel; Pernix can also *suggest* one for work you keep coming back to (off by default) — a suggestion is a row you accept or decline, nothing is created without your click
 - **Background jobs** — detached long-running compute via `job_start` / `job_status` / `job_tail` / `job_kill`: output captured to a log, completion durable across server restarts, wall-clock caps, whole-group kill
@@ -78,8 +86,10 @@ It is **not** a polished commercial product. It is a working personal tool with 
 
 ```bash
 # Clone and enter the project
-git clone <repository-url>
-cd pernix
+git clone https://github.com/calvincs/Pernix.git
+cd Pernix
+# Select the 3.2 preview while promotion to main is pending:
+git switch next-3.2-testing
 
 # Create and activate a virtual environment
 python3 -m venv .venv
