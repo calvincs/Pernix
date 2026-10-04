@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
-from dataclasses import dataclass, field
+from bisect import bisect_left
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 
 from config import settings
@@ -68,7 +70,7 @@ _name_tokens = name_tokens
 # ---------------------------------------------------------------------------
 
 
-def build_signatures(store) -> list[FileSignature]:
+def build_signatures(store, cancel_check=None) -> list[FileSignature]:
     """Build lightweight signatures for all active memory files."""
     from core.memory.format import parse_entries_from_markdown
 
@@ -76,6 +78,8 @@ def build_signatures(store) -> list[FileSignature]:
     signatures = []
 
     for f in files:
+        if cancel_check and cancel_check():
+            return []
         if f.entry_count == 0:
             continue
 
@@ -111,7 +115,7 @@ def build_signatures(store) -> list[FileSignature]:
 # ---------------------------------------------------------------------------
 
 
-def score_pair(a: FileSignature, b: FileSignature, threshold: float | None = None) -> float:
+def score_pair(a: FileSignature, b: FileSignature, threshold: float | None = None, cancel_check=None) -> float:
     """Compute weighted similarity between two file signatures.
 
     Weights: normalized-name 0.35, token-Jaccard 0.25,
@@ -169,6 +173,8 @@ def score_pair(a: FileSignature, b: FileSignature, threshold: float | None = Non
         needed = (threshold - partial) / 0.25 if threshold is not None else None
         for fp_a in a.content_fingerprints:
             for fp_b in b.content_fingerprints:
+                if cancel_check and cancel_check():
+                    return 0.0
                 sm = SequenceMatcher(None, fp_a, fp_b)
                 if sm.real_quick_ratio() < best or sm.quick_ratio() < best:
                     continue
@@ -211,7 +217,7 @@ def find_clusters(
         if cancel_check is not None and cancel_check():
             return []
         for j in range(i + 1, len(names)):
-            sim = score_pair(sig_map[names[i]], sig_map[names[j]], threshold=threshold)
+            sim = score_pair(sig_map[names[i]], sig_map[names[j]], threshold=threshold, cancel_check=cancel_check)
             if sim >= threshold:
                 adj[names[i]].add(names[j])
                 adj[names[j]].add(names[i])
@@ -245,6 +251,58 @@ def find_clusters(
     return clusters
 
 
+_SCAN_LOCK = threading.Lock()
+
+
+def scan_cluster_batch(signatures, cursor, cancel_check, *, pair_limit=2000, seconds=10):
+    """Bounded discovery with a durable pair cursor; output pairs never form giant merges.
+
+    Similarity is a candidate heuristic, not permission to discard entries. Sample
+    evenly across each file; merge validation still inspects original entries.
+    """
+    if not _SCAN_LOCK.acquire(blocking=False):
+        return [], cursor, False
+    try:
+        signatures = sorted(signatures, key=lambda s: s.name)
+        names = [s.name for s in signatures]
+        i = bisect_left(names, cursor.get("left", ""))
+        j = max(i + 1, bisect_left(names, cursor.get("right", "")))
+        sampled = [
+            replace(s, content_fingerprints=s.content_fingerprints[:: max(1, len(s.content_fingerprints) // 24)][:24])
+            for s in signatures
+        ]
+        clusters, checked = [], 0
+        deadline = time.monotonic() + seconds
+
+        def stopped():
+            return cancel_check() or time.monotonic() >= deadline
+
+        while i < len(sampled) - 1 and checked < pair_limit and len(clusters) < 3:
+            if stopped():
+                break
+            if j >= len(sampled):
+                i, j = i + 1, i + 2
+                continue
+            score = score_pair(sampled[i], sampled[j], settings.snooze_consolidation_cluster_threshold, stopped)
+            if stopped():
+                break
+            if score >= settings.snooze_consolidation_cluster_threshold:
+                clusters.append([sampled[i].name, sampled[j].name])
+            j += 1
+            checked += 1
+        finished = i >= len(sampled) - 1
+        return (
+            clusters,
+            {
+                "left": names[i] if i < len(names) else "",
+                "right": names[j] if j < len(names) else "\uffff",
+            },
+            finished,
+        )
+    finally:
+        _SCAN_LOCK.release()
+
+
 def prioritize_clusters(
     clusters: list[list[str]],
     sig_map: dict[str, FileSignature],
@@ -270,6 +328,7 @@ def prioritize_clusters(
 def plan_trivial_merge(
     cluster: list[str],
     store,
+    cancel_check=None,
 ) -> MergeDecision | None:
     """Plan a merge for clusters with the same normalized name.
 
@@ -322,6 +381,8 @@ def plan_trivial_merge(
     for i, (file_i, entry_i) in enumerate(all_entries):
         is_dup = False
         for j, (file_j, entry_j) in enumerate(all_entries):
+            if cancel_check and cancel_check():
+                return None
             if i == j:
                 continue
             sim = SequenceMatcher(None, entry_i.content, entry_j.content).ratio()

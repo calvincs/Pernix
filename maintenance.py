@@ -527,6 +527,15 @@ class MaintenanceRunner:
         manager = get_manager()
         tick = self._tick_count
 
+        # Every tick includes the first after startup. Independent of snooze.
+        from core.tools.builtin.jobs_tool import reconcile_running_jobs
+
+        try:
+            count = await asyncio.to_thread(reconcile_running_jobs)
+            self._stats["jobs_reconciled"] = self._stats.get("jobs_reconciled", 0) + count
+        except Exception:
+            logger.warning("Detached job reconciliation failed", exc_info=True)
+
         # Every tick (60s): reap dead subscribers, prune completed tasks
         reaped_subs = manager.reap_dead_subscribers()
         if reaped_subs:

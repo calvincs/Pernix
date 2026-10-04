@@ -5163,14 +5163,16 @@ def create_job(
         )
 
 
-def update_job(job_id: str, **kwargs) -> None:
+def update_job(job_id: str, *, expected_state: str | None = None, **kwargs) -> None:
     allowed = {"state", "exit_code", "finished_at", "pid"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return
     sets = ", ".join(f"{k} = ?" for k in updates)
     with connect_sessions() as conn:
-        conn.execute(f"UPDATE jobs SET {sets} WHERE id = ?", (*updates.values(), job_id))
+        where = "id = ?" + (" AND state = ?" if expected_state else "")
+        params = (*updates.values(), job_id, *((expected_state,) if expected_state else ()))
+        conn.execute(f"UPDATE jobs SET {sets} WHERE {where}", params)
 
 
 def get_job(job_id: str) -> dict | None:
@@ -5189,3 +5191,13 @@ def list_jobs(session_id: str | None = None, limit: int = 20) -> list[dict]:
         else:
             rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+
+def list_running_jobs(limit: int = 100, after_id: str = "") -> list[dict]:
+    with connect_sessions() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM jobs WHERE state='running' AND id > ? ORDER BY id LIMIT ?", (after_id, limit)
+            ).fetchall()
+        ]

@@ -345,12 +345,23 @@ def _refresh(job: dict) -> dict:
     exit_file = Path(job["log_path"]).parent / "exit_code"
     if exit_file.exists():
         try:
-            code = int(exit_file.read_text().strip() or "1")
+            raw = exit_file.read_text().strip()
+            if not raw:
+                return job  # A legacy wrapper may still be publishing its status.
+            code = int(raw)
         except ValueError:
             code = 1
         state = "timeout" if code == 124 else ("done" if code == 0 else "failed")
-        db.update_job(job["id"], state=state, exit_code=code, finished_at=_now_iso())
-        job.update(state=state, exit_code=code)
+        finished_at = None
+        try:
+            stamp = (exit_file.parent / "finished_at").read_text().strip()
+            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                finished_at = parsed.isoformat()
+        except (OSError, ValueError):
+            pass  # Legacy sidecars have no trustworthy completion timestamp.
+        db.update_job(job["id"], expected_state="running", state=state, exit_code=code, finished_at=finished_at)
+        job = db.get_job(job["id"]) or job
         return job
     if not _pid_alive(job["pid"]):
         # The wrapper is gone, which is not the same as the job being gone: a
@@ -360,9 +371,21 @@ def _refresh(job: dict) -> dict:
         # lost to a server restart racing the wrapper's last write.
         if _live_members(_read_containment(job)):
             return job
-        db.update_job(job["id"], state="lost", finished_at=_now_iso())
-        job.update(state="lost")
+        db.update_job(job["id"], expected_state="running", state="lost", finished_at=None)
+        job = db.get_job(job["id"]) or job
     return job
+
+
+def reconcile_running_jobs(limit: int = 100) -> int:
+    """Bounded read-only process inspection; never sends signals to a PID."""
+    from db import models as db
+
+    cursor = db.get_snooze_state("detached_job_cursor") or ""
+    jobs = db.list_running_jobs(limit, cursor)
+    if not jobs and cursor:
+        jobs = db.list_running_jobs(limit)
+    db.set_snooze_state("detached_job_cursor", jobs[-1]["id"] if len(jobs) == limit else "")
+    return sum(_refresh(job)["state"] != "running" for job in jobs)
 
 
 def _tail_lines(log_path: str, n: int) -> list[str]:
@@ -389,6 +412,8 @@ def _job_cwd(job: dict) -> str:
 
 def _elapsed(job: dict) -> str:
     try:
+        if job.get("state") != "running" and not job.get("finished_at"):
+            return "unknown"
         start = datetime.fromisoformat(job["created_at"])
         end = datetime.fromisoformat(job["finished_at"]) if job.get("finished_at") else datetime.now(timezone.utc)
         s = int((end - start).total_seconds())
@@ -484,10 +509,17 @@ def job_start(
     job_dir.mkdir(parents=True, exist_ok=True)
     log_path = job_dir / "output.log"
     exit_file = job_dir / "exit_code"
+    finish_file = job_dir / "finished_at"
 
     # coreutils `timeout` gives a thread-free hard cap (exit 124); the
     # wrapper's final echo makes completion durable across server restarts.
-    wrapped = f"timeout -k 10 {timeout_s} bash -c {shlex.quote(command)}; " f"echo $? > {shlex.quote(str(exit_file))}"
+    wrapped = (
+        f"timeout -k 10 {timeout_s} bash -c {shlex.quote(command)}; result=$?; "
+        f"date -u +%Y-%m-%dT%H:%M:%SZ > {shlex.quote(str(finish_file) + '.tmp')}; "
+        f"mv {shlex.quote(str(finish_file) + '.tmp')} {shlex.quote(str(finish_file))}; "
+        f'echo "$result" > {shlex.quote(str(exit_file) + ".tmp")}; '
+        f"mv {shlex.quote(str(exit_file) + '.tmp')} {shlex.quote(str(exit_file))}"
+    )
 
     # Same environment bash gets — venv on PATH, VIRTUAL_ENV set, env-mode
     # filter applied. A bare os.environ.copy() left jobs on the system

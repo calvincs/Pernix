@@ -26,6 +26,7 @@ plausibly hold its thread for seconds or longer, it belongs on this pool.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -64,7 +65,9 @@ async def run_background(fn, /, *args, **kwargs):
     cancelling the awaiting task abandons the result but does not stop the work.
     """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(get_background_executor(), functools.partial(fn, *args, **kwargs))
+    return await loop.run_in_executor(
+        get_background_executor(), contextvars.copy_context().run, functools.partial(fn, *args, **kwargs)
+    )
 
 
 def shutdown_background_executor(wait: bool = False) -> None:
