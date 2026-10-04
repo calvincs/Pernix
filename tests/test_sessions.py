@@ -33,15 +33,11 @@ def test_v2_happy_turn_transitions():
     assert sv2._current_state(s) is sv2.SessionStateV2.IDLE_READY
 
 
-def test_v2_invariant_violation_still_writes_and_mutates():
-    """The mutator is forgiving by design: illegal edges log a warning
-    (the row is tagged 'invariant-violation:<reason>') and the transition
-    still completes. The point is forensics, not crash-on-bug — partial
-    state after a crash in production is worse than a stern diagnostic."""
+def test_v2_invalid_edge_is_rejected():
+    """An undeclared edge leaves the live state unchanged."""
     s = AgentSession(session_id="test")
-    # Edge NOT in the graph: IDLE_READY → PROCESSING directly.
-    sv2.transition(s, sv2.SessionStateV2.PROCESSING, "scout-done")
-    assert sv2._current_state(s) is sv2.SessionStateV2.PROCESSING
+    assert sv2.transition(s, sv2.SessionStateV2.PROCESSING, "scout-done") is False
+    assert sv2._current_state(s) is sv2.SessionStateV2.IDLE_READY
 
 
 def test_v2_error_path_collapses_to_finalizing():

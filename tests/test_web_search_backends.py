@@ -36,24 +36,24 @@ def test_tavily_limit_emits_one_shot_alert(monkeypatch):
     monkeypatch.setattr(
         web,
         "_emit_backend_alert",
-        lambda title, body, urgency: notifications.append((title, body, urgency)),
+        lambda category, title, body: notifications.append((category, title, body)),
     )
 
     # First call: alert should fire
     web.search_web("query 1")
     assert len(notifications) == 1
-    title, _body, urgency = notifications[0]
+    category, title, _body = notifications[0]
     assert "Tavily" in title and "limit" in title.lower()
-    assert urgency == "normal"
+    assert category == "system.tavily_limit"
 
     # Second call: no extra alert (one-shot)
     web.search_web("query 2")
     assert len(notifications) == 1, "alert fired again — one-shot guard broken"
 
 
-def test_tavily_invalid_key_emits_separate_high_alert(monkeypatch):
+def test_tavily_invalid_key_emits_separate_key_alert(monkeypatch):
     """Invalid key is a different fault than over-limit — fires its own
-    high-urgency alert (operator must update the key)."""
+    alert under its own category (operator must update the key)."""
     import core.extensions.web as web
 
     monkeypatch.setenv("TAVILY_API_KEY", "bogus")
@@ -67,14 +67,15 @@ def test_tavily_invalid_key_emits_separate_high_alert(monkeypatch):
     monkeypatch.setattr(
         web,
         "_emit_backend_alert",
-        lambda title, body, urgency: notifications.append((title, body, urgency)),
+        lambda category, title, body: notifications.append((category, title, body)),
     )
 
     out = web.search_web("anything")
     assert len(notifications) == 1
-    title, _body, urgency = notifications[0]
+    category, title, _body = notifications[0]
     assert "rejected" in title.lower() or "invalid" in title.lower()
-    assert urgency == "high"
+    # Its own category (the tier lives in core/notices.py, not here).
+    assert category == "system.tavily_key"
     # Return value must be an actionable error, not a silent empty
     assert "Error" in out
     assert "Tavily" in out

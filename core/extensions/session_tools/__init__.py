@@ -146,27 +146,6 @@ def agent_state(_context: dict | None = None) -> str:
         except Exception:
             pass
         try:
-            kinds = conn.execute(
-                "SELECT kind, COUNT(*) c FROM adaptive_entries WHERE status = 'active' GROUP BY kind"
-            ).fetchall()
-            pending = conn.execute(
-                "SELECT COUNT(*) c, SUM(CASE WHEN producer = 'agent' THEN 1 ELSE 0 END) mine "
-                "FROM adaptive_proposals WHERE status = 'pending'"
-            ).fetchone()
-            # status is the authoritative field — flagged_reason survives a
-            # clear/expiry, and counting it over-reported 5 where 1 batch was
-            # actually suspect (found by the agent live-validating this tool).
-            suspect = conn.execute("SELECT COUNT(*) c FROM adaptive_batches WHERE status = 'suspect'").fetchone()["c"]
-            if kinds or (pending and pending["c"]):
-                kind_str = ", ".join(f"{k['c']} {k['kind']}" for k in kinds) or "none"
-                lines.append(
-                    f"ADAPTIVE: active entries: {kind_str}; pending proposals: "
-                    f"{pending['c'] if pending else 0} ({int(pending['mine'] or 0) if pending else 0} yours); "
-                    f"suspect batches: {suspect}"
-                )
-        except Exception:
-            pass
-        try:
             fails = conn.execute(
                 "SELECT task, created_at FROM canary_runs WHERE outcome = 'gate_fail' "
                 "ORDER BY created_at DESC LIMIT 3"
@@ -196,19 +175,6 @@ def agent_state(_context: dict | None = None) -> str:
         mem_files = len(list(_P(_s.memory_dir).glob("*.md"))) if getattr(_s, "memory_dir", "") else 0
         if mem_files:
             lines.append(f"MEMORY STORE: {mem_files} files (recall/deep_recall to query)")
-    except Exception:
-        pass
-    try:
-        from config import settings as _s
-
-        if _s.telos_enabled:
-            from core.telos.store import TelosStore
-
-            store = TelosStore.open()
-            alarms = store.list_alarms(open_only=True)
-            qs = store.list_questions(state="open")
-            if alarms or qs:
-                lines.append(f"TELOS: {len(qs)} open questions, {len(alarms)} alarms (telos_status for detail)")
     except Exception:
         pass
 
@@ -243,9 +209,8 @@ def register(reg) -> None:
         func=agent_state,
         description=(
             "One-call digest of platform state: work in flight (sessions, jobs, RLM), "
-            "this session's recent reflect verdicts, recent notifications, adaptive-layer "
-            "state (active entries, pending proposals, suspect batches), recent canary "
-            "gate-fails, cron health, memory-store size, telos alarms. Use INSTEAD of "
+            "this session's recent reflect verdicts, recent notifications, recent canary "
+            "gate-fails, cron health and memory-store size. Use INSTEAD of "
             "querying each subsystem separately when asked about Pernix's own state."
         ),
         parameters={"type": "object", "properties": {}},

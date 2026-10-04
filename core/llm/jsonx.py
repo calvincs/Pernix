@@ -1,6 +1,6 @@
 """Pernix — best-effort JSON extraction from background-model output.
 
-Background activities (memory file-split, dream hypothesize, telos soup) ask
+Background activities (memory file-split, dream hypothesize) ask
 the Background model for machine-readable JSON and parse it with ad-hoc
 fence-stripping. On the live box the qwen3.8 MTP tag broke all three at once:
 its output sometimes arrives wrapped in prose or fences, and sometimes the

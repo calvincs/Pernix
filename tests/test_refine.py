@@ -127,7 +127,7 @@ def test_parse_refine_output_handles_fences():
     from core.refine import _parse_refine_output
 
     fenced = "```json\n" + json.dumps({"nothing_actionable": False, "proposals": [], "lessons": []}) + "\n```"
-    proposals, lessons, edits, canaries, na = _parse_refine_output(fenced)
+    proposals, lessons, na = _parse_refine_output(fenced)
     assert proposals == []
     assert lessons == []
     assert na is False
@@ -137,39 +137,38 @@ def test_parse_refine_output_nothing_actionable_flag():
     from core.refine import _parse_refine_output
 
     raw = json.dumps({"nothing_actionable": True, "proposals": [], "lessons": []})
-    _, _, _, _, na = _parse_refine_output(raw)
+    _, _, na = _parse_refine_output(raw)
     assert na is True
 
 
 def test_parse_refine_output_malformed_returns_empty():
     from core.refine import _parse_refine_output
 
-    proposals, lessons, edits, canaries, na = _parse_refine_output("not json at all")
+    proposals, lessons, na = _parse_refine_output("not json at all")
     assert proposals == []
     assert lessons == []
     assert na is False
 
 
-def test_parse_refine_output_enforces_confidence_floor_and_edit_cap():
-    """The contract's 'skip below 0.6' and 'at most 2 edits' were prompt
-    prose only — now mechanical. Edits without a confidence field (older
-    model outputs) pass; an explicit low confidence does not."""
-    from core.refine import _parse_refine_output
+def test_parse_refine_output_ignores_retired_adaptive_edits():
+    """adaptive_edits and canary_proposals left the refine contract in 3.2:
+    a model that still emits either key gets a 3-tuple back and nothing
+    queued anywhere."""
+    from core.refine import REFINE_PROMPT, _parse_refine_output
 
     raw = json.dumps(
         {
             "proposals": [],
             "lessons": [],
-            "adaptive_edits": [
-                {"action": "create", "kind": "prompt_note", "title": "low", "content": "x", "confidence": 0.4},
-                {"action": "create", "kind": "prompt_note", "title": "a", "content": "x", "confidence": 0.9},
-                {"action": "create", "kind": "prompt_note", "title": "legacy-no-conf", "content": "x"},
-                {"action": "create", "kind": "prompt_note", "title": "capped-out", "content": "x", "confidence": 0.8},
-            ],
+            "adaptive_edits": [{"action": "create", "kind": "prompt_note", "title": "a", "content": "x"}],
+            "canary_proposals": [{"name": "x", "prompt": "y", "gates": []}],
         }
     )
-    _, _, edits, _, _ = _parse_refine_output(raw)
-    assert [e["title"] for e in edits] == ["a", "legacy-no-conf"]  # floor dropped 'low', cap dropped the 4th
+    out = _parse_refine_output(raw)
+    assert len(out) == 3
+    assert out[0] == [] and out[1] == [] and out[2] is False
+    assert "adaptive_edits" not in REFINE_PROMPT
+    assert "canary_proposals" not in REFINE_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -575,3 +574,82 @@ def test_pending_proposal_counts_excludes_resolved():
 
     counts = db.get_pending_proposal_counts_by_skill()
     assert "gamma-skill" not in counts
+
+
+# ---------------------------------------------------------------------------
+# add_skill_proposal — session-origin defaults
+# ---------------------------------------------------------------------------
+
+
+def test_add_skill_proposal_session_origin_defaults():
+    from db import models as db
+
+    pid = db.add_skill_proposal(
+        skill_name="x",
+        section="Notes",
+        problem="p",
+        proposed_change="c",
+        confidence=0.7,
+        source_origin="session",
+        session_id="s123",
+    )
+    row = db.get_skill_proposal(pid)
+    assert row["source_origin"] == "session"
+    assert row["session_id"] == "s123"
+    assert row["workflow_name"] is None
+    assert row["run_id"] is None
+
+
+def test_add_skill_proposal_refine_origin():
+    """The authoring pass (core/refine.py) tags its proposals 'refine'."""
+    from db import models as db
+
+    pid = db.add_skill_proposal(
+        skill_name="x",
+        section="Notes",
+        problem="p",
+        proposed_change="c",
+        confidence=0.7,
+        source_origin="refine",
+        session_id="s9",
+    )
+    row = db.get_skill_proposal(pid)
+    assert row["source_origin"] == "refine"
+    assert row["session_id"] == "s9"
+    # Legacy columns are written NULL now that the workflow engine is gone.
+    assert row["workflow_name"] is None
+    assert row["run_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# list_skill_proposals — origin filter
+# ---------------------------------------------------------------------------
+
+
+def test_list_proposals_filter_by_origin():
+    from db import models as db
+
+    db.add_skill_proposal(
+        skill_name="x",
+        section="",
+        problem="p",
+        proposed_change="c",
+        confidence=0.7,
+        source_origin="refine",
+        session_id="s0",
+    )
+    db.add_skill_proposal(
+        skill_name="x",
+        section="",
+        problem="p",
+        proposed_change="c",
+        confidence=0.7,
+        source_origin="session",
+        session_id="s1",
+    )
+    refine_only = db.list_skill_proposals(source_origin="refine")
+    session_only = db.list_skill_proposals(source_origin="session")
+    both = db.list_skill_proposals()
+    assert len(refine_only) == 1
+    assert len(session_only) == 1
+    assert len(both) == 2

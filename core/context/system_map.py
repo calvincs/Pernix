@@ -36,10 +36,6 @@ _MAPPED_TABLES = (
     "gates",
     "session_goals",
     "token_usage",
-    "adaptive_entries",
-    "adaptive_events",
-    "adaptive_batches",
-    "adaptive_proposals",
     "canary_runs",
     "rlm_runs",
     "dream_hypotheses",
@@ -58,10 +54,7 @@ data/workspace/spaces/    per-space home folders (space sessions work here; runs
 data/skills/              skills (SKILL.md + scripts/ + references/)
 data/agent/               SOUL.md / RULES.md / SESSIONS.md (user-owned — never machine-written)
 data/agent/spaces/<slug>/ per-space directive overrides (same three files; present file wins)
-data/adaptive/ADAPTIVE.md read-only mirror of the adaptive store (never read back)
 data/canaries/            canary suite (CANARY.md per task)
-data/telos/               telos layer (questions/soup/claims/ledgers, markdown+YAML)
-data/candor/              candor operational-memory store
 data/kernels/<sid>/       session-kernel snapshots + large-tool-result payloads
 data/settings.json        runtime settings
 data/cron_jobs.json       scheduled jobs"""
@@ -88,13 +81,6 @@ CONTEXT_BLOCKS = (
         "space membership, workspace home (soft, not a sandbox), memory prefix",
     ),
     (
-        "Adaptive notes/policies",
-        "adaptive store (machine)",
-        "advisory — RULES.md wins",
-        "idle applies",
-        "learned prompt_notes + policies, with producer + evidence",
-    ),
-    (
         "[AVAILABLE SKILLS]",
         "skill registry",
         "reference",
@@ -118,7 +104,6 @@ CONTEXT_BLOCKS = (
     ),
     ("[CURRENT STATE]", "compiler volatile tail", "reference", "per round", "clock, resource status, goal burn"),
     ("[RESOURCE STATUS]", "agent loop", "binding (rounds)", "per round", "context %, spend, rounds remaining"),
-    ("[TELOS]", "telos store", "FYI", "60s cache", "open questions, alarms (text), drive baseline"),
     (
         "[WORKERS YOU ARE WATCHING]",
         "sessions table",
@@ -131,7 +116,7 @@ CONTEXT_BLOCKS = (
         "turn ledger (composed)",
         "reference — verify before acting",
         "per turn",
-        "finished work, last verdict, adaptive changes, canary regressions, platform restarts",
+        "finished work, last verdict, open questions, canary regressions, platform restarts",
     ),
     (
         "PRIOR ATTEMPT DIGEST",
@@ -147,10 +132,7 @@ _STORE_TOOLS = """\
 |---|---|---|
 | long-term memory | recall, deep_recall | remember (supersede= for one-call repair), update_memory, forget |
 | session history | list_recent_sessions, read_session_summary, search_sessions | (automatic) |
-| adaptive store | rendered into prompt; /api/adaptive/* | adaptive_note (2/day, linted) |
-| candor ledger | predict_reliability, why_reliability, reliability_questions | (automatic capture) |
-| telos layer | telos_status, telos_ask | telos_ask (mints questions) |
-| skills | load_skill, read_skill_instructions | create_skill / update_skill |
+| skills | load_skill, read_skill_instructions | SKILL.md file (data/skills/<name>/); Skills panel editor |
 | post-mortems | (scout: search_post_mortems) | (reflect writes them) |
 | workspace files | file_read, grep, glob, bash, repl | file_write, bash |"""
 

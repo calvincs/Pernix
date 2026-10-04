@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
-from dataclasses import dataclass, field
+from bisect import bisect_left
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 
 from config import settings
@@ -68,7 +70,7 @@ _name_tokens = name_tokens
 # ---------------------------------------------------------------------------
 
 
-def build_signatures(store) -> list[FileSignature]:
+def build_signatures(store, cancel_check=None) -> list[FileSignature]:
     """Build lightweight signatures for all active memory files."""
     from core.memory.format import parse_entries_from_markdown
 
@@ -76,6 +78,8 @@ def build_signatures(store) -> list[FileSignature]:
     signatures = []
 
     for f in files:
+        if cancel_check and cancel_check():
+            return []
         if f.entry_count == 0:
             continue
 
@@ -111,7 +115,7 @@ def build_signatures(store) -> list[FileSignature]:
 # ---------------------------------------------------------------------------
 
 
-def score_pair(a: FileSignature, b: FileSignature, threshold: float | None = None) -> float:
+def score_pair(a: FileSignature, b: FileSignature, threshold: float | None = None, cancel_check=None) -> float:
     """Compute weighted similarity between two file signatures.
 
     Weights: normalized-name 0.35, token-Jaccard 0.25,
@@ -169,6 +173,8 @@ def score_pair(a: FileSignature, b: FileSignature, threshold: float | None = Non
         needed = (threshold - partial) / 0.25 if threshold is not None else None
         for fp_a in a.content_fingerprints:
             for fp_b in b.content_fingerprints:
+                if cancel_check and cancel_check():
+                    return 0.0
                 sm = SequenceMatcher(None, fp_a, fp_b)
                 if sm.real_quick_ratio() < best or sm.quick_ratio() < best:
                     continue
@@ -211,7 +217,7 @@ def find_clusters(
         if cancel_check is not None and cancel_check():
             return []
         for j in range(i + 1, len(names)):
-            sim = score_pair(sig_map[names[i]], sig_map[names[j]], threshold=threshold)
+            sim = score_pair(sig_map[names[i]], sig_map[names[j]], threshold=threshold, cancel_check=cancel_check)
             if sim >= threshold:
                 adj[names[i]].add(names[j])
                 adj[names[j]].add(names[i])
@@ -245,6 +251,58 @@ def find_clusters(
     return clusters
 
 
+_SCAN_LOCK = threading.Lock()
+
+
+def scan_cluster_batch(signatures, cursor, cancel_check, *, pair_limit=2000, seconds=10):
+    """Bounded discovery with a durable pair cursor; output pairs never form giant merges.
+
+    Similarity is a candidate heuristic, not permission to discard entries. Sample
+    evenly across each file; merge validation still inspects original entries.
+    """
+    if not _SCAN_LOCK.acquire(blocking=False):
+        return [], cursor, False
+    try:
+        signatures = sorted(signatures, key=lambda s: s.name)
+        names = [s.name for s in signatures]
+        i = bisect_left(names, cursor.get("left", ""))
+        j = max(i + 1, bisect_left(names, cursor.get("right", "")))
+        sampled = [
+            replace(s, content_fingerprints=s.content_fingerprints[:: max(1, len(s.content_fingerprints) // 24)][:24])
+            for s in signatures
+        ]
+        clusters, checked = [], 0
+        deadline = time.monotonic() + seconds
+
+        def stopped():
+            return cancel_check() or time.monotonic() >= deadline
+
+        while i < len(sampled) - 1 and checked < pair_limit and len(clusters) < 3:
+            if stopped():
+                break
+            if j >= len(sampled):
+                i, j = i + 1, i + 2
+                continue
+            score = score_pair(sampled[i], sampled[j], settings.snooze_consolidation_cluster_threshold, stopped)
+            if stopped():
+                break
+            if score >= settings.snooze_consolidation_cluster_threshold:
+                clusters.append([sampled[i].name, sampled[j].name])
+            j += 1
+            checked += 1
+        finished = i >= len(sampled) - 1
+        return (
+            clusters,
+            {
+                "left": names[i] if i < len(names) else "",
+                "right": names[j] if j < len(names) else "\uffff",
+            },
+            finished,
+        )
+    finally:
+        _SCAN_LOCK.release()
+
+
 def prioritize_clusters(
     clusters: list[list[str]],
     sig_map: dict[str, FileSignature],
@@ -270,6 +328,7 @@ def prioritize_clusters(
 def plan_trivial_merge(
     cluster: list[str],
     store,
+    cancel_check=None,
 ) -> MergeDecision | None:
     """Plan a merge for clusters with the same normalized name.
 
@@ -322,6 +381,8 @@ def plan_trivial_merge(
     for i, (file_i, entry_i) in enumerate(all_entries):
         is_dup = False
         for j, (file_j, entry_j) in enumerate(all_entries):
+            if cancel_check and cancel_check():
+                return None
             if i == j:
                 continue
             sim = SequenceMatcher(None, entry_i.content, entry_j.content).ratio()
@@ -386,22 +447,156 @@ Output format:
 /no_think"""
 
 
-def build_llm_merge_prompt(cluster: list[str], store) -> str:
-    """Build LLM prompt for ambiguous merge decisions."""
+# Output tokens the merge call asks for (sweeps passes the same number as
+# max_tokens); the prompt budget has to leave room for them.
+LLM_MERGE_MAX_TOKENS = 2000
+# Preview ladder. The prompt used to splice 1024 chars of EVERY entry of
+# EVERY file in the cluster with no total cap: the two largest clusters on
+# the live box produced ~195K-token prompts against a 196 608-token window,
+# so vLLM 400'd the same two clusters every cycle and neither ever merged.
+_PREVIEW_STEPS = (1024, 512, 256)
+# Floor for the drop pass: every file in the cluster keeps at least this many
+# of its newest entries, so a merge decision still sees each file it is about
+# to rewrite rather than silently consolidating a cluster it never read.
+_MIN_ENTRIES_PER_FILE = 3
+# Absurd-budget guard: a misconfigured tiny context must not produce a
+# zero-length prompt, it should fall through to the pair fallback instead.
+_MIN_PROMPT_TOKENS = 1000
+
+
+def merge_model() -> str:
+    """The model the consolidation call actually runs on (see sweeps)."""
+    return settings.background_model or settings.llm_model
+
+
+def merge_prompt_token_budget(model: str = "") -> int:
+    """Tokens the merge prompt may occupy on `model`.
+
+    window (registry-derived, already 10% under the real one) minus the
+    output reservation. core/llm/budget.derive_model_budget is the single
+    source of truth for "how much context does this model really have";
+    settings.context_budget stands in for the window when the registry does
+    not know the model (context_auto off, or a name it has never seen), with
+    the same 10% margin applied by hand — the estimate below is ±15% on the
+    char heuristic, and the margin is what absorbs it.
+    """
+    from core.llm.budget import derive_model_budget
+
+    window = derive_model_budget(model or merge_model())
+    if not window:
+        window = int(settings.context_budget * 0.9)
+    return max(_MIN_PROMPT_TOKENS, int(window) - LLM_MERGE_MAX_TOKENS)
+
+
+def _estimate_tokens(text: str) -> int:
+    """The codebase's own estimate (tiktoken when present, chars otherwise)."""
+    try:
+        from core.context.tokens import get_estimator
+
+        return get_estimator().count(text)
+    except Exception:
+        return len(text) // 4
+
+
+def _entry_part(idx: int, name: str, entry, preview_chars: int) -> str:
+    return f'{idx}. "{name}" (epoch={entry.epoch})\n' f"   Content: {entry.content[:preview_chars]}"
+
+
+def build_budgeted_merge_prompt(
+    cluster: list[str],
+    store,
+    budget_tokens: int | None = None,
+) -> tuple[str, bool]:
+    """(prompt, fits) — the merge prompt, shrunk to fit `budget_tokens`.
+
+    Shrinking happens in the order that costs the least information:
+
+      1. every entry of every file at 1024-char previews (the old, uncapped
+         behaviour) — used whenever it fits;
+      2. the same entries at 512 then 256 chars, evenly across the cluster,
+         so no file is favoured;
+      3. at the 256-char floor, drop the OLDEST entries first, always from
+         whichever file still has the most, keeping at least
+         _MIN_ENTRIES_PER_FILE newest per file — every file in the cluster
+         stays represented.
+
+    `fits` is False when even step 3's floor is over budget. The caller's
+    answer to that is a smaller cluster (sweeps consolidates the
+    largest-overlap PAIR instead), not a prompt it knows will be rejected.
+    """
     from core.memory.format import parse_entries_from_markdown
 
-    parts = []
+    if budget_tokens is None:
+        budget_tokens = merge_prompt_token_budget()
+
+    # {file: [entries oldest-first]}, in cluster order.
+    per_file: dict[str, list] = {}
+    numbering: dict[str, int] = {}
     for idx, name in enumerate(cluster, 1):
         md = store.read_file(name)
         if not md:
             continue
-        entries = parse_entries_from_markdown(name, md)
-        for entry in entries:
-            content_preview = entry.content[:1024]
-            parts.append(f'{idx}. "{name}" (epoch={entry.epoch})\n' f"   Content: {content_preview}")
+        entries = sorted(parse_entries_from_markdown(name, md), key=lambda e: e.epoch)
+        if not entries:
+            continue
+        per_file[name] = entries
+        numbering[name] = idx
 
-    file_entries = "\n".join(parts)
-    return _LLM_MERGE_PROMPT.format(file_entries=file_entries)
+    def render(parts_by_file: dict[str, list[tuple[str, int]]]) -> str:
+        parts = [p for name in parts_by_file for p, _ in parts_by_file[name]]
+        return _LLM_MERGE_PROMPT.format(file_entries="\n".join(parts))
+
+    if not per_file:
+        return _LLM_MERGE_PROMPT.format(file_entries=""), True
+
+    # The template itself is part of the budget.
+    room = budget_tokens - _estimate_tokens(_LLM_MERGE_PROMPT.format(file_entries=""))
+
+    parts_by_file: dict[str, list[tuple[str, int]]] = {}
+    for preview in _PREVIEW_STEPS:
+        parts_by_file = {
+            name: [
+                (part, _estimate_tokens(part))
+                for part in (_entry_part(numbering[name], name, e, preview) for e in entries)
+            ]
+            for name, entries in per_file.items()
+        }
+        total = sum(cost for parts in parts_by_file.values() for _, cost in parts)
+        if total <= room:
+            return render(parts_by_file), True
+
+    # Floor reached and still over: drop oldest entries, biggest file first.
+    while total > room:
+        biggest = max(
+            (n for n, parts in parts_by_file.items() if len(parts) > _MIN_ENTRIES_PER_FILE),
+            key=lambda n: len(parts_by_file[n]),
+            default=None,
+        )
+        if biggest is None:
+            break
+        total -= parts_by_file[biggest].pop(0)[1]
+
+    return render(parts_by_file), total <= room
+
+
+def largest_overlap_pair(cluster: list[str], sig_map: dict[str, FileSignature]) -> list[str]:
+    """The two files in `cluster` that overlap most, by the clustering score.
+
+    The partial-merge fallback for a cluster too large to describe inside the
+    context window: merging its most-overlapping pair is real progress (the
+    cluster shrinks by one file and the next cycle re-scores it), where
+    re-sending the whole cluster is a 400 every cycle forever.
+    """
+    best: list[str] = []
+    best_score = -1.0
+    for i, a in enumerate(cluster):
+        for b in cluster[i + 1 :]:
+            if a not in sig_map or b not in sig_map:
+                continue
+            score = score_pair(sig_map[a], sig_map[b])
+            if score > best_score:
+                best_score, best = score, [a, b]
+    return best or cluster[:2]
 
 
 def parse_llm_merge_response(
@@ -481,7 +676,7 @@ def execute_merge(store, decision: MergeDecision) -> dict:
 
     Moves kept entries to target, archives source files, logs to DB.
     """
-    from core.memory.format import format_entry, parse_entries_from_markdown
+    from core.memory.format import parse_entries_from_markdown
     from db.database import connect_memory
 
     stats = {

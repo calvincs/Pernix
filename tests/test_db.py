@@ -158,3 +158,5 @@ def test_db_stats():
     assert "sessions" in stats
     assert stats["sessions"] >= 1
     assert "db_size_bytes" in stats
+    # The artifacts table is never written; it is not reported (2026-10 prune).
+    assert "artifacts" not in stats

@@ -9,6 +9,14 @@
 2. The daily tier fired on `tick % 1440`, a per-process counter. A box
    that restarts daily never reached 1440, so the memory self-repair, the
    incremental vacuum and the aux-table prunes never ran at all.
+
+Extended 2026-09-08 (3.2.2 audit S20). Moving the schedule onto the clock
+fixed *when* the tier is attempted and said nothing about whether it
+finished: the durable stamp was written before any work started, so an
+interrupted tier and a completed one left the same row. These tests now cover
+both halves — the schedule, and what "ran" means. The full suite for the
+completion semantics is in
+tests/regressions/test_2026-09-08_a_slow_health_check_skipped_a_days_maintenance.py.
 """
 
 import asyncio
@@ -17,7 +25,7 @@ import time
 import pytest
 
 from db import models as db
-from maintenance import MaintenanceRunner
+from maintenance import DAILY_DUTIES, MaintenanceRunner
 
 
 @pytest.fixture
@@ -90,7 +98,7 @@ async def test_only_one_snooze_cycle_runs_at_a_time(heartbeat, monkeypatch):
 def test_the_daily_tier_is_keyed_on_the_clock(heartbeat):
     db.set_snooze_state(heartbeat._DAILY_TIER_KEY, "")
     assert heartbeat._daily_tier_due() is True, "first run on a fresh box"
-    assert heartbeat._daily_tier_due() is False, "not again in the same day"
+    assert heartbeat._daily_tier_due() is False, "not again on the next tick"
 
 
 def test_the_daily_tier_survives_a_restart(heartbeat):
@@ -103,3 +111,52 @@ def test_the_daily_tier_survives_a_restart(heartbeat):
 def test_the_daily_tier_comes_due_again_after_24h(heartbeat):
     db.set_snooze_state(heartbeat._DAILY_TIER_KEY, str(time.time() - 25 * 3600))
     assert heartbeat._daily_tier_due() is True
+
+
+# ---------------------------------------------------------------------------
+# 3. "Ran" has to mean the work happened
+# ---------------------------------------------------------------------------
+#
+# The clock fixed WHEN the tier is attempted. What it could not say is whether
+# the attempt got anywhere: the stamp above was written before a single duty
+# started, so a tier cut short by the tick timeout left exactly the row a
+# completed one leaves — and suppressed the vacuum and five prunes for a day,
+# restart included.
+
+
+async def test_the_schedule_is_satisfied_by_work_not_by_an_attempt(heartbeat, monkeypatch):
+    """A tier that attempted everything and completed nothing is still due."""
+
+    async def _no_backup():
+        return None
+
+    monkeypatch.setattr(heartbeat, "_ensure_recent_backup", _no_backup)
+    for name in DAILY_DUTIES:
+        monkeypatch.setattr(heartbeat, f"_duty_{name}", _raises)
+
+    assert heartbeat._daily_tier_due() is True
+    await heartbeat._run_daily_tier()
+
+    assert heartbeat._duties_due() == list(DAILY_DUTIES), "nothing succeeded, so nothing is done"
+    # An hour, not a day: the attempt stamp throttles the retry, and the
+    # per-duty rows decide what the retry actually does.
+    db.set_snooze_state(heartbeat._DAILY_TIER_KEY, str(time.time() - 2 * 3600))
+    assert heartbeat._daily_tier_due() is True
+
+
+async def test_a_completed_tier_stamps_each_duty_for_itself(heartbeat, monkeypatch):
+    async def _no_backup():
+        return None
+
+    monkeypatch.setattr(heartbeat, "_ensure_recent_backup", _no_backup)
+    await heartbeat._run_daily_tier()
+
+    for name in DAILY_DUTIES:
+        assert heartbeat._duty_last_success(name) > 0, f"{name} completed but was not recorded"
+    assert heartbeat._duties_due() == []
+    assert heartbeat._daily_tier_due() is False
+    assert MaintenanceRunner()._daily_tier_due() is False, "and it is durable, as it always was"
+
+
+def _raises():
+    raise RuntimeError("this duty did not happen")

@@ -54,7 +54,7 @@ def test_settings_bool_coercion(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
 
     # Write string "false" for bool field
-    path.write_text(json.dumps({"scout_enabled": "false", "eval_auto": "yes"}))
+    path.write_text(json.dumps({"scout_enabled": "false", "gates_enabled": "yes"}))
     s = Settings.load()
     assert s.scout_enabled is False
-    assert s.eval_auto is True
+    assert s.gates_enabled is True

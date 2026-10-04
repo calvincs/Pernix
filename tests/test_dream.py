@@ -212,9 +212,9 @@ async def test_generate_saves_filters_and_advances_cursors(store, dream_on, monk
         "confidence": 0.9,
     }
     ghost_refs = {
-        "kind": "tool_pattern",
-        "statement": "A tool pattern citing evidence that was never offered to the model.",
-        "evidence": ["C9"],
+        "kind": "memory_stale",
+        "statement": "A stale-memory claim citing evidence that was never offered to the model.",
+        "evidence": ["M9"],
         "confidence": 0.9,
     }
     fake = FakeLLMClient(responses=[_resp(json.dumps([good, banned, ghost_refs]))])
@@ -252,18 +252,6 @@ def _fake_pack_items():
             render="[M1] a stored lesson entry",
             ref={"file": "pernix.config", "epoch": 1000, "hash": "abcdefabcdef"},
         ),
-        EvidenceItem(
-            ref_id="C1",
-            kind="candor",
-            render="[C1] fetch_ok(*): 49% success over 562 obs",
-            ref={"pred": "fetch_ok", "args": ["*"]},
-        ),
-        EvidenceItem(
-            ref_id="C2",
-            kind="candor",
-            render="[C2] fetch_ok(forbes.com): 20% success over 8 obs",
-            ref={"pred": "fetch_ok", "args": ["forbes.com"]},
-        ),
     ]
 
 
@@ -297,43 +285,6 @@ async def test_generate_lesson_ineffective_requires_pm_ref(store, dream_on, monk
     assert len(rows) == 1
     ev = json.loads(rows[0]["evidence_json"])
     assert any(e["type"] == "pm" and e.get("session_id") for e in ev)
-
-
-async def test_generate_tool_pattern_dedups_on_candor_evidence(store, dream_on, monkeypatch):
-    from core.dream.observe import EvidencePack
-
-    # An existing hypothesis (any status) already rests on fetch_ok(*).
-    db.add_dream_hypothesis(
-        "tool_pattern",
-        "fetch_ok success is globally degraded to about half of all attempts.",
-        json.dumps([{"type": "candor", "pred": "fetch_ok", "args": ["*"], "quote": "x"}]),
-    )
-    pack = EvidencePack(items=_fake_pack_items(), memory_file="pernix.config")
-
-    async def fake_build_pack(_store):
-        return pack
-
-    monkeypatch.setattr("core.dream.observe.build_pack", fake_build_pack)
-    reworded_dup = {
-        "kind": "tool_pattern",
-        "statement": "The browse method shows markedly lower reliability than API-based retrieval overall.",
-        "evidence": ["C1"],
-        "confidence": 0.6,
-    }
-    fresh = {
-        "kind": "tool_pattern",
-        "statement": "Forbes fetches fail four times out of five, far below the global success rate.",
-        "evidence": ["C2", "C1"],
-        "confidence": 0.6,
-    }
-    fake = FakeLLMClient(responses=[_resp(json.dumps([reworded_dup, fresh]))])
-    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
-
-    saved = await generate(store, _never_cancelled)
-    assert saved == 1, "a paraphrase citing only already-hypothesized candor facts must be rejected"
-    statements = [r["statement"] for r in db.list_dream_hypotheses()]
-    assert any("Forbes" in s for s in statements)
-    assert not any("browse method" in s for s in statements)
 
 
 # ---------------------------------------------------------------------------
@@ -382,195 +333,137 @@ async def test_validate_expires_on_moved_evidence(store, dream_on, monkeypatch):
     assert fake.call_count == 0, "expired refs must not spend an LLM call"
 
 
-async def test_validate_tool_pattern_candor_disabled_expires_after_attempts(store, dream_on, monkeypatch):
-    monkeypatch.setattr(config.settings, "candor_enabled", False)
+async def test_validate_tool_pattern_expires_now_candor_is_retired(store, dream_on):
+    """A pending tool_pattern rested on Candor evidence, which is retired: it
+    can never be re-checked, so it expires on the first pass."""
     db.add_dream_hypothesis(
         "tool_pattern",
         "browse_web fails at night according to the ledger.",
         json.dumps([{"type": "candor", "pred": "tool_ok", "args": ["browse_web"], "quote": "x"}]),
     )
 
-    out1, _ = await validate_one(store, db.list_dream_hypotheses(status="pending"), _never_cancelled)
-    assert out1 == "skipped"
-    out2, expired = await validate_one(store, db.list_dream_hypotheses(status="pending"), _never_cancelled)
-    assert out2 == "expired" and expired == 1
-
-
-async def test_validate_expires_duplicate_evidence_and_continues(store, dream_on, monkeypatch):
-    _seed_memory(store)
-    dup_key_ev = json.dumps([{"type": "candor", "pred": "fetch_ok", "args": ["*"], "quote": "x"}])
-    resolved_id = db.add_dream_hypothesis("tool_pattern", "fetch_ok globally degraded to half.", dup_key_ev)
-    db.update_dream_hypothesis(resolved_id, status="validated")
-    # Oldest pending: a paraphrase resting on the same candor fact.
-    db.add_dream_hypothesis("tool_pattern", "Fetching succeeds only about half the time across domains.", dup_key_ev)
-    # Newer pending: a real contradiction the judge will confirm.
-    ev = [_mem_evidence(store, "pernix.config", 1000), _mem_evidence(store, "pernix.config", 2000)]
-    db.add_dream_hypothesis("contradiction", "Port claims conflict between two entries.", json.dumps(ev))
-
-    fake = FakeLLMClient(responses=[_resp('{"verdict": "holds", "note": "8090 vs 9090"}')])
-    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
-
-    pending = db.list_dream_hypotheses(status="pending", oldest_first=True)
-    outcome, expired = await validate_one(store, pending, _never_cancelled)
-    # The duplicate expires without consuming the cycle's validation slot;
-    # the pass continues and lands the real verdict.
-    assert outcome == "validated" and expired == 1
-    rows = db.list_dream_hypotheses()
-    dup = next(r for r in rows if "half the time" in r["statement"])
-    assert dup["status"] == "expired"
-    assert json.loads(dup["validation_json"])["method"] == "duplicate_evidence"
-    assert next(r for r in rows if r["kind"] == "contradiction")["status"] == "validated"
-
-
-async def test_validate_tool_pattern_any_recovered_ref_refutes(store, dream_on, monkeypatch):
-    monkeypatch.setattr(config.settings, "candor_enabled", True)
-
-    class FakeBridge:
-        async def predict(self, pred, args):
-            if args == ["forbes.com"]:
-                return {"p": 0.20, "observations": 8}
-            return {"p": 0.80, "observations": 50}
-
-    monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: FakeBridge())
-    db.add_dream_hypothesis(
-        "tool_pattern",
-        "Fetches degrade globally and especially on forbes.com lately.",
-        json.dumps(
-            [
-                {"type": "candor", "pred": "fetch_ok", "args": ["*"], "quote": "x"},
-                {"type": "candor", "pred": "fetch_ok", "args": ["forbes.com"], "quote": "y"},
-            ]
-        ),
-    )
-    outcome, _ = await validate_one(store, db.list_dream_hypotheses(status="pending"), _never_cancelled)
-    # The wildcard fact recovered: the claim as stated no longer holds,
-    # even though the forbes-specific ref is still degraded.
-    assert outcome == "refuted"
-    note = json.loads(db.list_dream_hypotheses()[0]["validation_json"])["note"]
-    assert "degradation gone" in note and "fetch_ok(*)" in note
-
-
-# ---------------------------------------------------------------------------
-# Promotion actionability gate (v3.1)
-# ---------------------------------------------------------------------------
-
-
-def _adaptive_on(monkeypatch):
-    monkeypatch.setattr(config.settings, "adaptive_enabled", True)
-
-
-async def test_promotion_gate_not_actionable_is_terminal(dream_on, monkeypatch):
-    """A validated finding the gate cannot turn into a rule leaves the queue
-    terminally and mints nothing — the report is its delivery surface."""
-    from core.dream.promote import promote_validated
-
-    _adaptive_on(monkeypatch)
-    hid = db.add_dream_hypothesis("lesson_ineffective", "Lessons about X never change outcomes.", "[]")
-    db.update_dream_hypothesis(hid, status="validated")
-    fake = FakeLLMClient(responses=[_resp('{"actionable": false, "note": "pure observation"}')])
-    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
-
-    assert await promote_validated(limit=10) == 0  # terminal outcomes are not yield
+    out, expired = await validate_one(store, db.list_dream_hypotheses(status="pending"), _never_cancelled)
+    assert out == "expired" and expired == 1
     row = db.list_dream_hypotheses()[0]
-    assert row["status"] == "promoted" and row["promoted_ref"] == "reported:not-actionable"
-    assert db.adaptive_list_proposals(status="pending") == []
+    assert row["status"] == "expired"
+    assert json.loads(row["validation_json"])["method"] == "candor_retired"
 
 
-async def test_promotion_gate_rewrite_mints_the_imperative_form(dream_on, monkeypatch):
-    """An actionable finding mints the GATE'S rewrite, not the raw statement."""
+def test_generation_drops_tool_pattern_at_the_parse_boundary():
+    item = {"kind": "tool_pattern", "statement": "browse_web degrades badly at night lately.", "evidence": ["P1"]}
+    assert parse_hypotheses(json.dumps([item])) == []
+
+
+# ---------------------------------------------------------------------------
+# Promotion: memory corrections apply directly; tool/lesson findings are
+# report-only (the adaptive layer they used to feed was retired in 3.2)
+# ---------------------------------------------------------------------------
+
+
+def _fake_corrections(monkeypatch) -> list:
+    calls: list = []
+
+    def _fake(files, statement, source_ref="", kind="", approved_by="dream"):
+        calls.append((tuple(files), kind, approved_by, source_ref))
+        return list(files)
+
+    monkeypatch.setattr("core.memory.ingest.apply_memory_correction", _fake)
+    monkeypatch.setattr("core.dream.journal.append_sync", lambda text: None)
+    return calls
+
+
+async def test_memory_correction_effector_writes_on_promotion(monkeypatch):
+    """A validated contradiction with cited memory files writes its corrective
+    entry when it is promoted — directly, with no proposal row in between."""
     from core.dream.promote import promote_validated
 
-    _adaptive_on(monkeypatch)
-    hid = db.add_dream_hypothesis("lesson_ineffective", "The agent claims files exist without checking.", "[]")
+    calls = _fake_corrections(monkeypatch)
+    evidence = json.dumps([{"type": "memory", "file": "test.corrections", "epoch": 1}])
+    hid = db.add_dream_hypothesis("contradiction", "Entry A contradicts entry B about worker limits", evidence)
     db.update_dream_hypothesis(hid, status="validated")
-    rewrite = "Before asserting a file exists: read it on disk and confirm the content."
-    fake = FakeLLMClient(
-        responses=[_resp(json.dumps({"actionable": True, "title": "verify files on disk", "content": rewrite}))]
-    )
-    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
+
+    assert await promote_validated(limit=5) == 1
+    assert calls == [(("test.corrections",), "contradiction", "dream", f"dream:{hid[:12]}")]
+    row = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}[hid]
+    assert row["promoted_ref"] == "correction:test.corrections"
+    # The day's one log-tier notice names what was written.
+    notes = [n for n in db.list_notifications("log", None, None, 50) if n["category"] == "dream.corrections_applied"]
+    assert len(notes) == 1 and "test.corrections" in notes[0]["body"]
+
+
+async def test_effectorless_finding_is_reported_not_queued(monkeypatch):
+    """No cited memory file means nothing to write: the row leaves the queue
+    as reported:no-effector and does not count as a promotion."""
+    from core.dream.promote import promote_validated
+
+    calls = _fake_corrections(monkeypatch)
+    hid = db.add_dream_hypothesis("memory_stale", "entry about API v1 is outdated", "[]")
+    db.update_dream_hypothesis(hid, status="validated")
+
+    assert await promote_validated(limit=10) == 0
+    assert calls == []
+    row = db.list_dream_hypotheses(limit=5)[0]
+    assert row["status"] == "promoted" and row["promoted_ref"] == "reported:no-effector"
+
+
+async def test_same_file_correction_is_not_proposed_twice(monkeypatch):
+    """One conflicted memory file produced four separate findings live. The
+    first writes the note; the rest within a week are duplicate-evidence."""
+    from core.dream.promote import promote_validated
+
+    calls = _fake_corrections(monkeypatch)
+    ev = json.dumps([{"type": "memory", "file": "pernix.versions", "epoch": 1, "hash": "a"}])
+    a = db.add_dream_hypothesis("contradiction", "two entries disagree about the version", ev)
+    b = db.add_dream_hypothesis("contradiction", "the recorded version numbers are inconsistent", ev)
+    for hid in (a, b):
+        db.update_dream_hypothesis(hid, status="validated")
 
     assert await promote_validated(limit=10) == 1
-    props = db.adaptive_list_proposals(status="pending")
-    assert len(props) == 1
-    payload = json.loads(props[0]["payload_json"])
-    assert payload[0]["content"] == rewrite and payload[0]["title"] == "verify files on disk"
+    assert len(calls) == 1
+    rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
+    assert rows[a]["promoted_ref"] == "correction:pernix.versions"
+    assert rows[b]["promoted_ref"] == "reported:duplicate-evidence"
 
 
-async def test_promotion_gate_rewrite_failing_lint_is_terminal(dream_on, monkeypatch):
-    """The mechanical lint backstops the gate: a 'rewrite' that still reads
-    as narrative is refused terminally, not retried forever."""
+async def test_a_correction_older_than_a_week_does_not_block_a_new_one(monkeypatch):
+    from core.dream.promote import promote_validated
+    from db.database import connect_sessions
+
+    calls = _fake_corrections(monkeypatch)
+    ev = json.dumps([{"type": "memory", "file": "pernix.versions", "epoch": 1, "hash": "a"}])
+    old = db.add_dream_hypothesis("contradiction", "an old finding about the version", ev)
+    db.update_dream_hypothesis(old, status="promoted", promoted_ref="correction:pernix.versions")
+    stale = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    with connect_sessions() as conn:
+        conn.execute("UPDATE dream_hypotheses SET updated_at = ? WHERE id = ?", (stale, old))
+    new = db.add_dream_hypothesis("contradiction", "a fresh finding about the version", ev)
+    db.update_dream_hypothesis(new, status="validated")
+
+    assert await promote_validated(limit=10) == 1
+    assert len(calls) == 1
+
+
+async def test_tool_and_lesson_findings_are_report_only(monkeypatch):
+    """tool_pattern and lesson_ineffective have no effector since 3.2: they
+    leave the queue terminally (so they never trip promotion_stalled), make
+    no LLM call and write nothing."""
     from core.dream.promote import promote_validated
 
-    _adaptive_on(monkeypatch)
-    hid = db.add_dream_hypothesis("lesson_ineffective", "Something about lessons.", "[]")
-    db.update_dream_hypothesis(hid, status="validated")
-    fake = FakeLLMClient(
-        responses=[
-            _resp(
-                json.dumps(
-                    {
-                        "actionable": True,
-                        "title": "still narrative",
-                        "content": "Despite the lessons, the agent repeatedly fails to comply.",
-                    }
-                )
-            )
-        ]
-    )
+    calls = _fake_corrections(monkeypatch)
+    fake = FakeLLMClient()
     monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
+    ev = json.dumps([{"type": "memory", "file": "pernix.config", "epoch": 1}])
+    h_tool = db.add_dream_hypothesis("tool_pattern", "http_get fails on js-heavy sites", ev)
+    h_lesson = db.add_dream_hypothesis("lesson_ineffective", "lesson X never changes outcomes", ev)
+    for hid in (h_tool, h_lesson):
+        db.update_dream_hypothesis(hid, status="validated")
 
-    assert await promote_validated(limit=10) == 0
-    row = db.list_dream_hypotheses()[0]
-    assert row["promoted_ref"] == "reported:not-actionable"
-    assert db.adaptive_list_proposals(status="pending") == []
-
-
-async def test_promotion_gate_unavailable_leaves_the_row_for_retry(dream_on, monkeypatch):
-    """A transient LLM outage must not mark a finding terminal."""
-    from core.dream import promote as promote_mod
-
-    _adaptive_on(monkeypatch)
-    hid = db.add_dream_hypothesis("lesson_ineffective", "A finding.", "[]")
-    db.update_dream_hypothesis(hid, status="validated")
-
-    async def _gate_down(row):
-        return None
-
-    monkeypatch.setattr(promote_mod, "_actionability_gate", _gate_down)
-    assert await promote_mod.promote_validated(limit=10) == 0
-    assert db.list_dream_hypotheses()[0]["status"] == "validated"  # still queued
-
-
-async def test_promotion_skips_restating_a_live_candor_hint(dream_on, monkeypatch):
-    """A tool_pattern about a tool Candor already flags is a restatement of
-    the live hint the scout already sees — terminal duplicate, no gate call."""
-    from core.dream.promote import promote_validated
-
-    _adaptive_on(monkeypatch)
-    from datetime import datetime as _dt
-
-    now = _dt.now(timezone.utc).isoformat()
-    db.adaptive_put_entry(
-        {
-            "id": "tool-fetch_ok-degraded",
-            "kind": "routing_hint",
-            "scope": "global",
-            "title": "tool fetch_ok degraded",
-            "content": "prefer an alternative or verify its output",
-            "risk": "low",
-            "version": 1,
-            "status": "active",
-            "source": "candor",
-            "created_at": now,
-            "updated_at": now,
-        }
-    )
-    ev = json.dumps([{"type": "candor", "pred": "tool_ok", "args": ["fetch_ok"], "quote": "p=0.4"}])
-    hid = db.add_dream_hypothesis("tool_pattern", "fetch_ok has become unreliable overall.", ev)
-    db.update_dream_hypothesis(hid, status="validated")
-
-    assert await promote_validated(limit=10) == 0
-    assert db.list_dream_hypotheses()[0]["promoted_ref"] == "reported:duplicate-evidence"
+    assert await promote_validated(limit=10) == 0  # terminal outcomes are not yield
+    rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
+    assert rows[h_tool]["promoted_ref"] == "reported:report-only"
+    assert rows[h_lesson]["promoted_ref"] == "reported:report-only"
+    assert calls == [] and fake.call_count == 0
+    assert db.list_dream_hypotheses(status="validated", limit=10) == []
 
 
 async def test_replay_budget_zero_skips_lesson_hypotheses(store, dream_on, monkeypatch):
@@ -887,7 +780,8 @@ def test_promotion_health_alarms_on_stalled_validated_queue():
     with connect_sessions() as conn:
         conn.execute("UPDATE dream_hypotheses SET created_at = ? WHERE id = ?", (backdated, hid))
     _check_promotion_health()
-    titles = [n.get("title", "") for n in db.get_notifications()]
+    # v42: dream.promotion_stalled is a log-tier category, so it lives in the activity log, not the bell.
+    titles = [n.get("title", "") for n in db.list_notifications("log")]
     assert any("not reaching promotion" in t for t in titles)
 
 
@@ -897,5 +791,5 @@ def test_promotion_health_quiet_on_fresh_validated_rows():
     from core.dream import _check_promotion_health
 
     _check_promotion_health()
-    titles = [n.get("title", "") for n in db.get_notifications()]
+    titles = [n.get("title", "") for n in db.list_notifications("log")]
     assert not any("not reaching promotion" in t for t in titles)

@@ -23,8 +23,6 @@ _NO_PERSIST = {
     "workspace_dir",
     "memory_dir",
     "skills_dir",
-    "candor_store_dir",
-    "telos_dir",
 }
 
 # Fields that are runtime-only — set via CLI flags, never read from settings.json
@@ -65,7 +63,7 @@ class Settings:
     #                      call (compaction summaries, reflect verdicts,
     #                      eval). Anything the primary must trust runs here.
     #   background_model — BACKGROUND: the fast/offline tier — scout, titles,
-    #                      distill/ingest, snooze activities, dream, telos,
+    #                      distill/ingest, snooze activities, dream,
     #                      RLM sub-calls. Empty = llm_model.
     #   fallback_model   — BACKUP: used when a Primary or Background call
     #                      fails (stream failover, provider failover, scout
@@ -189,7 +187,7 @@ class Settings:
     # Turn-boundary ledger (agent-ergonomics plan, Tier 1): a delta block in
     # the volatile tail telling the agent what changed since its previous
     # turn — finished workers/jobs/RLM runs, its last reflect verdict,
-    # adaptive changes, canary regressions, platform restarts. Composition
+    # open questions, canary regressions, platform restarts. Composition
     # over existing tables; renders nothing when nothing changed. Off = the
     # tail is byte-identical to the pre-ledger shape.
     turn_ledger_enabled: bool = True
@@ -218,6 +216,11 @@ class Settings:
     # --- Scout ---
     scout_enabled: bool = True
     scout_timeout: int = 90
+    # LLM rounds the scout may spend before the turn starts (1..6). 1 = the
+    # preloaded context plus one submit_report call — the turn waits on scout,
+    # and each extra round cost ~6 s and re-sent the 15-19k-token prefix on the
+    # reference box. Raise it to give scout its search tools back.
+    scout_max_rounds: int = 1
     # Per-item char cap on memory search results injected into scout's user
     # content. Smaller = less context pressure on long-running sessions.
     scout_preload_memory_char_limit: int = 600
@@ -240,7 +243,7 @@ class Settings:
     # raising it costs memory and PIDs rather than throughput.
     tool_executor_workers: int = 32
     # Threads for long-running idle-time background work (dream deep probes,
-    # canary maintenance, synthesis, backups, memory dedup). Same reasoning as
+    # synthesis, backups, memory dedup). Same reasoning as
     # tool_executor_workers — these must never occupy asyncio's default
     # executor, which every API route needs for its DB reads. Small on purpose:
     # occupants are heavyweight and idle-time-only, so a hard ceiling on
@@ -342,22 +345,7 @@ class Settings:
     distill_audit_enabled: bool = True
     distill_audit_per_day: int = 2  # sampled sessions per UTC day (0 disables)
 
-    # --- Candor (operational-memory add-on, off by default) ---
-    # Calibrated reliability tracking via the external `candor` package.
-    # All call sites gate on candor_enabled at runtime (hot toggle), except
-    # tool registration which follows the web-extension pattern (restart).
-    candor_enabled: bool = False
-    candor_scout_brief: bool = True  # inject [OPERATIONAL INTEL] into scout preload
-    candor_max_obs_per_turn: int = 200  # safety valve on turn-end emission volume
-    # Deterministic fetch routing (needs candor_enabled): http_get consults the
-    # calibrated per-domain fetch_ok rate before fetching and refuses domains
-    # that historically fail, pointing the agent at browse_web instead of
-    # burning a timeout on a bot wall. force=true on the call overrides.
-    fetch_routing_enabled: bool = True
-    fetch_routing_min_obs: int = 8  # below this the rate is noise; never reroute
-    fetch_routing_threshold: float = 0.40  # reroute when calibrated p(fetch_ok) < this
-
-    # --- Gates / goals / heartbeats (long-running work, plan Phase 3) ---
+    # --- Gates / goals (long-running work, plan Phase 3) ---
     # Deterministic gates: user-authored shell checks that run before
     # Reflect; a failing gate mechanically clamps a pass verdict to retry.
     # A passing gate verifies only what that gate checks.
@@ -365,126 +353,30 @@ class Settings:
     # Persistent cross-turn goals with budgets; only goal_complete finishes
     # one. continuation defaults are opt-in per goal (plan 3b).
     goals_enabled: bool = False
-    # Heartbeats: recurring instructions steered into running work (3c).
-    heartbeats_enabled: bool = False
 
     # --- Golden-task canary suite (plan 3.5, off by default) ---
     # Canned tasks + deterministic gates run headlessly through the full
-    # pipeline in session_type="canary" sessions. The tripwire's primary
-    # signal. Zero rows, zero behavior change while off.
+    # pipeline in session_type="canary" sessions. Zero rows, zero behavior
+    # change while off.
     #
-    # Canaries are CHANGE-DRIVEN: they run when something they cover changes
-    # (an adaptive batch, a skill edit, a model swap, a deploy), not on a
-    # wall clock. The only standing schedule is a small heartbeat — the
-    # canary_heartbeat_per_night least-recently-run active canaries per
-    # night — which keeps every canary's history warm enough that a failure
-    # right after a change is provably the change's fault.
+    # Canaries are CHANGE-DRIVEN: they run after a deploy or a model swap, or
+    # when you press Run — never on a wall clock.
     canary_enabled: bool = False
     canaries_dir: str = "data/canaries"
-    canary_schedule: str = "0 3 * * *"  # heartbeat cron expression
-    canary_heartbeat_per_night: int = 2
     canary_retention_days: int = 30
-    # Per-task tripwire (core/adaptive/tripwire.py): a canary may testify
-    # against a batch only when its trailing canary_baseline_runs runs before
-    # the apply were all green. canary_regression_delta now feeds only the
-    # PASSIVE post-mortem drift signal.
-    canary_baseline_runs: int = 5
-    canary_regression_delta: float = 0.15
-    # The post-batch probe: covering canaries (matched via `covers:`) plus
-    # the sentinel-tagged ones, capped here. Sentinels are the cheap, broad
-    # tasks that ride along on every probe.
-    canary_post_batch_max: int = 4
-    # Graduated autonomy (suite self-management, active only under
-    # canary_enabled). Auto-admission replaces the human approval click with
-    # mechanical gates: an allowlist proof over the gate commands plus vetting
-    # runs; specs the machine can't prove safe still queue for human review.
-    # The maintenance sweep promotes vetted canaries, tags flapping ones
-    # flaky, PARKS long-green ones (off the heartbeat, still coverage-run,
-    # auto-unparked by a red run), retires exhausted probes, and purges the
-    # .retired/ quarantine after a retention window. Hard invariant (enforced
-    # in core/canary/maintain.py): a canary whose latest run failed is never
-    # auto-mutated — only a pass streak or a human moves it.
-    canary_auto_admit: bool = True
-    canary_auto_maintain: bool = True
-    canary_vetting_runs: int = 3  # consistent runs required to promote out of vetting
-    canary_park_after_passes: int = 25  # consecutive passes before auto-parking
+    # The suite is hand-curated: it neither grows nor maintains itself.
+    # DELETE /api/canary/{name} moves a canary to .retired/, and snooze
+    # retention deletes it for good after canary_purge_after_days.
     canary_purge_after_days: int = 30  # retired canaries older than this are deleted
-    canary_max_suite: int = 24  # auto-admission stops at this suite size (human path stays open)
 
-    # --- Adaptive Layer (plan §6, off by default) ---
-    # Governed machine-editable policy store. While off: zero rows, compiler
-    # output byte-identical, no producer emits edits.
-    adaptive_enabled: bool = False
-    # ON by default (takes effect only once adaptive_enabled): low-risk kinds
-    # (routing_hint, prompt_note) auto-apply at idle, subject to the per-day
-    # and cooldown caps below; high-risk kinds are always proposal-gated.
-    # Set False to route every edit — low-risk included — through proposals,
-    # e.g. while building canary baselines.
-    adaptive_auto_apply: bool = True
-    # Promote a canary-regression tripwire hit to automatic rollback. Off
-    # until the metric earns trust; a hit only flags the batch 'suspect'.
-    adaptive_auto_rollback: bool = False
-    adaptive_max_entries_per_kind: int = 24
-    adaptive_max_auto_applies_per_day: int = 24
-    adaptive_edit_cooldown_hours: int = 24
-    # Passive tripwire: post-mortem retry drift over this many organic turns
-    # after a batch (canary-stamped post-mortems excluded).
-    adaptive_tripwire_window_turns: int = 20
-    adaptive_max_pending_proposals: int = 200  # review queue cap (0 = unbounded)
-    adaptive_max_pending_per_producer: int = 60  # one producer's share of it (0 = unbounded)
-    adaptive_proposal_ttl_days: int = 30  # pending proposals lapse after this (0 = never)
-    # Value-based retirement (v3.1): an entry that rendered into prompts for
-    # this many INSTRUMENTED days (counted from the usage epoch, stamped on
-    # the sweep's first run) without one recorded use — scout's used_hints,
-    # reflect's cited_policies — is retired. Journaled soft-deletes, one
-    # aggregate notification, one-click rollback. 0 disables. Candor-owned
-    # and human-authored entries are exempt.
-    adaptive_usage_retire_days: int = 45
-    # prompt_note has no producer-side retirement loop at all; this TTL is
-    # its backstop (0 = never). A still-useful note re-mints cheaply.
-    adaptive_prompt_note_ttl_days: int = 90
-    # Failure-dominated retirement: an entry whose attributed OUTCOMES are
-    # mostly failures retires even though it is used — before this, usage
-    # alone kept a provably harmful hint alive forever while an uncited good
-    # one died at the retire window. Needs at least min_uses attributed
-    # outcomes (successes+failures, written by synthesis) before the share
-    # is trusted; retires when the success share is below max_success.
-    # min_uses=0 disables the branch.
-    adaptive_harmful_retire_min_uses: int = 5
-    adaptive_harmful_retire_max_success: float = 0.3
-    # A suspect flag raised by the PASSIVE post-mortem signal alone can never
-    # self-clear (its comparison windows are frozen at the apply). After this
-    # many days it auto-clears with an annotation; canary-confirmed flags are
-    # exempt. 0 = flags persist until human dismiss (the pre-v3.1 behavior).
-    adaptive_suspect_ttl_days: int = 7
-    # The agent's own authorship valve: the adaptive_note tool lets the live
-    # agent mint prompt_note/routing_hint edits the moment it learns
-    # something, instead of hoping refine distills it later. Full guardrails:
-    # the content lint applies, the normal batch pipeline + tripwire watch
-    # it, 2 mints/day, never policy/worker_spec. Off by default per house
-    # convention (flip on where wanted).
-    adaptive_agent_notes_enabled: bool = False
-    # The review queue is a VETO WINDOW, not an approval gate: a pending
-    # proposal older than this many hours is approved by the system itself —
-    # same apply path as a human approval, journaled, post-batch-swept and
-    # rollback-able, resolved as 'auto_approved' so the audit trail tells the
-    # two apart. Validation happens AFTER application, over time (tripwire,
-    # canary sweeps), which is the only validation that measures anything
-    # real; a proposal parked until a human clicks it is a lesson lost to a
-    # backlog. Reject anything you disagree with inside the window; 0 turns
-    # the gate back on (human approval only, TTL lapse). Canary-suite
-    # proposals never auto-approve — admitting a new canary has its own
-    # graduated-autonomy path (canary_auto_admit) and a human invariant (I6).
-    adaptive_auto_approve_after_hours: int = 24
-    adaptive_max_auto_approvals_per_day: int = 40
-
-    # --- Skill self-healing (refine skill proposals, veto-window apply) ---
-    # Same veto-window contract as adaptive_auto_approve_after_hours, for
-    # SKILL.md improvement proposals: a pending proposal older than the
-    # window is machine-validated (skill exists + enabled, change bounded,
-    # frontmatter preserved) and applied with a timestamped backup under
-    # data/skill_backups/. A human can reject anything in the Skills tab
-    # inside the window; 0 disables auto-apply (manual Apply only).
+    # --- Skill self-healing (refine skill proposals, auto-apply) ---
+    # Refine writes SKILL.md improvement proposals. With auto-apply on (the
+    # default) a pending proposal older than the window is machine-checked
+    # (see core/skills/proposals.py:_validate_for_auto_apply) and applied
+    # with a timestamped backup under data/skill_backups/. A proposal that
+    # fails a check waits in the Skills tab. Off: every proposal waits for
+    # a click. Rollback is manual (Skills tab or the rollback route).
+    skill_proposal_auto_apply: bool = True
     skill_proposal_auto_apply_after_hours: int = 24
     skill_proposal_max_auto_applies_per_day: int = 5
 
@@ -514,7 +406,7 @@ class Settings:
     # Recursive Language Models engine (core/extensions/rlm): processes inputs
     # beyond the context window in a sandboxed child REPL. All call sites gate
     # on rlm_enabled at runtime (hot toggle), except tool registration which
-    # follows the Candor pattern (restart). The rlm_* caps exist to prevent
+    # follows the web-extension pattern (restart). The rlm_* caps exist to prevent
     # runaway recursion/spend; model roles fall back per resolve_*_model().
     rlm_enabled: bool = False
     rlm_max_iterations: int = 20  # root REPL turns per run
@@ -525,7 +417,18 @@ class Settings:
     rlm_run_retention_days: int = 30  # workspace/rlm/<run_id> purge age
     # Worker sessions (spawned by spawn_worker) had no retention at all: the
     # live box held 36, eleven older than a month, with 7 MB of messages.
+    # This is the TRANSCRIPT window, and it only starts once the work has
+    # reached a resting place: the result was read, or the task was abandoned.
     worker_session_retention_days: int = 30
+    # The abandonment horizon. Protecting unread and non-terminal workers
+    # would otherwise retain every worker forever, which is its own defect —
+    # past this, a task nobody came back for is treated as abandoned and its
+    # transcript becomes prunable (its result manifest is kept regardless).
+    worker_abandoned_after_days: int = 180
+    # Result-manifest retention, deliberately far longer than the transcript
+    # window: the manifest is small and it is the last record of what a worker
+    # produced. A title-and-date digest is not a research result.
+    worker_result_manifest_retention_days: int = 365
     # Dream hypotheses accumulate ~57/day on the live box and nothing pruned
     # them; the readers cap their scans at 500 rows, so old rows also fell
     # out of dedup/evidence silently. Terminal statuses only (refuted,
@@ -568,7 +471,7 @@ class Settings:
     mcp_refresh_interval_s: int = 900
 
     # --- Dream (idle-time introspection add-on, off by default) ---
-    # Hypothesis generation over memory/Candor/post-mortems, validated against
+    # Hypothesis generation over memory/post-mortems, validated against
     # recorded outcomes, promoted only through gates — docs/dev/dream-plan.md.
     # Fully inert when off: snooze Activity 14 is skipped and no dream tables
     # are read or written. All call sites gate on dream_enabled at runtime.
@@ -581,50 +484,6 @@ class Settings:
     dream_rlm_probe: bool = False  # deep cross-file probes via RLM (needs rlm_enabled)
     dream_rlm_probe_interval_days: int = 7  # min days between probes
 
-    # --- TELOS (teleological layer add-on, off by default) ---
-    # Non-convergent drive with correction machinery over the task loop:
-    # anomaly->question->hypothesis fast loop (snooze Activity 16), daily
-    # ordo/binding slow loops via cron, weekly hevel/reconcile/entropy.
-    # State is markdown+YAML under telos_dir plus an append-only JSONL trace
-    # ledger. Fully inert when off: no dirs created, no reads, no writes.
-    # All call sites gate on telos_enabled at runtime (hot toggle), except
-    # tool registration which follows the Candor pattern (restart).
-    telos_enabled: bool = False
-    telos_dir: str = "data/telos"
-    # The root objective: a question with no satisfaction predicate —
-    # unsatisfiable by construction (spec §4.1). Re-expression is an
-    # operator edit here, never an agent write.
-    telos_root_text: str = "What is actually going on here, and what is it for?"
-    telos_schedule: str = "0 4 * * *"  # daily slow-loop cron (UTC)
-    telos_serendipity_budget: float = 0.15  # non-goal question share (§3.2)
-    telos_eig_floor: float = 0.15  # testability-gate admission floor (§3.4)
-    telos_hypotheses_per_question: int = 3  # SOUP output cap per generation
-    telos_max_gated_backlog: int = 12  # above it, every step evaluates
-    telos_max_eval_tokens: int = 20_000  # gate's cost_est ceiling
-    telos_question_max_attempts: int = 3  # generation passes before abandonment
-    # One anomaly line of inquiry per source (tool:X, reflect:retry, ...) per
-    # window — stops the same flaky tool minting a near-identical question
-    # every day (14/18 abandoned questions were that class). 0 disables.
-    telos_anomaly_remint_cooldown_days: int = 7
-    # Age axis on the speculation pool: past this many days an unexamined
-    # pooled hypothesis is archived 'expired' (moved to soup/archive/, never
-    # deleted). 0 = keep it in the pool forever.
-    telos_soup_retention_days: int = 30
-    # The archive's own hard-delete horizon — the only place a hypothesis
-    # file is ever unlinked. Long by design: the archive is the calibration
-    # review's forensic record. 0 = keep forever.
-    telos_soup_archive_retention_days: int = 180
-    telos_soup_context_entries: int = 10  # memory entries in the band sample
-
-    # --- Evaluation (extension) ---
-    eval_auto: bool = False
-    eval_threshold: float = 0.7
-    eval_max_retries: int = 2
-    eval_browser_verify: bool = False
-
-    # --- Planning ---
-    plan_review_timeout: int = 120
-
     # --- Snooze (idle-time self-optimization) ---
     snooze_enabled: bool = True
     snooze_interval_ticks: int = 10  # Check every N maintenance ticks (N * 60s)
@@ -633,9 +492,8 @@ class Settings:
     # watermark resume). This bound only kills a genuinely wedged cycle.
     # 15 min accommodates slow local models; bump it for very large ones.
     snooze_max_cycle_seconds: int = 900
-    # Wall-clock ceiling on one scheduled dispatch (cron fire / heartbeat idle
-    # tick). Replaces the old implicit tool_timeout × max_tool_rounds product,
-    # which silently quintupled to ~4.2h when max_tool_rounds went 10→50 — a
+    # Wall-clock ceiling on one scheduled dispatch (a cron fire). Replaces
+    # the old implicit tool_timeout × max_tool_rounds product, which silently quintupled to ~4.2h when max_tool_rounds went 10→50 — a
     # wedged job should fail and notify within the hour.
     cron_dispatch_timeout: int = 3600
     snooze_cooldown_minutes: int = 5  # Min idle time before Snooze starts
@@ -739,7 +597,7 @@ class Settings:
     )
     reflect_experience: bool = (
         True  # Parse reflect's per-turn experience read (sentiment, friction, user observations)
-        # and feed it to Candor / post-mortems / user-profile memory. Prompt always asks for it.
+        # and feed it to post-mortems / user-profile memory. Prompt always asks for it.
     )
     # Interactive turns don't pay for their own verification. Reflect is
     # synchronous today — 370 runs over 14 days on the box measured a 16.5s
@@ -752,6 +610,17 @@ class Settings:
     # interaction cost. Deterministic gates still run (and still clamp)
     # in-line — they're cheap and material by construction.
     reflect_deferred_normal: bool = True
+    # A deferred grade used to be DROPPED the moment the user replied inside
+    # the quiet window — the "only the latest turn gets graded" rule. On the
+    # box that silently ungraded roughly a quarter of all turns, and it threw
+    # away the single best piece of ground truth there is: what the user said
+    # NEXT. With this on, turn N is graded anyway when a real turn N+1 starts,
+    # against the message-id range captured when the grade was scheduled, with
+    # the user's next message handed to the verifier as evidence ("did they
+    # correct us, or move on?"). Cost stays bounded by one in-flight deferred
+    # grade per session; turns with no reply keep the reflect_defer_idle_s
+    # path. Off restores the latest-turn-only rule.
+    reflect_next_turn_grading: bool = True
     reflect_defer_idle_s: int = (
         300  # Quiet period before a deferred grade runs. A turn superseded by a newer
         # one inside this window is never graded — only the latest completed turn is.
@@ -767,6 +636,14 @@ class Settings:
         # scout_timeout values from blocking retries when plenty of wall-clock time remains.
         # Formula is min(scout_timeout × 3 + 30, this cap). Raise to be more conservative.
     )
+    # Grader hold-out (core/reflect_holdout.py): nightly, the reflect grader
+    # is run against data/eval/grader/*.json — turns whose correct verdict is
+    # already known — and the score lands in snooze_state under
+    # `trust.grader_holdout`. Nothing else grades the grader, and its verdict
+    # mix has drifted before. The fixtures never enter memory, the workspace,
+    # or post_mortems; a hold-out the loop can learn from measures nothing.
+    grader_holdout_enabled: bool = True
+    grader_holdout_schedule: str = "30 3 * * *"  # cron expression, UTC
     post_mortem_retention_days: int = 90  # Days to keep synthesized post-mortems before snooze sweeps them
     # Notifications had NO retention at all — the table only ever shrank by
     # manual dismiss clicks, and idle-loop producers refill it on a fixed
@@ -776,9 +653,21 @@ class Settings:
     # --- Notifications ---
     notify_webhook_url: str = ""  # POST here when ask_user fires (empty = disabled)
     notify_webhook_timeout: int = 10  # HTTP timeout in seconds
+    # Web Push floor: only notifications at or above this urgency buzz a
+    # phone (low | normal | high | urgent). Agent questions always push.
+    # The bell in the app still shows everything.
+    push_urgency_floor: str = "normal"
     vapid_private_key: str = ""  # EC P-256 PEM; auto-generated at first startup
     vapid_public_key: str = ""  # URL-safe base64; auto-generated at first startup
     vapid_subject: str = "mailto:admin@localhost"  # Identifies the push sender
+    # Tiered notifications (core/notices.py). Every notification belongs to a
+    # category and each category has ONE tier: interrupt (badge + push), bell
+    # (quiet item in the bell), log (activity log only) or drop. Overrides map
+    # an area ("canary") or a category ("canary.sweep_failed") to a tier; the
+    # default {} needs no tuning. notify_tiers_enabled=False is the kill
+    # switch: every category goes back to a bell row with its legacy urgency.
+    notify_tiers_enabled: bool = True
+    notify_tier_overrides: dict = field(default_factory=dict)
 
     # --- CORS ---
     cors_origins: list = field(default_factory=list)  # Empty = localhost only
@@ -802,7 +691,6 @@ class Settings:
     workspace_dir: str = "data/workspace"
     memory_dir: str = "data/memories"
     skills_dir: str = "data/skills"
-    candor_store_dir: str = "data/candor"
 
     @property
     def workspace_venv_python(self) -> str:
@@ -813,10 +701,10 @@ class Settings:
         """Persist settings to JSON, excluding machine-specific fields."""
         import tempfile
 
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         data = {k: v for k, v in asdict(self).items() if k not in _NO_PERSIST | _RUNTIME_ONLY}
         # Atomic write: temp file + rename prevents corruption on concurrent saves
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(DATA_DIR), suffix=".tmp")
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(SETTINGS_PATH.parent), suffix=".tmp")
         try:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(data, f, indent=2)

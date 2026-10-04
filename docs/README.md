@@ -2,6 +2,11 @@
 
 Pernix is a self-hosted, headless AI agent server. You run it on your own hardware, point it at a local Ollama install or OpenRouter, and it runs as a personal AI workstation: persistent memory, sandboxed workspace, web UI, REST API, scheduled jobs, and parallel workers.
 
+**3.2 preview:** this branch documents the upcoming main-branch update. Start
+with the [change summary](changelog.md#32-preview--preparing-for-main) and
+[upgrade checklist](upgrade.md#preparing-for-32). Operational diagnosis is in
+[operations.md](operations.md).
+
 This index is organized by what you're trying to do.
 
 ---
@@ -23,6 +28,7 @@ How Pernix behaves day-to-day. Read the ones that match what you're trying to do
 - [guides/using-skills.md](guides/using-skills.md) — installing and invoking skills
 - [guides/workers.md](guides/workers.md) — spawning parallel sub-agents for multi-part work
 - [guides/scheduling-cron.md](guides/scheduling-cron.md) — recurring agents on a cron schedule
+- [guides/notifications.md](guides/notifications.md) — what interrupts you, what is only logged, and how to change it
 - [guides/recipes.md](guides/recipes.md) — runnable, copy-pasteable end-to-end examples
 
 ## I want to extend Pernix
@@ -30,7 +36,6 @@ How Pernix behaves day-to-day. Read the ones that match what you're trying to do
 Authoring new capabilities — no Pernix code changes required.
 
 - [authoring/writing-skills.md](authoring/writing-skills.md) — the SKILL.md schema and how to write your own
-- [authoring/custom-tools.md](authoring/custom-tools.md) — author Python tools via the toolmaker extension
 - [mcp.md](mcp.md) — plug in external MCP tool servers (Model Context Protocol), local or remote, no code required
 
 ## I'm operating / deploying Pernix
@@ -54,14 +59,12 @@ Beyond the localhost-only default. Read these before exposing Pernix to anything
 - [internals/state-machine.md](internals/state-machine.md) — formal session state machine with file:line citations
 - [internals/web-client.md](internals/web-client.md) — the web UI's three device tiers: the two stylesheets, their gates, and the JS that mirrors them
 - [mobile-device-checklist.md](mobile-device-checklist.md) — the phone/tablet checks that need real hardware (the automated gate covers the rest)
-- [internals/extensions.md](internals/extensions.md) — the thirteen extension modules and their gates
+- [internals/extensions.md](internals/extensions.md) — the bundled extension modules and their gates
 - [internals/reflect-and-snooze.md](internals/reflect-and-snooze.md) — quality-gate retry and idle-time consolidation
 - [internals/rlm.md](internals/rlm.md) — recursive long-input processing (sandboxed REPL + sub-LLM broker)
-- [internals/candor.md](internals/candor.md) — calibrated operational memory: earned tool reliability from recorded outcomes
 - [internals/dream.md](internals/dream.md) — idle-time introspection: hypotheses about itself, falsified against the record
-- [internals/autonomy.md](internals/autonomy.md) — long-running autonomy: gates, goals, heartbeats, and the persistent session kernel
-- [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md) — the self-improvement loop: golden-task canaries and the governed adaptive policy store
-- [internals/telos.md](internals/telos.md) — the operational question loop: turn-time anomalies become falsifiable hypotheses (questions, SOUP), evaluated against recorded evidence; the v3.0 goal-DAG (ordo, binding, hevel) was carved out in v3.1 as a no-op
+- [internals/autonomy.md](internals/autonomy.md) — long-running autonomy: gates, goals, and the persistent session kernel
+- [internals/canary.md](internals/canary.md) — the golden-task canary suite and the Trust tab
 
 ## I want to contribute
 

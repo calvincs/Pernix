@@ -28,9 +28,9 @@ When both providers offer a model with the same name, **Ollama wins** (local, fr
 
 There used to be a DuckDuckGo fallback; it was removed because it produced unreliable results. The Tavily key is now the gate.
 
-### Why does the agent ask me to confirm things like web searches or creating a skill?
+### Why does the agent ask me to confirm things like web searches?
 
-That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `create_skill`, and any MCP tool whose server marks it destructive) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
+That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `add_gate`, and any MCP tool whose server marks it destructive) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
 
 Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Tools & safety → Remembered Approvals**.
 
@@ -120,7 +120,6 @@ Everything is local:
 | Workspace files | `data/workspace/` |
 | RLM run traces (when enabled) | `data/workspace/rlm/<run_id>/` — auto-purged after 30 days |
 | Dream reports (when enabled) | `data/workspace/dreams/` |
-| Candor evidence ledger (when enabled) | `data/candor/` |
 | Settings | `data/settings.json` |
 | API keys | `.env` |
 | Skills | `data/skills/` |
@@ -155,9 +154,9 @@ For mobile without browser certificate warnings (and for Web Push notifications 
 
 ### Does the UI work properly on a phone or a tablet?
 
-Yes, and it is not the desktop layout shrunk. Below 900px the sidebar becomes a drawer (swipe from the left edge or tap the hamburger), the Explorer and the modals become full-screen sheets, and each session row carries one `⋯` menu instead of hover-revealed icons. A tablet in landscape is treated as a big screen with a finger on it: the sidebar stays docked and the Explorer sits beside the conversation, at touch sizes. Dragging the sidebar's edge to resize it is a desktop affordance only — a phone and a tablet keep their own sidebar sizes.
+Yes, and it is not the desktop layout shrunk. Below 900px the sidebar becomes a drawer (swipe from the left edge or tap the hamburger), the Explorer and the modals become full-screen sheets, and each session row — and each assistant reply — carries one `⋯` menu instead of hover-revealed icons. A tablet in landscape is treated as a big screen with a finger on it: the sidebar stays docked and the Explorer sits beside the conversation, at touch sizes. Dragging the sidebar's edge to resize it is a desktop affordance only — a phone and a tablet keep their own sidebar sizes.
 
-On touch, Enter adds a new line and the send button sends — the opposite of the desktop default, because Enter is the on-screen keyboard's newline key. **Ctrl+Enter / Cmd+Enter always sends**, which is the answer for a tablet with a keyboard attached, and you can flip the default under Settings → Providers & models → *This browser* → "Enter sends the message". That preference is stored in the browser you set it in and is not synced.
+On touch, Enter adds a new line and the send button sends — the opposite of the desktop default, because Enter is the on-screen keyboard's newline key (the return key is labelled to match whichever way the preference is set). **Ctrl+Enter / Cmd+Enter always sends**, which is the answer for a tablet with a keyboard attached. You can flip the default under Settings → Providers & models → *This browser* → "Enter sends the message", or on a desktop by clicking the hint beside the send button, which states the binding and switches it in place. That preference is stored in the browser you set it in and is not synced.
 
 How it works underneath — the two stylesheets, their gates, and why an iPad needs JavaScript to be recognised at all — is [internals/web-client.md](internals/web-client.md).
 
@@ -184,6 +183,10 @@ There's no built-in coordination between instances — they're fully independent
 
 ## Authoring and customization
 
+### Why didn't I get a notification for X? / Why is the bell so quiet?
+
+On purpose. Only things that need you — a question, a failed job, a turn that stopped and needs a reply, a goal out of budget — interrupt you. Self-maintenance (skill auto-applies, dream corrections, canary sweep results) is written to the **Activity** tab of the bell instead, where you can read it when you want; dismissing an item never deletes it. Everything is listed in [guides/notifications.md](guides/notifications.md), including how to promote or demote a whole area in Settings → Integrations → Notification tiers.
+
 ### How do I make Pernix talk less / more / differently?
 
 Edit `data/agent/SOUL.md` — that's the agent's identity file, injected into every turn. Want it terse? Verbose? Opinionated about a domain? Just write it in.
@@ -198,7 +201,7 @@ Write a **skill**. Skills are just markdown files with YAML frontmatter, optiona
 
 ### How do I add a custom tool?
 
-Use the **toolmaker** extension's `create_tool` to author a Python tool from inside a chat — no code changes to Pernix itself. See [authoring/custom-tools.md](authoring/custom-tools.md).
+Write a skill that bundles a script (the agent runs it under `bash`), or connect an MCP server. The in-chat toolmaker (`create_tool`) was removed in 3.2. See [authoring/writing-skills.md](authoring/writing-skills.md) and [mcp.md](mcp.md).
 
 ---
 
@@ -211,7 +214,7 @@ Only when the agent makes a request that explicitly goes outbound:
 - LLM calls to OpenRouter (cloud) — every request you route through OpenRouter
 - Web search via Tavily
 - Page fetches via `browse_web` or `http_get`
-- Configured webhook (`notify_webhook_url`) when the agent uses `ask_user`
+- Configured webhook (`notify_webhook_url`) when the agent uses `ask_user` or raises an interrupt-tier notification (a failed job, a stopped turn — see [notifications](guides/notifications.md))
 
 Ollama inference, memory storage, and session DB all stay local. Settings and API keys are never sent to any LLM.
 

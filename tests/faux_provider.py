@@ -46,9 +46,11 @@ def raise_connect() -> dict:
     return {"kind": "raise_connect"}
 
 
-def stream_tokens(*tokens: str) -> dict:
-    """Step: stream these TOKEN events then DONE."""
-    return {"kind": "stream", "tokens": list(tokens)}
+def stream_tokens(*tokens: str, usage: TokenUsage | None = None) -> dict:
+    """Step: stream these TOKEN events, then a USAGE frame if one is given,
+    then DONE. The usage frame is what the ladder books against a model, so a
+    test about accounting needs one."""
+    return {"kind": "stream", "tokens": list(tokens), "usage": usage}
 
 
 def stream_then_raise(tokens: list[str], status: int, body: str = "") -> dict:
@@ -112,6 +114,8 @@ class FauxProvider:
             yield StreamEvent(type=StreamEventType.TOKEN, content=token)
         if step["kind"] == "stream_then_raise":
             raise _http_error(step["status"], step.get("body", ""))
+        if step.get("usage") is not None:
+            yield StreamEvent(type=StreamEventType.USAGE, usage=step["usage"])
         yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
 
     async def get_model_info(self, model: str) -> ModelInfo:
@@ -131,10 +135,21 @@ class FauxProvider:
 
 
 class StubRegistry:
-    """Minimal registry stub: fixed model->provider mapping."""
+    """Minimal registry stub: fixed model->provider mapping.
 
-    def __init__(self, mapping: dict[str, str]):
+    `infos` is the optional capability half. The router asks the registry what
+    a BACKUP model can be handed — tools, images, output cap — so a test about
+    capability-aware failover has to be able to say. Omitted models come back
+    unknown, which is the shape a freshly booted registry has too.
+
+    Map the fallback model to a provider that is NOT the primary's and NOT the
+    hard-coded one: a stub that answers "ollama" for the backup cannot tell a
+    router that resolved it from a router that simply always called Ollama.
+    """
+
+    def __init__(self, mapping: dict[str, str], infos: dict[str, ModelInfo] | None = None):
         self._mapping = mapping
+        self._infos = dict(infos or {})
         self.populated = True
 
     def resolve_provider(self, model: str) -> str:
@@ -144,7 +159,7 @@ class StubRegistry:
         return model
 
     def get_model_info(self, model: str):
-        return None
+        return self._infos.get(model)
 
     def all_models(self):
-        return []
+        return list(self._infos.values())

@@ -111,6 +111,15 @@
     margin-bottom: 0;
 }
 
+/* The `⋯` an assistant answer carries instead of the mouse's toolbar: copy
+   and the two thumbs become sheet rows, so one 36px target replaces three.
+   It takes the 36px box and the outline from .msg-action-btn above; the only
+   thing of its own is the dot colour, which sits a step brighter than the
+   toolbar's icons because it is the row's only control. */
+.message .msg-menu-btn {
+    color: var(--text-dim);
+}
+
 /* The model/latency chip is a per-answer footnote. On a narrow screen a
    footnote under every single reply is just noise between the answers, so it
    folds away and the meta row (role + time) is the tap target that brings it
@@ -849,6 +858,12 @@ body[data-touch] .space-group-header .space-menu-btn {
     min-height: 44px;
     font-size: 16px;
 }
+/* The thumbs-down note field — 16px for the same iOS-zoom reason as every
+   other input on this tier. */
+.msg-note-input {
+    min-height: 44px;
+    font-size: 16px;
+}
 .fp-skill-item {
     padding: var(--sp-3);
 }
@@ -970,6 +985,18 @@ body[data-touch] .ce-fallback {
 
 /* ------------------------------------------------------------------
    Input area (sole bottom element — compact, native-feeling)
+
+   Same card as the desktop composer, re-tuned through the four custom
+   properties layout.css puts on #composer: 16px text, 44px targets, a
+   slightly rounder corner for the bigger radius a phone wants.
+
+   The one structural difference is .is-rest-inline. An empty, unfocused
+   composer on a phone folds the control row back onto the text line —
+   attach, text, send, one row, 56px of the screen — because a phone with
+   the keyboard up has about 260px of usable height and a composer that
+   spends 125px of it before you have typed anything is the wrong trade.
+   The moment it has focus or a character in it the row drops beneath and
+   the writing area gets the full width. app.js owns the class.
    ------------------------------------------------------------------ */
 #input-wrapper {
     padding: var(--sp-1) var(--sp-3);
@@ -978,39 +1005,60 @@ body[data-touch] .ce-fallback {
     padding-right: max(var(--sp-3), var(--safe-right));
     background: var(--bg);
 }
-#input-bar {
-    border-radius: 1.25rem;
+#composer {
+    /* 16px prevents iOS auto-zoom on focus. 2 x 16px x 1.55 + 2 x 8px =
+       65.6px of textarea once it is focused; 40.8px at rest, under a 44px
+       row. 44px targets: Apple HIG 44pt, Material 48dp. */
+    --composer-size: 16px;
+    --composer-target: 44px;
+    border-radius: 14px;
     padding: 6px;
     gap: var(--sp-1);
     box-shadow: var(--shadow-sm);
 }
-#input-bar textarea {
-    font-size: 16px; /* prevents iOS auto-zoom on focus */
-    min-height: 22px;
-    padding: 5px 0;
-    line-height: 1.4;
+#composer textarea {
     /* P5 — a flat 120px cap was written against a portrait phone. With the
        keyboard up on a landscape phone the visible viewport is ~200px
        tall, and a composer that grows to 120px of it leaves two lines of
        the conversation you are replying to. dvh here is the VISUAL
        viewport on every browser that shrinks it for the keyboard, so the
-       cap tightens exactly when room runs out. */
-    max-height: min(120px, 30dvh);
+       cap tightens exactly when room runs out. The pixel half of the cap
+       is 200px rather than 120px because the box now starts at two lines:
+       the old number left barely a line of growth. */
+    max-height: min(200px, 30dvh);
 }
-/* Send is the most-tapped control in the app; 40px keeps it close to
-   the 44px guidance without making the composer bar taller. */
-#send-btn,
-#attach-btn,
-#voice-btn {
-    width: 40px;
-    height: 40px;
-    flex-shrink: 0;
-}
+#stop-btn svg,
 #attach-btn svg,
-#voice-btn svg {
+#expand-btn svg,
+#voice-btn svg,
+#send-btn svg {
     width: 20px;
     height: 20px;
 }
+/* The hint is a fine-pointer affordance: there is no Shift+Enter on a soft
+   keyboard, and the row has no width to spare. aria-description on the
+   textarea still carries the binding. */
+#composer-hint { display: none; }
+
+/* At rest: one line, controls inline. `display: contents` dissolves the
+   control row so its buttons become flex items of the card itself and can
+   be ordered around the textarea; everything the folded row has no room
+   for is hidden rather than wrapped. */
+#composer.is-rest-inline {
+    --composer-lines: 1;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-1);
+}
+#composer.is-rest-inline #composer-row { display: contents; }
+#composer.is-rest-inline #attach-btn { order: 1; }
+#composer.is-rest-inline #msg-input { order: 2; flex: 1 1 auto; }
+#composer.is-rest-inline #voice-btn { order: 3; }
+#composer.is-rest-inline #send-btn { order: 4; }
+#composer.is-rest-inline #expand-btn,
+#composer.is-rest-inline #stop-btn,
+#composer.is-rest-inline #composer-count,
+#composer.is-rest-inline #composer-row .grow { display: none; }
 
 .modal-body {
     -webkit-overflow-scrolling: touch;
@@ -1184,11 +1232,14 @@ body[data-touch] .ce-fallback {
 .bell-panel .notif-item {
     padding: var(--sp-2) var(--sp-3);
 }
+.bell-panel .notif-item-title {
+    max-width: 65%;
+}
 .bell-panel .notif-item-type {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 65%;
+    min-width: 0;
 }
 .bell-panel .notif-item-text {
     word-break: break-word;
@@ -1197,9 +1248,24 @@ body[data-touch] .ce-fallback {
     flex-wrap: wrap;
     justify-content: flex-end;
 }
-.bell-panel .notif-item-buttons .btn-sm {
-    min-height: 36px;
+.bell-panel .notif-item-buttons .btn-sm,
+.bell-panel .bell-toolbar .btn-sm,
+.bell-panel .bell-more .btn-sm {
+    min-height: 44px;
     padding: var(--sp-2) var(--sp-3);
+}
+/* Every control in the panel is a thumb's target: the area chips and the
+   session chip take the same 44px floor (.modal-close already has it). */
+.bell-panel .bell-chip {
+    min-height: 44px;
+    min-width: 44px;
+    padding: var(--sp-1) var(--sp-3);
+    font-size: var(--text-xs);
+}
+.bell-panel .notif-session-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
 }
 .bell-panel .notif-status {
     width: 100%;
@@ -1431,3 +1497,92 @@ body[data-touch] .ce-fallback {
     font-size: 16px;
     -webkit-text-size-adjust: 100%;
 }
+
+/* ------------------------------------------------------------------
+   Expand editor — full-screen sheet (compose-editor.js)
+
+   Under a finger the editor is not a dialog floating on a scrim: a phone has
+   no room for one and no Escape key to leave it with, so it takes the whole
+   screen and puts the two ways out in a top bar — Cancel · Compose · Send —
+   where a thumb already expects them.
+
+   Sizing is the same trick #app uses, and for the same reason: dvh alone does
+   not shrink when iOS raises the keyboard, so a 100dvh sheet would put the
+   line being typed underneath it. --vvh and --vv-top come from mobile.js's
+   visualViewport listener and both fall back to the old values, so a browser
+   without visualViewport behaves exactly as it did.
+   ------------------------------------------------------------------ */
+#compose-editor-overlay.modal-overlay {
+    align-items: stretch;
+    justify-content: stretch;
+    padding: 0;
+    top: var(--vv-top, 0px);
+    bottom: auto;
+    height: 100vh;                 /* fallback */
+    height: var(--vvh, 100dvh);    /* the visible viewport, keyboard included */
+    /* Nothing shows through a full-screen sheet, so the scrim and its blur are
+       a filter over an opaque surface — pure cost. */
+    background: var(--bg);
+    backdrop-filter: none;
+}
+
+#compose-editor.compose-editor--sheet {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    height: 100%;
+    min-height: 0;
+    max-height: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    background: var(--bg);
+    animation: fadeIn 0.15s ease;
+}
+
+/* Cancel · Compose · Send. The title takes the middle and is centred within
+   it, so it stays centred on the screen however wide the two buttons grow. */
+.compose-editor--sheet .compose-editor-top {
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-2);
+    padding-top: max(var(--sp-2), var(--safe-top));
+    padding-left: max(var(--sp-2), var(--safe-left));
+    padding-right: max(var(--sp-2), var(--safe-right));
+    border-bottom: 1px solid var(--border-subtle);
+}
+.compose-editor--sheet .compose-editor-eyebrow {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: center;
+}
+
+/* Apple HIG 44pt, which is also the plan's floor for every composer control.
+   Both are real targets with words on them, not glyphs. */
+.compose-editor--sheet .compose-editor-btn {
+    min-height: 44px;
+    min-width: 44px;
+    flex-shrink: 0;
+    padding: var(--sp-2) var(--sp-3);
+}
+
+.compose-editor--sheet .compose-editor-body {
+    margin: var(--sp-3);
+    margin-left: max(var(--sp-3), var(--safe-left));
+    margin-right: max(var(--sp-3), var(--safe-right));
+}
+
+/* 16px, the iOS auto-zoom floor: anything smaller and Safari zooms the page in
+   on focus and never zooms back — on the one screen the user is here to type
+   into. Same value the composer's textarea uses. */
+.compose-editor--sheet #compose-editor-input {
+    font-size: 16px;
+    line-height: 1.55;
+}
+
+.compose-editor--sheet .compose-editor-foot {
+    padding: var(--sp-2) var(--sp-3);
+    padding-bottom: max(var(--sp-2), var(--safe-bottom));
+    padding-left: max(var(--sp-3), var(--safe-left));
+    padding-right: max(var(--sp-3), var(--safe-right));
+}
+.compose-editor--sheet .compose-editor-saved { margin-left: 0; }

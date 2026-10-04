@@ -578,8 +578,7 @@ export function updateSessionActivity(sessionId, activityText) {
 // ---------------------------------------------------------------------------
 
 const FOCUS_CONTROLS = [
-    'session-id-badge', 'session-pin', 'session-rename', 'session-space-move',
-    'session-delete', 'sg-toggle', 'spaces-new-btn', 'space-add-btn',
+    'session-pin', 'session-more', 'sg-toggle', 'spaces-new-btn', 'space-add-btn',
     'space-gear-btn', 'space-del-btn', 'session-menu-btn', 'space-menu-btn',
 ];
 
@@ -1602,13 +1601,14 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
     // the only thing that tells two rows apart — about seventy pixels, and
     // three of the four were invisible until a hover that never comes. (P1)
     //
-    // The mouse row went the other way and paid for it. The same four
+    // The mouse row went the other way and paid for it twice. The same four
     // controls plus the id badge kept their 24px targets IN the line, so a
     // 270px sidebar spent 130 of its pixels on five buttons that are
     // invisible until you point at them and left the title seven characters.
     // They are an overlay now: out of flow, revealed over the title's tail
     // on hover or focus, so the title gets the width all of the time and the
     // targets stay 24px for the moment they are actually aimed at. (S1)
+    // Then the overlay itself grew to seven — see below. (L02)
     let menuBtn = null;
     const actions = [];
     if (isTouch()) {
@@ -1624,19 +1624,23 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
             },
         }, [icon('more', { size: 18 })]);
     } else {
-        // Session ID badge — hover shows full id, click copies to clipboard
-        actions.push(el('button', {
-            class: 'session-id-badge',
-            title: session.id,
-            'aria-label': `Copy session id ${session.id}`,
-            onClick: (e) => {
-                e.stopPropagation();
-                act.copyId(e.currentTarget);
-            },
-        }, [text('#')]));
-
-        // Pin toggle — pinned sessions live in their own group at the top.
+        // The overlay shipped with SEVEN 24px buttons. On a 253px row that is
+        // 184px of controls starting at x=57: on hover the title collapsed to
+        // about four characters and the strip covered the rest of the row.
+        // Clicking the CENTRE of a row therefore pinned it — elementFromPoint
+        // in the middle of six rows was button.session-pin every time — and
+        // Delete sat under the cursor at the top right of the thing you were
+        // pointing at. An overlay only costs the title nothing while it is
+        // narrow enough to miss.
+        //
+        // Two controls now: the pin, which is the one act worth its own click
+        // and has a state in the line to match, and an overflow button onto
+        // the SAME menu the touch tier opens. Nothing is lost — rename, move,
+        // archive, copy id and delete are all in it, reachable by mouse and
+        // by keyboard — and Delete is no longer something a mis-aimed click
+        // can reach at all. (L02)
         if (!isWorker) {
+            // Pin toggle — pinned sessions live in their own group at the top.
             actions.push(el('button', {
                 class: `session-pin${session.pinned ? ' pinned' : ''}`,
                 title: session.pinned ? 'Unpin session' : 'Pin session to top',
@@ -1646,11 +1650,11 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
             }, [icon(session.pinned ? 'pin-filled' : 'pin', { size: 12 })]));
 
             // The pin toggle used to be the pinned state as well: `.pinned`
-            // held it at opacity 1 while its four neighbours waited for a
-            // hover. Inside the overlay it cannot do that job any more, so a
-            // pinned row keeps an 11px mark in the line — the state, in flow
-            // and always readable, for fifteen pixels — and the button in the
-            // overlay stays what changes it.
+            // held it at opacity 1 while its neighbours waited for a hover.
+            // Inside the overlay it cannot do that job, so a pinned row keeps
+            // an 11px mark in the line — the state, in flow and always
+            // readable, for fifteen pixels — and the button in the overlay
+            // stays what changes it.
             if (session.pinned) {
                 meta.push(el('span', {
                     class: 'session-pinned-mark',
@@ -1658,53 +1662,21 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
                     title: 'Pinned',
                 }, [icon('pin-filled', { size: 11 })]));
             }
-
-            // Rename — swaps the title for an inline editor.
-            actions.push(el('button', {
-                class: 'session-rename',
-                title: 'Rename session',
-                'aria-label': `Rename ${titleText}`,
-                onClick: (e) => { e.stopPropagation(); act.rename(); },
-            }, [icon('edit', { size: 12 })]));
-
-            // Move to space — dropdown of spaces (+ "No space"). Only rendered
-            // when at least one space exists; membership changes never bump
-            // recency (set_session_meta contract).
-            if (_spaces.length) {
-                actions.push(el('button', {
-                    class: 'session-space-move',
-                    title: session.space_id ? 'Move to another space' : 'Move to space',
-                    'aria-label': session.space_id
-                        ? `Move ${titleText} to another space`
-                        : `Move ${titleText} to a space`,
-                    onClick: (e) => { e.stopPropagation(); act.move(e.currentTarget); },
-                }, [icon('move', { size: 12 })]));
-            }
-
-            // Archive / Restore. It joins the overlay rather than the
-            // line, so the sixth control costs the title nothing: the strip
-            // is absolutely positioned and the row does not move.
-            const isArchived = !!session.archived_at;
-            actions.push(el('button', {
-                class: 'session-archive',
-                title: isArchived ? 'Restore session' : 'Archive session — keeps every message',
-                'aria-label': isArchived ? `Restore ${titleText}` : `Archive ${titleText}`,
-                onClick: (e) => {
-                    e.stopPropagation();
-                    if (isArchived) act.restore();
-                    else act.archive();
-                },
-            }, [icon(isArchived ? 'unarchive' : 'archive', { size: 12 })]));
         }
 
-        // Delete button. It asks first, naming what it is about to delete,
-        // and then leaves five seconds to take it back.
+        // Everything else, behind one button: rename, move to space, archive
+        // or restore, copy session id, delete.
         actions.push(el('button', {
-            class: 'session-delete',
-            title: 'Delete session',
-            'aria-label': `Delete ${titleText}`,
-            onClick: (e) => { e.stopPropagation(); act.remove(); },
-        }, [text('×')]));
+            class: 'session-more',
+            type: 'button',
+            title: 'More actions',
+            'aria-label': `Actions for ${titleText}`,
+            'aria-haspopup': 'dialog',
+            onClick: (e) => {
+                e.stopPropagation();
+                _openSessionSheet(session, { anchor: e.currentTarget });
+            },
+        }, [icon('more', { size: 12 })]));
     }
 
     const classes = ['session-item'];

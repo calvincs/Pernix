@@ -45,16 +45,34 @@ async def test_old_canary_sessions_are_pruned_even_behind_500_newer_ones():
     assert db.get_session(db.list_sessions(1)[0]["id"]) is not None  # fillers untouched
 
 
-async def test_worker_sessions_prune_by_age_unless_a_parent_still_waits(monkeypatch):
+async def test_worker_sessions_prune_once_their_work_is_done_with_unless_referenced(monkeypatch):
+    """Updated 2026-09-08 (audit 3.2.1 H20). This pinned age as the WHOLE
+    test: `stale` was deleted purely for being 45 days old, whatever state it
+    was in and whether or not anyone had read its report. That is the defect
+    H20 filed — a paused worker, one awaiting input, and a finished-but-
+    uncollected result all died on the same date comparison.
+
+    The reach-past-500 property this file exists for is unchanged: a worker
+    outside the window is still found by a direct query rather than a windowed
+    scan, which `_crowd()` below still proves. What is added is that reaching
+    the window is no longer sufficient — the work has to have come to rest.
+    """
     from core.retention import prune_worker_sessions
 
     monkeypatch.setattr("config.settings.worker_session_retention_days", 30)
+    monkeypatch.setattr("config.settings.worker_abandoned_after_days", 180)
     parent = db.create_session(title="parent")
     stale = db.create_session(title="worker stale", session_type="worker", parent_session_id=parent)
     watched = db.create_session(title="worker watched", session_type="worker", parent_session_id=parent)
     recent = db.create_session(title="worker recent", session_type="worker", parent_session_id=parent)
-    for sid, days in ((stale, 45), (watched, 45), (recent, 3)):
-        _backdate_session(sid, days)
+    unread = db.create_session(title="worker report unread", session_type="worker", parent_session_id=parent)
+    # Both aged workers finished; only one has had its result read.
+    db.mark_worker_result_consumed(stale)
+    db.mark_worker_result_consumed(watched)
+    for sid, days in ((stale, 45), (watched, 45), (recent, 3), (unread, 45)):
+        db.update_session(sid, state_v2="idle_ready")
+        _backdate_session(sid, days)  # after update_session, which touches updated_at
+    _crowd()
     with connect_sessions() as conn:
         conn.execute(
             "UPDATE sessions SET state_v2 = 'awaiting_workers', watched_worker_ids = ? WHERE id = ?",
@@ -62,8 +80,12 @@ async def test_worker_sessions_prune_by_age_unless_a_parent_still_waits(monkeypa
         )
 
     assert await prune_worker_sessions() == 1
-    assert db.get_session(stale) is None
-    assert db.get_session(watched) is not None and db.get_session(recent) is not None
+    assert db.get_session(stale) is None, "consumed, aged and unreferenced — still residue"
+    assert db.get_session(watched) is not None, "a live reference outranks the window"
+    assert db.get_session(recent) is not None, "inside the window"
+    assert db.get_session(unread) is not None, "nobody has read this report yet"
+    # And the deleted transcript left its result behind, not just a date.
+    assert db.get_worker_manifest(stale) is not None
 
 
 def test_dream_hypotheses_terminal_rows_prune_pending_and_validated_never(monkeypatch):

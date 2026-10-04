@@ -91,7 +91,7 @@ def test_bash_denylist_env_mode(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.shell_env_denylist", ["SECRET_KEY"])
     from core.tools.builtin.core_tools import bash
 
-    result = bash("echo hello")
+    result, _meta = bash("echo hello")
     assert "hello" in result
 
 
@@ -102,7 +102,7 @@ def test_bash_allowlist_env_mode(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.shell_env_allowlist", ["PATH", "HOME"])
     from core.tools.builtin.core_tools import bash
 
-    result = bash("echo hello")
+    result, _meta = bash("echo hello")
     assert "hello" in result
 
 

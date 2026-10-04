@@ -418,6 +418,35 @@ This is a persistent, long-lived HTTP connection. The server pushes events as th
 
 **Reconnection:** Include `Last-Event-ID: <last_seq>` on reconnect (or a `?last_event_id=` query parameter) to receive any events you missed. The client should reconcile by checking for gaps in `seq` (a monotonically increasing sequence number on every event).
 
+The cursor is three-valued, and the three values mean different things:
+
+| Cursor | Meaning |
+| --- | --- |
+| absent | no replay wanted — live events only |
+| `0` | replay everything the server still retains |
+| `N` | replay everything after seq `N` |
+
+Omitting the header and sending `0` used to be the same request, which left a
+client unable to ask for replay on its *first* connection. That is why an
+answer could arrive with its opening missing: the transcript was read, tokens
+landed, and the subscription then opened with no way to ask for them.
+
+**`stream.resume`.** A cursor-bearing stream opens with one control frame
+before any replayed event. It carries no event id, so it never advances your
+cursor:
+
+```json
+{"from_seq": 41, "replayed": 6, "oldest_retained": 12,
+ "server_seq": 47, "complete": true}
+```
+
+`complete` is the field that matters. It is `false` when the server could not
+honour your cursor — the process restarted, or the retained ring has already
+dropped the events you asked for (`oldest_retained > from_seq`). A client that
+sees `complete: false` must re-read the transcript rather than assume it is
+merely behind. Treat a missing `stream.resume` on a cursor-bearing stream as
+`complete: false` too; it means an older server.
+
 ### Connecting (JavaScript example)
 ```javascript
 const evtSource = new EventSource(`/api/sessions/${sessionId}/events`);
@@ -463,7 +492,7 @@ Every event includes `seq` (sequence number), `session_id`, and `timestamp`. The
 | Event | Description |
 |---|---|
 | `dialog.question` | The agent is pausing to ask the user a question. Fields: `question_id`, `question`, `context`, `urgency`, `session_title`. Answer via `POST /api/questions/{question_id}/answer`. |
-| `dialog.notification` | Broadcast to every connected browser, not just those viewing the session. Also carries goal budget-limited alerts. Fields: `notification_id`, `title`, `body`, `urgency`, `source_session_id`. |
+| `dialog.notification` | Broadcast to every connected browser, not just those viewing the session. Also carries goal budget-limited alerts. Fields: `notification_id`, `title`, `body`, `urgency`, `source_session_id`, `tier`, `category`, `area`. A "cause cleared" refresh carries `resolved: true` and no title. The web client raises an OS notification only for `tier: "interrupt"` (or no `tier`, from a pre-v42 server); every event refreshes the bell. |
 | `dialog.answered` / `dialog.dismissed` | The question was resolved. |
 
 #### Context Management
@@ -692,6 +721,13 @@ Returns `{"status": "healthy", ...}` with the release version, build id, current
 
 `sessions_active` is always ≤ `sessions_loaded`. Watch the first for load and the second for footprint; a large gap just means recent conversations have not been reaped yet.
 
+`maintenance.snooze` also reports `last_outcome`, `degraded`,
+`last_successful_cycle`, `active_rung`, `rung_durations_ms` and `rung_failures`.
+These fields may be absent before the first recorded cycle. `status: healthy`
+means the service responds; inspect nested maintenance diagnostics to detect a
+partial or timed-out cycle. `maintenance.jobs_reconciled` counts repaired
+detached-job records in this process. See [operations.md](operations.md).
+
 ### Detailed Diagnostics *(localhost-only)*
 ```
 GET /api/health/detailed
@@ -792,12 +828,12 @@ GET /api/storage
 {
   "sessions": { "total": 1032, "by_type": {"normal": 310, "worker": 47, "...": 0}, "pinned": 12, "in_spaces": 84, "archived": 41 },
   "database": { "path": "/app/data/sessions.db", "bytes": 176160768, "wal_bytes": 0, "page_size": 4096, "reclaimable_bytes": 8912896 },
-  "backups": { "dir": "data/backups", "count": 7, "bytes": 734003200, "keep": 7, "last_backup_at": "2026-09-02T18:37:03Z", "beyond_keep": [] },
+  "backups": { "dir": "data/backups", "count": 7, "bytes": 734003200, "keep": 7, "last_backup_at": "2026-09-02T18:37:03Z", "beyond_keep": [], "incomplete": [] },
   "legacy_backups": { "dir": "data/.backups", "...": "same shape as backups, or null if this instance never had one" },
   "sweeps": { "sessions_pruned": 307, "sessions_archived": 41, "...": 0, "last_cycle": "2026-09-02T22:00:00Z" }
 }
 ```
-`sessions.archived` is `null` on a pre-v34 database rather than `0` — a build that cannot archive is not the same fact as zero archived sessions. `database.reclaimable_bytes` is the SQLite freelist (`freelist_count * page_size`) — what a `POST /api/storage/optimize` would give back. `backups`/`legacy_backups.bytes` is the whole directory (snapshots plus any memory corpora beside them); `beyond_keep` lists the snapshots rotation would remove, each with `name`, `bytes`, `mtime`, `scheme`. `legacy_backups` is `null` on an instance that never wrote to the pre-rename `data/.backups` directory. `sweeps` is present only when the snooze runner has stats to report — every `*_pruned` counter it tracks, plus `sessions_archived` and `last_cycle`.
+`sessions.archived` is `null` on a pre-v34 database rather than `0` — a build that cannot archive is not the same fact as zero archived sessions. `database.reclaimable_bytes` is the SQLite freelist (`freelist_count * page_size`) — what a `POST /api/storage/optimize` would give back. `backups`/`legacy_backups.bytes` is the whole directory (snapshots plus any memory corpora beside them); `beyond_keep` lists the snapshots rotation would remove, each with `name`, `bytes`, `mtime`, `scheme`. `count` and `last_backup_at` describe **completed** generations only; a snapshot left behind by a run that never finished is reported separately under `incomplete` (same shape as `beyond_keep`) so it is visible and deletable without ever being counted as a backup. `legacy_backups` is `null` on an instance that never wrote to the pre-rename `data/.backups` directory. `sweeps` is present only when the snooze runner has stats to report — every `*_pruned` counter it tracks, plus `sessions_archived` and `last_cycle`.
 
 ### Rotate Backups
 ```
@@ -841,24 +877,31 @@ Returns the skill's metadata, rendered `instructions`, the raw `raw_content` of 
 
 ### Skill Improvement Proposals
 
-Written by reflect and refine when a skill visibly under-performs. A pending
-proposal reaches `SKILL.md` one of two ways: you approve-then-apply it
-yourself, or — past `skill_proposal_auto_apply_after_hours` (default 24; `0`
-disables) — a snooze sweep applies it on its own once it passes machine
-validation (skill exists and is enabled, change ≤ 4,000 chars, confidence ≥
-0.6), day-capped (`skill_proposal_max_auto_applies_per_day`, default 5), with
-a timestamped backup under `data/skill_backups/<skill>/` and status stamped
-`auto_applied` — reject it before the window closes to veto.
+Written by reflect and refine when a skill visibly under-performs. With
+`skill_proposal_auto_apply` on (default), snooze applies a pending proposal
+that passes the machine checks after `skill_proposal_auto_apply_after_hours`
+(status `auto_applied`); otherwise it waits for `/apply` (status `applied`).
+Either way a timestamped backup lands under `data/skill_backups/<skill>/`
+first. Each new application journals its exact backup and file revisions.
+`/rollback` restores it only if the current skill still matches that application
+(or a rollback already restored its original contents before an interruption).
+Undo newer changes first; legacy proposals without an exact journal require manual
+restoration. Failed backups prevent writes. Approval/rejection after an application
+has been claimed returns HTTP 409. An interrupted application remains `applying`
+and can be recovered through `/rollback`; GET `/api/skills/{name}` exposes recent
+`proposal_history` with recovery actions. A pending proposal older than 30 days is
+archived by snooze (status `archived`).
 
 ```
 GET    /api/skills/proposals                 List proposals (default status=pending)
 POST   /api/skills/proposals/{id}/approve    Mark approved (you edit the skill yourself)
 POST   /api/skills/proposals/{id}/reject     Dismiss
 POST   /api/skills/proposals/{id}/apply      Write the change into the target SKILL.md
+POST   /api/skills/proposals/{id}/rollback   Restore the backup taken when it was applied
 ```
 
 Filter with `?skill_name=`, `?status=` (`pending` | `approved` | `rejected` |
-`applied` | `auto_applied`), `?source_origin=` (`session` for post-turn
+`applied` | `auto_applied` | `applying` | `archived` | `rolled_back`), `?source_origin=` (`session` for post-turn
 reflect, `refine` for the authoring pass).
 
 > These lived under `/api/workflows/proposals` before the workflow engine was
@@ -965,7 +1008,7 @@ GET    /api/jobs/events       SSE stream of job events
 
 ---
 
-## Goals, Gates & Heartbeats
+## Goals & Gates
 
 Read-side surfaces for the [autonomy substrate](internals/autonomy.md). Goals and gates are created by the agent's tools (`goal_create`, `add_gate`, …) when `goals_enabled` / `gates_enabled` are on; these endpoints let clients inspect them.
 
@@ -981,42 +1024,23 @@ GET /api/sessions/{session_id}/gates
 ```
 Returns the deterministic gates registered on the session: name, command, watch paths, scope, enabled state.
 
-### User Heartbeat
-One heartbeat per session, owned by **you** — the agent's `set_heartbeat`/`clear_heartbeat` tools operate on a separate `agent` namespace and can never see or modify this one. Requires `heartbeats_enabled`.
-
-```
-GET    /api/sessions/{session_id}/heartbeat    Read the user heartbeat (null when unset)
-PUT    /api/sessions/{session_id}/heartbeat    Set/replace it
-DELETE /api/sessions/{session_id}/heartbeat    Clear it
-```
-
-`PUT` body:
-```json
-{
-  "instruction": "Report progress and stay on the migration task.",
-  "every": "5m",
-  "delivery": "steer"
-}
-```
-`instruction` is required. `every` accepts durations (`30s`, `5m`, `2h`) or a 5-field cron expression (default `5m`). `delivery` is `steer` (inject into the running turn at the next round boundary — the default) or `follow_up` (queue as a prompt for the next idle moment); a parked session (awaiting workers/user) degrades `steer` to `follow_up`. Returns `{"ok": true, "job_id": ...}` or `{"error": ...}`.
-
 ---
 
 ## Canary Suite
 
-Golden-task canaries — see [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md). Listing works even when `canary_enabled` is off; triggering a run requires it on.
+Golden-task canaries — see [internals/canary.md](internals/canary.md). Listing works even when `canary_enabled` is off; triggering a run requires it on.
 
 ### List the Suite
 ```
 GET /api/canary
 ```
-Returns `enabled`, the heartbeat `schedule` and `heartbeat_per_night`, and every canary definition (name, tags, `covers`, flaky/`parked` flags, probe fields `max_runs`/`expires`, gate names, timeout, `last_reviewed`) with per-task stats over the retention window (`runs`, `passed`, `last_run` including its `outcome`).
+Returns `enabled` and every canary definition (name, tags, `covers`, `flaky`, `generated`, gate names, timeout, `last_reviewed`) with per-task stats over the retention window (`runs`, `passed`, `last_run` including its `outcome`).
 
 ### List Runs
 ```
 GET /api/canary/runs?task=&batch_id=&limit=50
 ```
-Run history, newest first (limit clamped to 500). Filter by task name or by the adaptive `batch_id` a post-batch sweep was tagged with.
+Run history, newest first (limit clamped to 500). Filter by task name, or by `batch_id` for rows written before 3.2, when post-batch sweeps of the retired adaptive layer tagged their runs with one.
 
 ### Trigger a Run
 ```
@@ -1025,7 +1049,7 @@ POST /api/canary/run
 ```json
 { "name": "fix-failing-test" }
 ```
-Queues one canary by name, or a **full sweep** (every canary, parked included) with `"name": "*"`. Returns `{"queued": ...}`; `400` when `canary_enabled` is off, `404` for an unknown name.
+Queues one canary by name, or a **full sweep** (every canary, recorded as trigger `manual`, reported with one notice) with `"name": "*"`. Returns `{"queued": ...}`; `400` when `canary_enabled` is off, `404` for an unknown name.
 
 ### Create a Canary
 ```
@@ -1034,82 +1058,33 @@ POST /api/canary
 ```json
 { "raw": "---\nname: my-canary\nprompt: ...\ngates: [...]\n---\nnotes" }
 ```
-Raw `CANARY.md` text (or a structured spec: `name`, `prompt`, `gates`, optional `files`/`tags`/`timeout`). Validated by a parse round-trip; gate commands are checked against the auto-admission allowlist proof and the verdicts returned as `warnings` — advisory, never a blocker. `400` on invalid content or a duplicate name.
+Raw `CANARY.md` text (or a structured spec: `name`, `prompt`, `gates`, optional `files`/`tags`/`timeout`). Validated by a parse round-trip; gate commands are checked against the allowlist proof and the verdicts returned as `warnings` — advisory, never a blocker. `400` on invalid content or a duplicate name.
 
-### Read / Edit / Park / Review / Retire
+### Read / Edit / Review / Retire
 ```
 GET    /api/canary/{name}            → full definition + raw_content
 PUT    /api/canary/{name}            {"raw": "..."} — replace, validated; the frontmatter name must match
-PATCH  /api/canary/{name}            {"parked": true|false}
 POST   /api/canary/{name}/reviewed   → bumps last_reviewed to today
 DELETE /api/canary/{name}            → moves to .retired/ (purged after canary_purge_after_days — reversible until then)
 ```
 
----
+The canary suite emits no SSE events: poll the endpoints above. Its only push signal is a row in the notifications feed.
 
-## Adaptive Layer
-
-The governed policy store — see [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md). Read endpoints work regardless of `adaptive_enabled`.
-
-```
-GET  /api/adaptive/entries?kind=&status=active&limit=200   Entries by kind/status (+ enabled/auto_apply flags).
-                                                           Each row carries `usage` — the per-entry
-                                                           usefulness counters (uses/successes/failures from
-                                                           scout and reflect citations), null when never used
-POST /api/adaptive/entries                                 Direct authorship: {kind, title, content, scope?}.
-                                                           Immediately active, journaled, deliberately
-                                                           unlinted — the human is the authority the content
-                                                           lint substitutes for. 400 on validation/cap/dup
-DEL  /api/adaptive/entries/{entry_id}                      Release valve: soft-delete one entry as actor
-                                                           "human" (status -> deleted, version bumped,
-                                                           journaled so it rolls back). 404 if unknown or
-                                                           not active. Frees a per-kind cap slot that
-                                                           producers can otherwise only ever fill
-GET  /api/adaptive/events?batch_id=&entry_id=&limit=100    Append-only event journal (before/after snapshots)
-GET  /api/adaptive/batches?status=&limit=100               Apply batches and their tripwire status
-GET  /api/adaptive/proposals?status=pending&limit=100      Proposals by status: pending | approved |
-                                                           auto_approved | auto_applied (dream memory
-                                                           corrections, applied on promotion) | rejected |
-                                                           expired | all. An
-                                                           unknown status is a 400 that names the enum —
-                                                           never a silent []. ?id=N fetches one row whatever
-                                                           its status. Every row carries `summary` (producer,
-                                                           what it is, target), `auto_approve_exempt`
-                                                           (canary proposals wait for a human) and
-                                                           `auto_approve_after` (when the veto window closes)
-GET  /api/adaptive/proposals/{id}                          One proposal, any status; 404 if unknown
-POST /api/adaptive/proposals/{id}/approve                  Apply-on-approve: executes the batch through the
-                                                           same apply engine as auto-applies and enqueues a
-                                                           batch-tagged canary sweep
-POST /api/adaptive/proposals/{id}/reject                   Reject a pending proposal
-POST /api/adaptive/rollback                                Roll back — body {"batch_id": ...} or {"event_id": ...};
-                                                           walks events in reverse and restores exact snapshots
-POST /api/adaptive/batches/{batch_id}/dismiss              Human dismiss of a tripwire flag: suspect → applied
-                                                           and cleared_at stamped, which is what makes the
-                                                           dismiss durable — the tripwire sweep skips
-                                                           cleared batches, so the same evidence can never
-                                                           re-flag it. 400 if the batch is not suspect
-```
-
-Neither the adaptive layer nor the canary suite emits SSE events. Both are polled through the endpoints above; the tripwire's only push signal is a high-urgency row in the notifications feed.
+The adaptive layer's `/api/adaptive/*` endpoints were removed in 3.2 with the layer itself; its tables stay in the database as history.
 
 ---
 
-## Telos
+## Trust and grader hold-outs
 
-Surfaces for the teleological layer — see [internals/telos.md](internals/telos.md). Read endpoints work even when `telos_enabled` is off.
-
-```
-GET  /api/telos                          Layer status summary
-GET  /api/telos/questions                Open questions
-GET  /api/telos/hypotheses               SOUP hypotheses
-GET  /api/telos/claims                   Committed claims
-GET  /api/telos/trace                    Append-only trace ledger
-POST /api/telos/run                      Run the telos machinery on demand
-POST /api/telos/alarms/{alarm_id}/ack    Acknowledge an alarm (silences the notification, keeps the ladder's place)
-```
-
----
+`GET /api/trust` returns `grader`, `outcomes` and `canaries` diagnostic sections.
+`grader.holdout` is null before a report exists. New reports preserve `accuracy`
+and `n` (graded cases) and add `total`, `attempted`, `graded`, `correct`, `failed`
+(wrong graded cases), `ungradable`, `success_rate` and `completion_rate`.
+`accuracy = correct / graded`; `success_rate = correct / total`;
+`completion_rate = graded / total`. An empty denominator produces null.
+`by_case` retains each expected answer, actual answer or error. An unsupported
+factual correction is ungradable, not a successful pass. Older saved reports
+remain readable and acquire the extra fields on the next hold-out run.
 
 ## MCP Servers
 
@@ -1217,12 +1192,33 @@ POST /api/questions/{question_id}/dismiss
 Marks the question as dismissed without providing an answer (the agent receives an empty/dismiss signal).
 
 ### Notifications
+
+Every notification has a **tier**, set by its category (`core/notices.py`):
+
+| Tier | Meaning | Where it shows |
+|---|---|---|
+| `interrupt` | The system needs the user | Bell badge (counted), OS notification, Web Push |
+| `bell` | Worth a look, never a buzz | A dot on the bell; the "Needs you" list |
+| `log` | Routine background work | The activity log only |
+
+A row is **open** until it is dismissed or its cause resolves on its own. Dismiss is soft: the row leaves the bell and stays in the log.
+
 ```
-GET    /api/notifications                       List unread agent notifications
-POST   /api/notifications/{id}/dismiss          Mark a notification dismissed
+GET    /api/notifications?view=bell|log&area=&before=&limit=   List notifications
+GET    /api/notifications/counts                Badge numbers: {needs_you, bell, unread}
+POST   /api/notifications/{id}/dismiss          Soft-dismiss one row
+POST   /api/notifications/{id}/read             Mark one row read
+POST   /api/notifications/dismiss-all           Dismiss every open interrupt/bell row
+POST   /api/notifications/read-all              Mark every row read
 GET    /api/notifications/events                SSE stream of notification events
 POST   /api/notify                              Trigger a manual notification
 ```
+
+`view=bell` (the default) returns open `interrupt` and `bell` rows; `view=log` returns every row in every state, newest first — page it with `before=<created_at of the last row>`. `area` filters by the category prefix (`canary`, `jobs`, `system`, ...). `limit` is capped at 500. In `counts`, `needs_you` is open interrupt rows (the badge adds open questions), `bell` is open quiet rows, `unread` is rows never marked read in any tier.
+
+Each row carries `id`, `session_id`, `title`, `body`, `urgency`, `created_at`, `updated_at`, `category`, `area`, `tier`, `subject`, `occurrences` (how many repeats were folded into it), `read_at`, `dismissed_at`, `resolved_at` and `link` — `{"kind": "session", "id": ...}`, `{"kind": "tab", "tab": ...}` or `null`.
+
+`POST /api/notify` with `urgency` `high` or `urgent` is an interrupt; anything else is a bell row.
 
 ---
 

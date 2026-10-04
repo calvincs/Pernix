@@ -107,7 +107,7 @@ def repl(code: str, timeout: int | None = None, _context: dict | None = None) ->
 
 
 def register(reg) -> None:
-    # Registration-gated like Candor/RLM: flipping session_kernel_enabled
+    # Registration-gated like RLM: flipping session_kernel_enabled
     # takes a restart. All call sites also gate at runtime.
     if not settings.session_kernel_enabled:
         return

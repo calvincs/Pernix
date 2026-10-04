@@ -2,7 +2,7 @@
 
 Complete walkthrough of how requests flow through the harness: session lifecycle, the agent turn loop, sub-agent workers, and the loop inside workers. File:line citations reference the repo at the time of writing.
 
-> **True state machine (v2)** — amended 2026-04-20, legacy layer deleted 2026-08-07
+> **True state machine (v2)** — amended 2026-04-20, legacy layer deleted 2026-08-07; delivery/settlement audit 2026-09-10
 >
 > The "five states + orthogonal flags" model this document originally described is **gone from the code**, not merely superseded. The only state machine is `sessions.state_v2`: a ten-state enum, one mutator (`transition()`), one persisted column (`sessions.state_v2`, migration v16), one log table (`session_state_log`, migration v13), and one `session.state_changed` SSE event per transition. The old 5-value enum, the `session.state` mirror field it lived in, and the bridge tables that translated between them were deleted along with the redundant per-transition write to the legacy `sessions.state` column (which still exists in the schema — see the note in `db/database.py` — but is no longer maintained).
 >
@@ -24,7 +24,7 @@ Complete walkthrough of how requests flow through the harness: session lifecycle
 | `PAUSED` | Session parked at `await session.pause_event.wait()` | Queued |
 | `CANCELLING` | `cancel_requested` observed; post-hooks skipped, transient | **Rejected** |
 | `FINALIZING` | Post-hooks running (title, distill, reflect, eval, worker finalize) | Queued |
-| `AWAITING_USER` | `ask_user` posted a question; turn terminated cleanly | Rejected (answer via `/api/questions/{id}/answer`) |
+| `AWAITING_USER` | `ask_user` posted a question; turn terminated cleanly | Yes (a reply resumes the turn; question answers use the answer endpoint) |
 | `AWAITING_WORKERS` | Parent session parked while watched workers run; auto-resumes when they settle | Queued |
 
 Deleted from the legacy enum: `ERROR` (folded into `FINALIZING` with `termination_reason="error"`), `DELETED` (was never set).
@@ -43,7 +43,14 @@ COMPACTING       → CANCELLING        reason=cancel-requested
 PROCESSING       → AWAITING_USER     reason=ask-user
 PROCESSING       → PAUSE_REQUESTED   reason=pause-requested   (workers and main sessions)
 PROCESSING       → CANCELLING        reason=cancel-requested
-PROCESSING       → FINALIZING        reason=loop-complete|round-ceiling|agent-error
+PROCESSING       → FINALIZING        reason=loop-complete|round-ceiling|stuck-loop|agent-error|compaction-failed
+PAUSE_REQUESTED  → PROCESSING        reason=resume
+PAUSE_REQUESTED  → FINALIZING        reason=loop-complete|round-ceiling|stuck-loop|agent-error|compaction-failed
+PAUSE_REQUESTED  → AWAITING_USER     reason=ask-user
+PAUSE_REQUESTED  → AWAITING_WORKERS  reason=workers-dispatched
+PAUSE_REQUESTED  → COMPACTING        reason=compact-{proactive|critical|overflow}
+COMPACTING       → PAUSE_REQUESTED   reason=compact-done-paused
+FINALIZING       → CANCELLING        reason=cancel-requested
 PAUSE_REQUESTED  → PAUSED            reason=pause-observed
 PAUSE_REQUESTED  → CANCELLING        reason=cancel-during-pause
 PAUSED           → PROCESSING        reason=resume
@@ -58,15 +65,38 @@ PROCESSING       → AWAITING_WORKERS  reason=workers-dispatched
 AWAITING_WORKERS → SCOUTING          reason=workers-complete
 AWAITING_WORKERS → IDLE_READY        reason=worker-timeout
 AWAITING_WORKERS → CANCELLING        reason=cancel-requested
-(6 states)       → IDLE_READY        reason=reaper-unstick     (SCOUTING, PROCESSING, PAUSE_REQUESTED, PAUSED, AWAITING_USER, AWAITING_WORKERS — no such edge from COMPACTING, CANCELLING, FINALIZING or IDLE_READY)
+(9 states)       → IDLE_READY        reason=reaper-unstick     (every state except IDLE_READY)
 (any active)     → IDLE_READY        reason=cancel-timeout     (cancel raced the turn's own exit)
 ```
 
-The escape-hatch rows are shorthand: `TRANSITIONS` in `sessions/state_v2.py` spells out one edge per source state rather than a wildcard, so an unexpected `(from, reason)` pair is still detected and logged as an invariant violation.
+The escape-hatch rows are shorthand: `TRANSITIONS` in `sessions/state_v2.py` spells out one edge per source state rather than a wildcard, so an unexpected `(from, reason)` pair is logged as an invariant violation and rejected without advancing state.
 
 No more `force_state()`. If a situation needs to "force," the edge is in the graph with an explicit reason (e.g. `reaper-unstick`, `cancel-timeout`, `finalize-error`).
 
+**A rejected edge is a code defect, and it is loud.** `transition()` returns
+`False` rather than forcing, so the turn does not crash — but it also does not
+advance: it sits in its old state with no post hooks, queued prompts stalled
+and the pause/cancel controls hidden, until the reaper unsticks it up to a
+minute later. Rejections are therefore logged at ERROR with the pair, and
+counted per edge in `sessions.state_v2.rejected_transition_stats()`, which
+`/api/health/detailed` publishes as `sessions.rejected_transitions`. A
+non-zero count there means some producer emits a pair the graph never
+declared — declare the edge.
+
+The producers that compose a reason at runtime are enumerable, so the edges
+they can emit are checked by test rather than discovered in production:
+
+- `sessions.manager.TERMINATION_TO_V2` × `TERMINATION_ROUTED_STATES`
+  (`PROCESSING` and `PAUSE_REQUESTED` both exit through the same mapping —
+  that is how a paused turn ending on `compaction_failed` reached an edge
+  only `COMPACTING` had).
+- `sessions.manager.finalize_failure_reason()` × every state finalization can
+  die in, which is every state but `IDLE_READY` — that is where the missing
+  `(CANCELLING, reaper-unstick)` edge came from.
+
 ### 0.3 State log (migration v13)
+
+Accepted transitions update `sessions.state_v2` and append the log in the same transaction. Memory and SSE advance only after commit; a persistence failure leaves the prior state intact.
 
 Table: `session_state_log` (append-only). Columns: `session_id, turn_id, parent_turn_id, retry_index, compaction_count, from_state, to_state, reason, termination_reason, reflect_count, eval_count, timestamp_ms, elapsed_ms`.
 
@@ -77,8 +107,8 @@ Table: `session_state_log` (append-only). Columns: `session_id, turn_id, parent_
 
 ### 0.4 SSE events
 
-- `session.state_changed {from, to, reason, turn_id, retry_index, compaction_count, termination_reason, parent_turn_id}` — emitted for every transition. Canonical lifecycle signal.
-- `session.prompt_rejected {reason: "awaiting_user" | "cancelling" | "queue_full"}` — emitted when a prompt is refused.
+- `session.state_changed {from, to, reason, turn_id, retry_index, compaction_count, termination_reason, parent_turn_id, capabilities}` — emitted for every transition. Canonical lifecycle signal.
+- `session.prompt_rejected {reason: "cancelling" | "queue_full" | "shutting_down" | "no_agent_runner"}` — emitted when a prompt is refused.
 - `worker.done {worker_id, termination_reason, error}` — emitted on parent session when a worker's full turn settles.
 
 Existing payload-detail events (`scout.start`, `stream.token`, `tool.call.*`, `context.compacting`, `reflect.*`, `turn.complete`, `worker.started`) remain and continue to fire. Later additions on the same stream:
@@ -99,7 +129,7 @@ Every one of these must also appear in `EVENT_TYPES` in `static/js/sse.js`: `Eve
 | `post_hooks_complete` | Derived read-only property: `True` iff `state == IDLE_READY` |
 | `waiting_for_input` | Derived read-only property: `True` iff `state == AWAITING_USER` |
 | `cancel_requested` | Kept as cooperative bool signal (HTTP cancel endpoint sets it outside the lock) |
-| `pause_event` | Kept as asyncio primitive (mirrors `state ∈ {PAUSE_REQUESTED, PAUSED}`) |
+| `pause_event` | Kept as asyncio primitive (also preserves a pending pause through COMPACTING) |
 | `reflect_retry_requested` / `eval_retry_requested` | Kept as internal post-hooks gates |
 | `has_background_tasks` | Kept (orthogonal — snooze/distill, not turn state) |
 | `termination_reason` | Kept, typed as `TerminationReason` enum, copied into state_log |
@@ -110,6 +140,20 @@ Enforced in `Manager.prompt()` (`sessions/manager.py`):
 - **IDLE_READY** / **AWAITING_USER** → run now. AWAITING_USER routes via `answer-received` automatically because `_run_agent_safe` detects the starting state.
 - **SCOUTING** / **PROCESSING** / **COMPACTING** / **PAUSE_REQUESTED** / **PAUSED** / **FINALIZING** → queue on `pending_messages`.
 - **CANCELLING** → reject with `session.prompt_rejected{reason:"cancelling"}`.
+
+The task remains the admission owner through finalization. `_run_agent_safe` restores model overrides and records the execution's outcome **after** verification retries and **before** dispatching the next queued run. A failed retry or cancellation during verification therefore cannot report the first attempt's success.
+
+#### Steering and control contract
+
+`Manager.steer()` is shared by browser corrections and worker steering. A live scouting/processing/compacting/paused turn receives a persisted injected row; finalizing or idle work follows normal admission. Corrections carry `delivery_status=pending` and increment the running turn's input version, so a correction arriving after compilation gets another pass. The compiler pins pending rows and retains them across compaction, while excluding prompts queued for later turns. A successful provider response marks only the pending rows actually included in that request `consumed` and emits `message.consumed`. Unread rows are recovered as queued work if the turn ends first. Cancellation retires unread rows; settled or consumed rows are not replayed. This is at-least-once delivery: a process failure before acknowledgement can replay input.
+
+Question answers and dismissals close the question and persist the accepted input in one transaction. For an **answer**, rejected admission returns HTTP 409 and leaves the question open — the user's answer is real input and re-submitting it is a sensible thing to ask of them.
+
+A **dismissal** is not. It is the user saying "never mind", so it has no failure they can act on, and refusing it leaves the question row open *and* the session in `AWAITING_USER` — which nothing else clears, because the reaper only unsticks an `AWAITING_USER` session whose question row is already gone. Every path through `/dismiss` therefore ends with the row deleted: a missing session row returns `dismissed`, and a refused notice (`queue_full`, `shutting_down`, `cancelling`) deletes the row, takes the declared `question-dismissed → IDLE_READY` edge, and returns `{"status": "dismissed", "notice_delivered": false, "detail": "<reason>"}` — information, not an error. The only thing lost is the agent's transcript notice that the question went unanswered.
+
+Chat and steering endpoints also report admission refusal instead of claiming success.
+
+`Manager.control_session()` owns pause/resume validation for browser and worker controls. Status and state-change events expose `capabilities`; the browser uses them to enable controls. Pause applies only to a live processing task and takes effect at the next checkpoint. Resume can withdraw an unobserved pause. If the last response finishes first, the turn settles and clears the pause signal rather than leaving a dead task paused.
 
 ### 0.7 Reaper rules (10-state)
 
@@ -130,11 +174,11 @@ Sessions/manager.py `reap_idle_sessions()`:
 
 ### 0.8 API / observability
 
-- `GET /api/sessions/{id}/status` — now includes `state` (new 10-value enum, defined in `sessions/state_v2.py:SessionStateV2`), `compat_status` (legacy 3-value for CLI compat), `turn_id`, `retry_index`, `termination_reason`.
+- `GET /api/sessions/{id}/status` — now includes `state` (new 10-value enum, defined in `sessions/state_v2.py:SessionStateV2`), `compat_status` (legacy 3-value for CLI compat), `turn_id`, `retry_index`, `termination_reason`, and `capabilities`.
 - `GET /api/sessions/{id}/state-log?since_id=<id>&limit=<n>` (or `tail=true&limit=<n>` for the newest window, paged backward with `before_id`) — raw replay of the transition log, one row per `state_v2.transition()` call.
 - `GET /api/sessions/{id}/turns?before_turn=<id>&limit=<n>` (default `limit=20`, clamped 1–100, newest turn first, `has_more` on the response) — one assembled record per turn instead of raw log rows: phases with wall-clock durations, tool calls (name, argument digest, latency, the *executor's* error flag rather than a `"traceback"` string match), the scout report, the reflect retry chain, eval gate attempts, compaction summaries, notices, and token totals. It joins the same `session_state_log` / `messages` / `token_usage` rows `/state-log` exposes raw — added so the client doesn't have to download and join the whole transcript itself to render a turn header. `db.get_turns()` (`db/models.py`) does the assembly.
 - `POST /api/sessions/{id}/workers/{wid}/pause` / `/resume` — HTTP wrappers over the state-machine-aware `pause_worker` / `resume_worker` tools.
-- The frontend **State timeline** modal (`openTimeline()` in `static/js/components/modals/timeline.js`, opened from the status bar's state badge) has three tabs — **Lane** (default; one row per turn, built from `/turns`, with a **Story** detail panel under the selected row, not a fourth tab), **Map** (the state machine itself: all ten states and all 31 distinct edges of `TRANSITIONS`, hand-laid as one SVG — replacing the Mermaid diagram removed in v3.1), and **Timeline** (the raw transition/tool-call feed, still `/state-log`-driven). Full UI mechanics: [web-client.md § The State timeline](web-client.md#the-state-timeline).
+- The frontend **State timeline** modal (`openTimeline()` in `static/js/components/modals/timeline.js`, opened from the status bar's state badge) has three tabs — **Lane** (default; one row per turn, built from `/turns`, with a **Story** detail panel under the selected row, not a fourth tab), **Map** (the state machine itself: all ten states and all distinct edges of `TRANSITIONS`, hand-laid as one SVG — replacing the Mermaid diagram removed in v3.1), and **Timeline** (the raw transition/tool-call feed, still `/state-log`-driven). Full UI mechanics: [web-client.md § The State timeline](web-client.md#the-state-timeline).
 
 ---
 
@@ -214,7 +258,7 @@ _run_agent_safe:                                  (manager.py:1260)
       while True:                                   (manager.py:1564-1617)
         _run_post_hooks()  → gated on state==FINALIZING, queue empty (manager.py:2495)
                               → title, stale-question cleanup, distill, gates,
-                                reflect, eval, candor, telos (sessions/hooks.py:48-102)
+                                reflect, eval (sessions/hooks.py)
         if reflect_retry_requested and count < cap and queue empty and still FINALIZING:
           _run_agent_retry()  → SCOUTING → PROCESSING → FINALIZING again  (manager.py:2008)
           continue
@@ -237,7 +281,7 @@ _run_agent_safe:                                  (manager.py:1260)
 
 ### 1.4 Reflect: a retry-loop INSIDE the turn
 
-When reflect returns `retry`, `_run_agent_retry()` (`manager.py:2008`) re-enters `SCOUTING → PROCESSING → FINALIZING` **within the same user turn**, re-feeding the combined retry directive into the scout — reflect's prose lessons plus, for an eval retry, per-feature judge feedback (`_build_retry_directive()`, `manager.py:44-65`). Bounded by `reflect_max_retries` (or `reflect_max_retries_worker` — tighter — for workers: checked inline in `_finalize_turn`, `manager.py:1561`). Eval retries have their own independent budget (`settings.eval_max_retries`) with the same mechanic. So a single user turn can cycle `FINALIZING → SCOUTING → PROCESSING → FINALIZING` up to `1 + reflect_retries + eval_retries` times before settling into `IDLE_READY`.
+When reflect returns `retry`, `_run_agent_retry()` (`manager.py:2008`) re-enters `SCOUTING → PROCESSING → FINALIZING` **within the same user turn**, re-feeding the combined retry directive into the scout — reflect's prose lessons plus, for an eval retry, per-feature judge feedback (`_build_retry_directive()`, `manager.py:44-65`). Bounded by `reflect_max_retries` (or `reflect_max_retries_worker` — tighter — for workers: checked inline in `_finalize_turn`, `manager.py:1561`). Eval retries have their own independent budget (`_EVAL_MAX_RETRIES` in `manager.py`) with the same mechanic; since 3.2 removed the feature-eval loop nothing requests one, and the plumbing is due to go. So a single user turn can cycle `FINALIZING → SCOUTING → PROCESSING → FINALIZING` up to `1 + reflect_retries + eval_retries` times before settling into `IDLE_READY`.
 
 ### 1.5 Reflect verdicts and how they manifest
 
@@ -369,15 +413,15 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 50); when the ca
 ### 2.2 Scout agent (`core/scout/runner.py`)
 
 - **Model** — the Background role, `settings.background_model` (fast, cheap; empty ⇒ `llm_model`), **fresh context** (no main convo history — session brief only). When scout exhausts its retries it makes one last attempt on the Backup role, `settings.fallback_model` (`runner.py:1265-1290`), before falling through to a deterministic stub report
-- **Tools** — read-only discovery, 8 tools: `search_memory`, `search_sessions`, `search_post_mortems`, `search_adaptive`, `search_skills`, `search_tools`, `read_skill_instructions`, `submit_report` (`runner.py:270-395`)
-- **Budget** — 6 rounds max (`SCOUT_MAX_ROUNDS`, `runner.py:957`); must call `submit_report` by round 5 (`runner.py:150`)
+- **Tools** — read-only discovery, 7 tools: `search_memory`, `search_sessions`, `search_post_mortems`, `search_skills`, `search_tools`, `read_skill_instructions`, `submit_report` (`runner.py:270-395`)
+- **Budget** — `settings.scout_max_rounds` LLM rounds (default 1, clamped to `SCOUT_MAX_ROUNDS_CAP` = 6 by `_scout_max_rounds()`). The last round offers only `submit_report`, so at 1 round scout answers from the preloaded baseline with no search tools; above 1 the prompt states the budget and asks for `submit_report` by the second-to-last round
 - **Output** — `ScoutReport` with `recommended_tools`, `recommended_skills` (0-3), `approach_guidance`, `deliverables_plan` (used by Reflect), optional `recommended_model`. SOUL.md/RULES.md/SESSIONS.md are NOT part of the report: the context compiler injects those files whole into the fixed prefix of every system prompt (`_build_agent_directives_block`) — scout reads them to shape its plan but never retypes them
 - **Caching** — report cached on `session.last_scout_report`; retries (reflect/eval) re-run scout with `reflect_lessons` prepended
 
 ### 2.3 Tool routing (`core/tools/registry.py`, `core/extensions/`)
 
 - ~35 **builtin tools** always registered (`file_read`, `file_write`, `bash`, `ask_user`, etc.); `call_model` is a model_mgmt extension, and `spawn_worker` / `get_worker_result` are orchestration extensions
-- **Extensions** — thirteen modules listed in `BUNDLED_EXTENSIONS` (`core/extensions/__init__.py`): `web`, `orchestration`, `evaluation`, `scheduling`, `toolmaker`, `model_mgmt`, `session_tools`, `planning`, `skillmaker` always register; `candor`, `rlm`, `telos` and `mcp` register conditionally on their own settings (`candor_enabled`, `rlm_enabled`, `telos_enabled`, `mcp_enabled`). Full inventory and gating: [extensions.md](extensions.md)
+- **Extensions** — the modules listed in `BUNDLED_EXTENSIONS` (`core/extensions/__init__.py`): `web`, `orchestration`, `evaluation`, `scheduling`, `packages`, `model_mgmt`, `session_tools` always register; `rlm` and `mcp` register conditionally on their own settings (`rlm_enabled`, `mcp_enabled`). Full inventory and gating: [extensions.md](extensions.md)
 - Agent sees only the schema slice for `active_tools` — scout-picked plus a monotonically-growing allowlist (`_resolve_tool_surface()`, `agent.py:1216`)
 - `discover_tools()` during the loop can expand `active_tools` mid-turn (`agent.py:2269-2270`)
 
@@ -399,8 +443,7 @@ After the agent loop exits, `Manager._run_post_hooks()` (`manager.py:2495`) runs
    - `pass` → done
    - reflect disabled but a gate failed → `_apply_gate_retry_fallback()` requests the retry directly (`hooks.py:83-84`)
 6. **Evaluation** (optional QA) (`hooks.py:87-88`)
-7. **Candor** and **TELOS** hooks, when enabled — mechanical, no LLM (`hooks.py:95-102`)
-8. Back in `_finalize_turn`: restore model override if `switch_model` was called mid-turn (`manager.py:1655-1695`) — done AFTER all retries so retries run on the switched model, then transition FINALIZING→IDLE_READY and emit `turn.complete` (`manager.py:1722-1739`). `post_hooks_complete` is not set explicitly — it reads true the instant the state is IDLE_READY (§0.5).
+7. Back in `_finalize_turn`: restore model override if `switch_model` was called mid-turn (`manager.py:1655-1695`) — done AFTER all retries so retries run on the switched model, then transition FINALIZING→IDLE_READY and emit `turn.complete` (`manager.py:1722-1739`). `post_hooks_complete` is not set explicitly — it reads true the instant the state is IDLE_READY (§0.5).
 
 ### 2.6 Compaction (nod)
 
@@ -435,7 +478,7 @@ The LLM layer is abstracted by `ProviderRouter` (`core/llm/router.py`) sitting b
   | Setting | Role | Consumers |
   |---|---|---|
   | `llm_model` | **Primary** (required) | agent turns; every quality-critical call — compaction summaries, reflect verdicts, eval; RLM root |
-  | `background_model` | **Background** (empty ⇒ Primary) | scout, auto-title, distill/ingest, snooze activities, dream, telos, RLM sub-calls |
+  | `background_model` | **Background** (empty ⇒ Primary) | scout, auto-title, distill/ingest, snooze activities, dream, RLM sub-calls |
   | `fallback_model` | **Backup** (empty ⇒ no backup) | used whenever a Primary *or* Background call fails: stream failover, provider failover, scout's last resort, one-shot retry |
 
   `embedding_model` is not a chat role — it names a local Ollama embedding model and setting it is what switches memory search from lexical to hybrid.
@@ -510,12 +553,12 @@ All orchestration tools are registered with `denied_session_types={"worker"}` (`
 | `spawn_worker` | `:57` | Create a new worker session. Returns worker ID. `kind=` selects a typed worker bundle — role preamble, an exclusive tool allowlist, a default model, verification criteria (built-ins: `research`, `code`, `explore`, `debug`, `transform`; custom via `data/worker_kinds/<name>.json`) — an explicit `model=` overrides the kind's default. `auto_resume_parent=True` registers the worker on the parent's watch-set (same contract `resume_worker` uses). The pinned model and kind persist to `sessions.model_override` / `sessions.worker_kind` (migration v31) so they survive a reap or restart. Safety: `caution`. |
 | `check_workers` | `:370` | Status of all workers. A worker is "done" only when `state == IDLE_READY` and the turn actually started. Annotates `"finalizing (reflect/post-hooks)"` when the state is `FINALIZING`, `"waiting on user answer"` when `AWAITING_USER`, and similarly for `PAUSED`. Triggers cross-pollination (§3.6) if some workers are done and others still running. |
 | `await_workers` | `:711` | Block up to 30 min (hardcoded `max_wait=1800`, `:879`). Polls every 3 s via `asyncio.run_coroutine_threadsafe(asyncio.sleep(3), loop)` — never blocks the event loop. Snapshots `worker_ids` per iteration to avoid a `RuntimeError` if the loop appends while iterating. Returns early if any worker is stalled past `stale_threshold` (default 120 s, `:712`). |
-| `get_worker_result` | `:502` | Final summary with quality-gate header (see §1.5). Lookup order: per-worker summary file → legacy `summary.md` → last assistant message. Max 3000 chars read. If the summary file already starts with `#` (sentinel from `_finalize_worker`), returned as-is — avoids double-stamping. `research`/`explore`-kind workers also get a deterministic `# KIND GATE` warning line when the summary names zero sources / zero file citations. |
-| `get_worker_transcript` | `:640` | Full message stream, one line per message: `[role] content`, truncated to `max_chars` (default 30k). Role-aware formatting for `assistant:tool_calls`, `tool`, `reflect` (parses verdict), `scout` (parses approach), `system`, `user`. |
-| `message_worker` | `:1045` | Fire-and-forget follow-up message into a running worker — internally just `manager.prompt(worker_id, message)` so the worker either picks it up on its current turn (queued) or starts a new turn. Safety: `caution`. |
+| `get_worker_result` | `:502` | Final summary with quality-gate header (see §1.5). Lookup order: the run record's report path (`sessions.worker_run`, migration v37) → discovery of `.worker_<id>_summary.md` under the worker's space home and the shared workspace → the shared `summary.md`, but only when `report.legacy_claim` ties it to this worker, and then labelled → last assistant message. Max 3000 chars read; a clipped preview names the artifact's absolute path so `file_read` gets the rest. The header is built by `worker_trust` from records only — how the turn ended, the grade recorded ABOVE this run's message boundary, and whether the artifact still matches the bytes that grade read; an older run's verdict is reported as history, never applied. A file is returned unwrapped only when the run record says this harness stamped those exact bytes (`report.is_our_stamp`) — a `#` heading in the body proves nothing, since a worker can type one. `research`/`explore`-kind workers also get a deterministic `# KIND GATE` warning line when the summary names zero sources / zero file citations. |
+| `get_worker_transcript` | `:640` | Message stream, one id-addressed line per message: `[#<msg id> role] content`, budgeted to `max_chars` (default 30k). `select='tail'` reads from the END (where a worker's deliverable is), `after_id`/`before_id` page, `message_id` returns one row unclipped — which is what a `[... clipped ...]` pointer names. Role-aware formatting for `assistant:tool_calls` (name **and** arguments), `tool`, `reflect` (parses verdict), `scout` (parses approach), `system`, `user`. |
+| `message_worker` | `:1045` | Follow-up message into a worker. An idle-like worker goes through `manager.prompt()` and starts a new turn; a mid-turn worker goes through `manager.steer()` and gets an injected row. Steering is where "fire-and-forget" stops being free: on the loop the tool cannot await its own steer (the worker's session lock), so it detaches the coroutine and returns **"NOT yet delivered"** — the detached task then emits `worker.steered` / `worker.steer_rejected` on the caller's stream and writes a one-line `system` note into the caller's transcript, which is what the agent itself sees next round. Off the loop it waits `STEER_DELIVERY_TIMEOUT` (10 s) and, on timeout, **cancels the future before returning**, so the abandoned delivery cannot land after the agent has been told it did not; a retry is then safe. Safety: `caution`. |
 | `cancel_worker` | `:1097` | Calls `session.task.cancel()` which raises `CancelledError` in the worker's `_run_agent_safe`. Worker's post-hooks are **skipped entirely** (`_finalize_turn`'s cancelled branch, `manager.py:1456-1528`) — no reflect, no auto-stamp, `termination_reason="cancelled"`. Safety: `caution`. |
 | `pause_worker` | `:1118` | Calls `session.pause_event.clear()`. Agent loop awaits the event at its pre-round gate (`_pre_round_gate`, `agent.py:1834`), so the worker pauses **at the next tool-round boundary**, not mid-tool. |
-| `resume_worker` | `:1182` | One tool, three cases — "bring the worker back to life": PAUSED/PAUSE_REQUESTED → release the pause (original behavior); a mid-turn state → no-op, reports the live state; a terminal state (cancelled, errored, round-capped, reaped from memory, or lost to a server restart) → **revive**: rehydrate the session from the DB (history, the persisted kind allowlist and pinned model from migration v31's columns), fall back to the default model with a visible note if the pinned one no longer resolves, clear the stale summary stamp so an old `# CANCELLED` header can't shadow the new result, re-attach to the parent, and start a continuation turn carrying an optional `note`. `auto_resume_parent=True` mirrors `spawn_worker`'s watch-set registration. Emits `worker.resumed`. `POST /api/sessions/{id}/workers/{wid}/resume` (optional `{"note"}` body) drives this over HTTP and checks parentage against the DB row. Non-worker sessions only ever get the pause-release path. |
+| `resume_worker` | `:1182` | One tool, three cases — "bring the worker back to life": PAUSED/PAUSE_REQUESTED → release the pause (original behavior); a mid-turn state → no-op, reports the live state; a terminal state (cancelled, errored, round-capped, reaped from memory, or lost to a server restart) → **revive**: rehydrate the session from the DB (history, the persisted kind allowlist and pinned model from migration v31's columns), fall back to the default model with a visible note if the pinned one no longer resolves, open the next run in `sessions.worker_run` — which retires (versions, never deletes) the previous run's report so an old `# CANCELLED` header can't shadow the new result — re-attach to the parent, and start a continuation turn carrying an optional `note`. `auto_resume_parent=True` mirrors `spawn_worker`'s watch-set registration. Emits `worker.resumed`. `POST /api/sessions/{id}/workers/{wid}/resume` (optional `{"note"}` body) drives this over HTTP and checks parentage against the DB row. Non-worker sessions only ever get the pause-release path. |
 | `retry_worker` | `:1365` | Cancel the old worker, then `spawn_worker` with a composed task that embeds the old worker's output (truncated to 2000 chars) + optional `reason` + `new_instructions`; the replacement inherits the original's `kind`. Useful for UNVERIFIED/ESCALATED workers. |
 
 ### 3.5 Why `post_hooks_complete` matters here
@@ -572,7 +615,7 @@ Tools with `"worker"` in `denied_session_types`: every orchestration tool (`spaw
 ### 4.3 What a worker can use
 
 - All core tools (`file_read`, `file_write`, `bash`, `call_model`, `ask_user`, …) — including `ask_user`: the question is posted to the global question registry and routed to **whichever user is watching the parent's UI**. From the worker's perspective the mechanism is identical to a main session — turn terminates with `waiting_for_input=True`, user's answer arrives as a new `manager.prompt()` into the worker.
-- All enabled extension tools (browser, vcs, planning, skillmaker, toolmaker)
+- All enabled extension tools (browser, vcs)
 - Skills (scout auto-injects top-1)
 - Shared workspace (reads/writes visible to parent), but its deliverable is isolated in `.worker_{id[:12]}_summary.md`
 

@@ -53,6 +53,11 @@ _NOTIFY_EVERY_S = 86400.0
 _failing_since: float = 0.0  # monotonic; 0 = healthy
 _failing_since_wall: str = ""
 _last_notified_at: float = 0.0
+# The outage notice is a coalescing bell row that stays open until the episode
+# ends. True at import so the first success after a restart also closes a row
+# the previous process left open; reset once resolved so a healthy box does
+# not touch the DB on every embed.
+_outage_resolve_pending: bool = True
 
 # Local fallback state (see core/llm/local_embed.py). While `_degraded_since`
 # is set, active_model() names the local model: queries embed on the CPU and
@@ -108,9 +113,14 @@ def _describe(err: Exception) -> str:
 
 
 def _note_success() -> None:
-    global _failing_since, _failing_since_wall
+    global _failing_since, _failing_since_wall, _outage_resolve_pending
     _failing_since = 0.0
     _failing_since_wall = ""
+    if _outage_resolve_pending:
+        _outage_resolve_pending = False
+        from core import notices
+
+        notices.resolve("system.embeddings_down")
 
 
 def _maybe_degrade(now: float) -> None:
@@ -133,9 +143,10 @@ def _maybe_degrade(now: float) -> None:
         local_model_name(),
     )
     try:
-        from db import models as db
+        from core import notices
 
-        db.add_notification(
+        notices.notify(
+            "system.embeddings_switched",
             title="Embeddings switched to the local CPU fallback",
             body=(
                 f"{_native_base()}/api/embed ({settings.embedding_model}) has failed since {_failing_since_wall}. "
@@ -144,7 +155,6 @@ def _maybe_degrade(now: float) -> None:
                 f"Pernix switches back once the remote answers for {settings.embedding_fallback_recover_minutes} "
                 "minutes — that re-embeds the corpus once more. Fix the remote server to shorten both."
             ),
-            urgency="normal",
         )
     except Exception as e:
         logger.debug("fallback notification failed: %s", e)
@@ -177,19 +187,19 @@ def check_remote_recovery() -> bool:
         return False
     _degraded_since = 0.0
     _remote_ok_since = 0.0
-    _note_success()
+    _note_success()  # also resolves the open "Embeddings unavailable" bell row
     logger.warning("Embeddings: remote %s recovered — switching back from the local fallback", settings.embedding_model)
     try:
-        from db import models as db
+        from core import notices
 
-        db.add_notification(
+        notices.notify(
+            "system.embeddings_recovered",
             title="Embeddings back on the remote server",
             body=(
                 f"{_native_base()}/api/embed ({settings.embedding_model}) has answered for "
                 f"{settings.embedding_fallback_recover_minutes} minutes; queries use it again and snooze "
                 "re-embeds the corpus under it over the next idle cycles."
             ),
-            urgency="normal",
         )
     except Exception as e:
         logger.debug("recovery notification failed: %s", e)
@@ -198,7 +208,7 @@ def check_remote_recovery() -> bool:
 
 def _note_failure(err: Exception) -> None:
     """Track the failure episode; notify the operator once it is sustained."""
-    global _failing_since, _failing_since_wall, _last_notified_at
+    global _failing_since, _failing_since_wall, _last_notified_at, _outage_resolve_pending
     now = time.monotonic()
     if not _failing_since:
         _failing_since = now
@@ -213,19 +223,20 @@ def _note_failure(err: Exception) -> None:
     if now - _failing_since < _NOTIFY_AFTER_S or (_last_notified_at and now - _last_notified_at < _NOTIFY_EVERY_S):
         return
     _last_notified_at = now
+    _outage_resolve_pending = True
     try:
-        from db import models as db
+        from core import notices
 
-        db.add_notification(
+        notices.notify(
+            "system.embeddings_down",
             title="Embeddings unavailable — memory recall is lexical-only",
             body=(
                 f"Every embedding call to {_native_base()}/api/embed (model {settings.embedding_model}) "
                 f"has failed since {_failing_since_wall}; latest error: {_describe(err)[:300]}. Memory recall, "
-                "dedup and dream/candor semantic search run on keyword matching only until it recovers. "
+                "dedup and dream semantic search run on keyword matching only until it recovers. "
                 "Check the embedding server; a model that was evicted needs one request that waits out "
                 "the cold load. This notice repeats at most once a day; a successful embed clears it."
             ),
-            urgency="normal",
         )
     except Exception as e:  # never let observability break the search path
         logger.debug("embedding outage notification failed: %s", e)

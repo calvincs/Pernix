@@ -19,15 +19,6 @@ def _make_app(*routers):
 # ---------------------------------------------------------------------------
 
 
-async def test_settings_get():
-    from api.routers import health
-
-    app = _make_app(health.router)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/settings")
-    assert resp.status_code == 200
-
-
 async def test_settings_apikey():
     from api.routers import health
 
@@ -179,19 +170,18 @@ async def test_chat_inject_stamps_turn_root_when_loop_live():
     sid = db.create_session(title="Inject Stamp Test")
     root = db.add_message(sid, "user", "the turn root")
 
-    class _StubSession:
-        _state_v2 = sv2.SessionStateV2.PROCESSING
-        current_turn_user_msg_id = root
+    import asyncio
 
-        def emit_event(self, _evt):
-            pass
+    from sessions.manager import SessionManager
 
-    class _StubManager:
-        def get(self, _sid):
-            return _StubSession()
+    manager = SessionManager()
+    session = manager.get_or_create(sid)
+    session._state_v2 = sv2.S.PROCESSING
+    session.current_turn_user_msg_id = root
+    session.task = asyncio.current_task()
 
     orig_get_manager = chat.get_manager
-    chat.get_manager = lambda: _StubManager()
+    chat.get_manager = lambda: manager
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
@@ -278,15 +268,6 @@ async def test_send_notification():
 # ---------------------------------------------------------------------------
 # Models router - more coverage
 # ---------------------------------------------------------------------------
-
-
-async def test_models_list():
-    from api.routers import models as models_router
-
-    app = _make_app(models_router.router)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/models")
-    assert resp.status_code == 200
 
 
 async def test_models_refresh(mock_llm_client):

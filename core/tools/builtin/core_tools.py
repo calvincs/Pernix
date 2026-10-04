@@ -11,13 +11,21 @@ import tempfile
 from pathlib import Path
 
 from config import settings
+from core.tools.atomic import TargetBusy, atomic_write, file_revision, target_lock
 from core.tools.paths import (
-    PROTECTED_DIRS,
-    PROTECTED_FILES,
-    root_mismatch_hint,
+    PROTECTED_DIRS as PROTECTED_DIRS,
+)
+from core.tools.paths import (
+    PROTECTED_FILES as PROTECTED_FILES,
 )
 from core.tools.paths import (
     allowed_read_roots as _allowed_roots,
+)
+from core.tools.paths import (
+    build_shell_env as _build_shell_env,
+)
+from core.tools.paths import (
+    root_mismatch_hint,
 )
 from core.tools.paths import (
     safe_read_path as _safe_path,
@@ -253,6 +261,128 @@ _SAFE_CACHE_DIRS: frozenset[str] = frozenset(
 )
 
 
+def _split_shell_operators(command: str) -> list[str]:
+    """Split a command string on shell operators, respecting quotes.
+
+    shlex alone is not enough: it keeps `x;` as one token, so a `;` written
+    without a leading space hides the next command word. This scans the raw
+    string instead, tracking quote state and backslash escapes, and cuts at
+    `;` `&&` `||` `|` `&` and newlines that are not inside quotes.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(command[i + 1])
+            i += 2
+            continue
+        if ch in ";\n":
+            parts.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        if ch in "&|":
+            parts.append("".join(buf))
+            buf = []
+            i += 2 if i + 1 < n and command[i + 1] == ch else 1
+            continue
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return [p for p in (p.strip() for p in parts) if p]
+
+
+# Tokens that are shell plumbing, not arguments: redirections and fd dups.
+_REDIRECT_RE = re.compile(r"^\d*(?:>>?|<<?|>&|<&|&>)")
+
+
+def _strip_redirections(tokens: list[str]) -> list[str]:
+    """Drop redirection tokens (and a following target) from an argument list.
+
+    `rm -rf x 2>/dev/null` must be read as one target, not two — otherwise the
+    exemption checks below see `2>/dev/null` as a path outside the workspace
+    and refuse a command that only touches the workspace.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if _REDIRECT_RE.match(tok):
+            # A bare operator takes the next token as its target.
+            if _REDIRECT_RE.fullmatch(tok):
+                i += 2
+            else:
+                i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _rm_segments(command: str) -> list[list[str]] | None:
+    """Every `rm` invocation in a command, as its own token list.
+
+    A command is rarely a bare `rm`. `cd impl && rm -rf __pycache__` and
+    `mv a b 2>/dev/null && rm -rf tmpdir; ls` are the ordinary shapes, and both
+    used to skip the exemption checks below entirely because those checks began
+    with `tokens[0] != "rm"` — so the agent was refused by an error message
+    that told it the very target it had just used was allowed (Agent Mesh
+    build, 2026-09-08).
+
+    Returns None when a segment cannot be tokenized — the caller keeps the
+    block, because an unparseable command is not one we can clear.
+    """
+    out: list[list[str]] = []
+    for segment in _split_shell_operators(command):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            return None
+        i = 0
+        # Peel env assignments and prefix wrappers (env/nice/sudo/...) so
+        # `env FOO=1 rm -rf x` is still seen as an rm.
+        while i < len(tokens):
+            tok = tokens[i]
+            if "=" in tok and not tok.startswith(("-", "/")):
+                lhs = tok.split("=", 1)[0]
+                if lhs and (lhs[0].isalpha() or lhs[0] == "_") and all(c.isalnum() or c == "_" for c in lhs):
+                    i += 1
+                    continue
+            base = os.path.basename(tok).lower()
+            if base in PREFIX_WRAPPERS:
+                i += 1
+                while i < len(tokens) and tokens[i].startswith("-"):
+                    takes_value = tokens[i] in WRAPPER_FLAGS_WITH_VALUE.get(base, set())
+                    i += 1
+                    if takes_value and i < len(tokens):
+                        i += 1
+                continue
+            break
+        if i < len(tokens) and os.path.basename(tokens[i]).lower() == "rm":
+            out.append(["rm"] + _strip_redirections(tokens[i + 1 :]))
+    return out
+
+
 def _rm_targets_are_safe_caches(command: str) -> bool:
     """Return True iff every non-flag argument to `rm` is a cache directory.
 
@@ -260,28 +390,25 @@ def _rm_targets_are_safe_caches(command: str) -> bool:
     `rm -rf` block. Conservative: any non-cache target (file path, absolute
     path, glob, env var, parent-traversal, multiple tokens with one unsafe)
     fails the check and keeps the original block in place.
+
+    EVERY rm in the command must qualify — a compound command that cleans a
+    cache and also deletes something else stays blocked.
     """
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return False  # parse failure → don't take the safe path
-    if not tokens or tokens[0] != "rm":
-        return False
-    targets: list[str] = []
-    for tok in tokens[1:]:
-        if tok.startswith("-"):
-            continue
-        targets.append(tok)
-    if not targets:
-        return False
-    for t in targets:
-        # Reject absolute paths, parent traversal, env interpolation, globs.
-        if t.startswith("/") or ".." in t.split("/") or "$" in t or "*" in t or "?" in t:
+    segments = _rm_segments(command)
+    if not segments:
+        return False  # parse failure or no rm at all → don't take the safe path
+    for tokens in segments:
+        targets = [tok for tok in tokens[1:] if not tok.startswith("-")]
+        if not targets:
             return False
-        # The final path segment must match a known cache directory name.
-        last = t.rstrip("/").rsplit("/", 1)[-1]
-        if last not in _SAFE_CACHE_DIRS:
-            return False
+        for t in targets:
+            # Reject absolute paths, parent traversal, env interpolation, globs.
+            if t.startswith("/") or ".." in t.split("/") or "$" in t or "*" in t or "?" in t:
+                return False
+            # The final path segment must match a known cache directory name.
+            last = t.rstrip("/").rsplit("/", 1)[-1]
+            if last not in _SAFE_CACHE_DIRS:
+                return False
     return True
 
 
@@ -324,33 +451,34 @@ def _rm_targets_are_in_workspace(command: str) -> bool:
     error-prone workarounds (field case 8d411d30d12d). Conservative: env
     interpolation, parent traversal, and glob-leading targets all fail the
     check; a glob later in the path is allowed because expansion happens with
-    cwd=workspace and the literal prefix already pins the tree."""
+    cwd=workspace and the literal prefix already pins the tree.
+
+    EVERY rm in the command must qualify, so `rm -rf ok && rm -rf /etc` stays
+    blocked on the second segment."""
     from core.tools.paths import workspace
 
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return False
-    if not tokens or tokens[0] != "rm":
+    segments = _rm_segments(command)
+    if not segments:
         return False
     ws = workspace()
-    targets = [t for t in tokens[1:] if not t.startswith("-")]
-    if not targets:
-        return False
-    for t in targets:
-        if "$" in t or ".." in t.split("/"):
+    for tokens in segments:
+        targets = [t for t in tokens[1:] if not t.startswith("-")]
+        if not targets:
             return False
-        first_seg = t.lstrip("/").split("/", 1)[0]
-        if any(ch in first_seg for ch in "*?["):
-            return False  # `rm -rf *` — too broad even inside the workspace
-        literal = t.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0]
-        base = Path(literal) if literal.startswith("/") else ws / literal
-        try:
-            resolved = base.resolve()
-        except OSError:
-            return False
-        if not (resolved.is_relative_to(ws) and resolved != ws):
-            return False
+        for t in targets:
+            if "$" in t or ".." in t.split("/"):
+                return False
+            first_seg = t.lstrip("/").split("/", 1)[0]
+            if any(ch in first_seg for ch in "*?["):
+                return False  # `rm -rf *` — too broad even inside the workspace
+            literal = t.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0]
+            base = Path(literal) if literal.startswith("/") else ws / literal
+            try:
+                resolved = base.resolve()
+            except OSError:
+                return False
+            if not (resolved.is_relative_to(ws) and resolved != ws):
+                return False
     return True
 
 
@@ -441,6 +569,31 @@ def _check_command_security(command: str) -> str | None:
     return None
 
 
+def check_shell_command(command: str) -> str | None:
+    """Admission every shell launcher shares. Returns an error string or None.
+
+    This is the whole of `bash`'s command policy, lifted out so a second
+    launcher cannot become the way around it. `job_start` runs the same shell
+    with the same environment and a much longer leash, so admitting there what
+    bash refuses would make the policy advisory. The wording is the error the
+    agent already knows, so a refusal reads the same whichever tool it used.
+
+    The two modes differ deliberately: permissive runs the denylist scan,
+    strict is a first-word allowlist. `core.gates.check_gate_command` is the
+    third launcher and takes only the denylist half, for the reason documented
+    there.
+    """
+    if not command or not command.strip():
+        return "Error: Empty command"
+    if settings.shell_security_mode == "permissive":
+        return _check_command_security(command)
+    if settings.shell_security_mode == "strict":
+        first_word = command.strip().split()[0]
+        if first_word not in settings.shell_allowlist:
+            return f"Error: Command '{first_word}' not in allowlist. Allowed: {', '.join(sorted(settings.shell_allowlist)[:10])}..."
+    return None
+
+
 def _is_binary(resolved: Path) -> bool:
     """Check if file is binary by sampling first 512 bytes for null bytes."""
     try:
@@ -471,6 +624,30 @@ def _read_text_nofollow(resolved: Path) -> str:
         return f.read()
 
 
+# How far a preview will walk a file purely to report its line count. A number
+# that is a floor is still useful; walking 4 GB of log to make it exact is not.
+_LINE_COUNT_CEILING = 1_000_000
+
+
+def _read_one_line_head(resolved: Path, index: int, cap: int) -> tuple[str, int]:
+    """(first ``cap`` chars of line ``index``, that line's full length).
+
+    A line wider than the preview budget has no line boundary to stop at, so
+    the choice is between returning a bounded slice of it and returning
+    nothing. The old code returned nothing — and then advised an offset that
+    re-ran the same call.
+    """
+    try:
+        with _open_nofollow(resolved, "r") as f:
+            for i, line in enumerate(f):
+                if i == index:
+                    body = line.rstrip("\n")
+                    return body[:cap], len(body)
+    except OSError:
+        pass
+    return "", 0
+
+
 def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
     """Read a file from the workspace.
 
@@ -485,7 +662,6 @@ def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
         resolved = _safe_path(path)
         if not resolved.exists():
             # If it's a directory, list contents
-            p = Path(path)
             for root in _allowed_roots():
                 candidate = (root / path).resolve()
                 if candidate.is_dir() and candidate.is_relative_to(root):
@@ -520,21 +696,45 @@ def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
             lines = []
             total_lines = 0
             total_chars = 0
+            size_truncated = False
             with _open_nofollow(resolved, "r") as f:
                 for i, line in enumerate(f):
                     total_lines = i + 1
                     if i < offset:
                         continue
-                    if limit > 0 and len(lines) >= limit:
+                    if size_truncated or (limit > 0 and len(lines) >= limit):
                         continue  # keep counting total lines
                     if total_chars + len(line) > MAX_OUTPUT:
-                        lines.append("[truncated by size]")
-                        break
+                        # Not `lines.append("[truncated by size]"); break`. That
+                        # put a harness string where the file's content goes,
+                        # counted it as a source line, and abandoned the count —
+                        # so a 3,001-line minified file came back as
+                        # "[lines 1-1 of 1]" holding nothing but the marker,
+                        # with a continuation that pointed back at itself.
+                        size_truncated = True
+                        continue
                     lines.append(line.rstrip("\n"))
                     total_chars += len(line)
-            end_line = offset + len(lines)
+            shown = len(lines)
+            end_line = offset + shown
             remaining = total_lines - end_line
-            header = f"[lines {offset + 1}-{end_line} of {total_lines}]"
+            header = f"[lines {offset + 1}-{end_line} of {total_lines:,}]"
+            if size_truncated and shown == 0:
+                # Line `offset` alone is wider than the whole preview budget.
+                # An offset cannot address inside a line, so hand over a
+                # bounded slice of it and name the route to the remainder,
+                # instead of returning nothing and advising the same call.
+                head, line_len = _read_one_line_head(resolved, offset, MAX_OUTPUT)
+                header = (
+                    f"[line {offset + 1} of {total_lines:,} is {line_len:,} chars — longer than the "
+                    f"{MAX_OUTPUT:,}-char preview budget; showing its first {len(head):,} chars. "
+                    f"Read the rest with bash(command=\"sed -n '{offset + 1}p' {path} | cut -c "
+                    f'{len(head) + 1}-"), or skip it with '
+                    f'file_read(path="{path}", offset={offset + 1}, limit=200)]'
+                )
+                return header + "\n" + head
+            if size_truncated:
+                header += f" ⚠ stopped at the {MAX_OUTPUT:,}-char preview cap."
             if remaining > 0:
                 header += (
                     f" ⚠ {remaining:,} lines remaining. "
@@ -552,16 +752,49 @@ def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
         if size > MAX_OUTPUT:
             lines: list[str] = []
             total_chars = 0
+            total_lines = 0
+            count_floor = False
+            size_truncated = False
             with _open_nofollow(resolved, "r") as f:
                 for line in f:
-                    if total_chars + len(line) > MAX_OUTPUT:
+                    total_lines += 1
+                    if total_lines > _LINE_COUNT_CEILING:
+                        # Bounded so a multi-GB log is not walked to its end
+                        # just to print a number; past here the total is a
+                        # floor and says so.
+                        count_floor = True
                         break
+                    if size_truncated:
+                        continue  # keep counting, but the preview stays contiguous
+                    if total_chars + len(line) > MAX_OUTPUT:
+                        # Stop APPENDING here, not counting. A preview that
+                        # skipped over the line it could not fit and resumed
+                        # with the next one would be a silent gap in the middle
+                        # of what looks like a contiguous head.
+                        size_truncated = True
+                        continue
                     lines.append(line.rstrip("\n"))
                     total_chars += len(line)
+            approx = "at least " if count_floor else ""
             shown = len(lines)
+            if shown == 0:
+                # The measured dead end: the first line alone exceeds the cap,
+                # so the loop broke before appending anything — "showing first
+                # 0 lines", zero source content, and `offset=0`, which re-runs
+                # this exact call. Return part of line 1 and a cursor that
+                # moves.
+                head, line_len = _read_one_line_head(resolved, 0, MAX_OUTPUT)
+                header = (
+                    f"⚠ Large file ({size:,} bytes, {approx}{total_lines:,} lines) — line 1 is "
+                    f"{line_len:,} chars, longer than the {MAX_OUTPUT:,}-char preview budget; showing "
+                    f"its first {len(head):,} chars. Read the rest with "
+                    f'bash(command="head -1 {path} | cut -c {len(head) + 1}-"), or continue with: '
+                    f'file_read(path="{path}", offset=1, limit=200)'
+                )
+                return header + "\n" + head
             header = (
-                f"⚠ Large file ({size:,} bytes) — showing first {shown} lines "
-                f"({total_chars:,} of ~{size:,} bytes). "
+                f"⚠ Large file ({size:,} bytes, {approx}{total_lines:,} lines) — showing first "
+                f"{shown} lines ({total_chars:,} of ~{size:,} bytes). "
                 f'Continue with: file_read(path="{path}", offset={shown}, limit=200)'
             )
             numbered = [f"{idx + 1:6d}\t{l}" for idx, l in enumerate(lines)]
@@ -574,35 +807,68 @@ def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
         return f"Error reading file: {e}"
 
 
-def file_write(path: str, content: str) -> str:
-    """Write a file to the workspace."""
-    import fcntl
-    import tempfile
+def _revision_mismatch(resolved: Path, expected: str) -> str | None:
+    """Check a caller-supplied precondition against what is on disk.
 
+    A whole-file overwrite used as read-modify-write cannot detect a stale
+    read by locking its own final write — by then the caller's copy is
+    already old. `expected_sha256` is the caller saying which revision it
+    believes it is replacing; "absent" says it believes there is no file yet.
+    The rejection names the revision that is actually there so the caller can
+    re-read and decide rather than guess.
+    """
+    actual = file_revision(resolved)
+    if expected.strip().lower() == "absent":
+        if actual is None:
+            return None
+        return (
+            f"Error: {resolved} already exists (revision {actual}) but expected_sha256='absent' — "
+            f"nothing was written. Read it before overwriting."
+        )
+    if actual is None:
+        return (
+            f"Error: {resolved} does not exist, so it cannot match expected_sha256={expected} — "
+            f"nothing was written. Pass expected_sha256='absent' to create it."
+        )
+    if actual != expected.strip().lower():
+        return (
+            f"Error: {resolved} is at revision {actual}, not the expected {expected} — "
+            f"it changed since you read it, so nothing was written. "
+            f"Call file_read(path='{resolved}') and redo the change against the current content."
+        )
+    return None
+
+
+def file_write(path: str, content: str, expected_sha256: str | None = None) -> str:
+    """Write a file to the workspace.
+
+    Preserves the mode of a file it overwrites and creates new files at
+    `atomic.NEW_FILE_MODE`. Takes the same canonical-target lock file_edit
+    uses, so a write and an edit of one file serialize inside this process;
+    nothing coordinates a shell redirect or another process, which is what
+    `expected_sha256` is for.
+    """
     cap = int(getattr(settings, "max_file_write_size", MAX_WRITE_SIZE) or MAX_WRITE_SIZE)
     if len(content) > cap:
         return f"Error: content exceeds size cap ({len(content)} > {cap} bytes)"
     try:
         resolved = _safe_write_path(path)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic write: write to temp file, then rename
-        fd, tmp_path = tempfile.mkstemp(dir=str(resolved.parent), suffix=".tmp", prefix=f".{resolved.name}.")
-        try:
-            with os.fdopen(fd, "w") as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
-                f.write(content)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, str(resolved))
-        except Exception:
-            # Clean up temp file on failure
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-        logger.info("file_write path=%s bytes=%d", resolved, len(content))
-        return f"Written {len(content)} chars to {resolved}"
+        with target_lock(resolved):
+            if expected_sha256:
+                mismatch = _revision_mismatch(resolved, expected_sha256)
+                if mismatch:
+                    return mismatch
+            outcome = atomic_write(resolved, content)
+        logger.info("file_write path=%s bytes=%d mode=%o", resolved, len(content), outcome.mode)
+        note = ""
+        if outcome.dropped_setuid:
+            note = (
+                "\n[note: the setuid bit was dropped — this tool does not re-grant setuid "
+                "to content it just wrote. Re-apply with chmod if you meant it.]"
+            )
+        return f"Written {len(content)} chars to {resolved}{note}"
+    except TargetBusy as e:
+        return f"Error: {e}"
     except ValueError as e:
         return f"Error: {e}{root_mismatch_hint(path)}"
     except Exception as e:
@@ -637,27 +903,147 @@ def _detect_duplicate_workspace_prefix(command: str, workspace: Path) -> str | N
 # override is silently inert.
 BASH_MAX_TIMEOUT = 30 * 60  # 30 minutes
 
-# Upper bound on how much captured output is read back from the temp files.
-# truncate_output then trims to MAX_OUTPUT; this cap only guards against
-# pathological multi-GB captures being pulled into memory first.
+# Upper bound on how much captured output is read back INTO MEMORY from the
+# temp files. truncate_output then trims to MAX_OUTPUT; this cap only guards
+# against pathological multi-GB captures being pulled into memory first.
 _CAPTURE_READ_CAP = 5 * 1024 * 1024
+
+# Upper bound on how much of a capture is streamed to a durable artifact. Same
+# size, different job: this one bounds DISK, and it is what the model can still
+# read after the preview has been collapsed and clipped. Both caps stay — the
+# audit's complaint (3.2.1 H15) was never that they exist, it was that a
+# capture cut by them left no evidence and no statement that it had been cut.
+_CAPTURE_ARTIFACT_CAP = 5 * 1024 * 1024
+
+# Copy granularity for the temp-file → artifact stream. 1 MiB keeps peak
+# memory flat regardless of how much a command printed.
+_CAPTURE_COPY_CHUNK = 1024 * 1024
+
+
+def _capture_evidence(f, stream: str, *, persist: bool = True) -> tuple[str, dict]:
+    """Read one capture temp file back as (preview_text, acquisition_meta).
+
+    Evidence first, rendering second. The temp file is the only place the
+    command's full output ever existed, and it is unlinked the moment bash's
+    `with` block closes — so anything past the preview cap is copied to a
+    durable artifact BEFORE the caller collapses repeated lines and clips to
+    50 KB. The audit measured the old order costing 6,157,089 chars of a
+    build log, including the unique end marker that carried the diagnosis.
+
+    Returns the acquisition record even when nothing was lost; the caller
+    decides what to say about it (a complete capture says nothing).
+    """
+    from core.tools.truncation import acquisition_meta, new_artifact_path, write_artifact_meta
+
+    try:
+        size = f.seek(0, os.SEEK_END)
+    except (OSError, ValueError):
+        return "", acquisition_meta(source=f"bash {stream}", captured=0, source_total=0)
+    if not size:
+        return "", acquisition_meta(source=f"bash {stream}", captured=0, source_total=0)
+
+    artifact = ""
+    captured = size
+    # Small captures are wholly present in the preview; a second copy on disk
+    # would be pure noise (and a file the cleanup sweep has to carry).
+    if persist and size > MAX_OUTPUT:
+        captured = min(size, _CAPTURE_ARTIFACT_CAP)
+        try:
+            path = new_artifact_path(f"bash_{stream}")
+            f.seek(0)
+            remaining = captured
+            with open(path, "wb") as dest:
+                while remaining > 0:
+                    block = f.read(min(_CAPTURE_COPY_CHUNK, remaining))
+                    if not block:
+                        break
+                    dest.write(block)
+                    remaining -= len(block)
+            artifact = str(path)
+        except (OSError, ValueError) as e:
+            logger.warning("Could not persist %s capture evidence: %s", stream, e)
+            captured = min(size, _CAPTURE_READ_CAP)
+
+    meta = acquisition_meta(
+        source=f"bash {stream}",
+        captured=captured,
+        source_total=size,
+        unit="bytes",
+        truncation_reason=f"the {_CAPTURE_ARTIFACT_CAP // (1024 * 1024)} MiB process-output cap",
+        artifact=artifact,
+    )
+    if artifact:
+        write_artifact_meta(artifact, meta)
+
+    try:
+        f.seek(0)
+        text = f.read(_CAPTURE_READ_CAP).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        text = ""
+    return text, meta
+
+
+def _collapse_for_preview(raw: str, metas: list[dict]) -> tuple[str, list[dict]]:
+    """Run the readability collapse, keeping a durable copy of what it ate.
+
+    Collapse is a presentation transform and a lossy one: 2000 identical
+    WARNING lines reach the model as 4. Above the preview cap each stream
+    already has its own raw artifact, so nothing more is needed. Below it —
+    40 KB of library banners, say — the collapsed rendering would otherwise be
+    the only surviving copy, and the audit found exactly that: an artifact
+    holding 4 of 2000 lines.
+    """
+    from core.tools.truncation import acquisition_meta, write_artifact
+
+    collapsed = _collapse_repeated_lines(raw)
+    if collapsed == raw or any(m.get("artifact") for m in metas):
+        return collapsed, metas
+    meta = acquisition_meta(
+        source="bash output (pre-collapse)",
+        captured=len(raw.encode("utf-8", "ignore")),
+        source_total=len(raw.encode("utf-8", "ignore")),
+        unit="bytes",
+    )
+    path = write_artifact(raw, "bash_stdout", meta=meta)
+    if not path:
+        return collapsed, metas
+    meta["artifact"] = path
+    return collapsed, [*metas, meta]
+
+
+def _prepend_acquisition_notes(output: str, metas: list[dict]) -> str:
+    """Put the completeness statement where a head-truncation cannot cut it.
+
+    Leading, not trailing: everything downstream of bash clips from the end,
+    so a footer describing what was lost is the first thing lost.
+    """
+    from core.tools.truncation import acquisition_notes
+
+    notes = acquisition_notes([m for m in metas if m])
+    if not notes:
+        return output
+    return f"{notes}\n{output}" if output else notes
 
 
 def _read_capture(f) -> str:
-    """Read a binary capture temp file back from the start (bounded by _CAPTURE_READ_CAP)."""
-    try:
-        size = f.seek(0, os.SEEK_END)
-        f.seek(0)
-        data = f.read(_CAPTURE_READ_CAP).decode("utf-8", errors="replace")
-        if size > _CAPTURE_READ_CAP:
-            data += f"\n[... output truncated: {size - _CAPTURE_READ_CAP} more bytes not shown ...]"
-        return data
-    except (OSError, ValueError):
-        return ""
+    """Preview text for one capture, with no artifact written.
+
+    core/gates.py runs its own capture pairs through this and reports a short
+    excerpt; a gate does not need a durable evidence copy of every check's
+    output, and writing one would put a file in the tool-output dir for every
+    gate run in every turn.
+    """
+    return _capture_evidence(f, "output", persist=False)[0]
 
 
-def bash(command: str, timeout: int | None = None, _context: dict | None = None) -> str:
+def bash(command: str, timeout: int | None = None, _context: dict | None = None) -> str | tuple[str, dict]:
     """Execute a shell command in the workspace.
+
+    Returns (output, metadata) once a process was launched — exit_code,
+    timed_out, cwd and truncation — so the executor reads the outcome from
+    the process rather than guessing at the text. A refusal that never
+    launched anything (empty command, shell policy) returns the bare "Error:"
+    string it always did.
 
     timeout: optional per-call override (seconds) for the shell timeout. Use
     when a single long-running command (Whisper transcription, large clone,
@@ -665,17 +1051,9 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
     Capped at 30 minutes to prevent runaway agents from holding the worker
     indefinitely. Defaults to settings.shell_timeout when omitted.
     """
-    if not command or not command.strip():
-        return "Error: Empty command"
-
-    if settings.shell_security_mode == "permissive":
-        blocked = _check_command_security(command)
-        if blocked:
-            return blocked
-    elif settings.shell_security_mode == "strict":
-        first_word = command.strip().split()[0] if command.strip() else ""
-        if first_word not in settings.shell_allowlist:
-            return f"Error: Command '{first_word}' not in allowlist. Allowed: {', '.join(sorted(settings.shell_allowlist)[:10])}..."
+    blocked = check_shell_command(command)
+    if blocked:
+        return blocked
 
     workspace = _workspace()
     workspace.mkdir(parents=True, exist_ok=True)
@@ -684,43 +1062,21 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
     # — the toolchain is shared, only the working directory moves.
     run_dir = _workspace_home()
     run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cwd_display = str(run_dir.relative_to(Path.cwd()))
+    except ValueError:
+        cwd_display = str(run_dir)
 
     # Non-invasive advisory: flag duplicate-workspace-prefix mistakes in the
     # output so the agent notices without us rewriting arbitrary shell.
     _path_hint = _detect_duplicate_workspace_prefix(command, workspace)
 
-    # Ensure workspace venv exists for Python/pip isolation
-    venv_dir = workspace / ".venv"
-    if not (venv_dir / "bin" / "python").exists():
-        import sys as _sys
-
-        subprocess.run([_sys.executable, "-m", "venv", str(venv_dir)], capture_output=True, timeout=60)
-
-    # Build environment based on configured mode
-    if settings.shell_env_mode == "passthrough":
-        env = dict(os.environ)
-    elif settings.shell_env_mode == "denylist":
-        denied = set(settings.shell_env_denylist)
-        env = {k: v for k, v in os.environ.items() if k not in denied}
-    else:  # allowlist
-        allowed = set(settings.shell_env_allowlist)
-        env = {k: v for k, v in os.environ.items() if k in allowed}
-    # Always override PATH and HOME for sandbox
-    # Prepend workspace venv bin so pip/python resolve to venv, not system
-    workspace_venv_bin = str(workspace / ".venv" / "bin")
-    env["PATH"] = f"{workspace_venv_bin}:/usr/local/bin:/usr/bin:/bin"
-    env["HOME"] = str(run_dir)
-    env["VIRTUAL_ENV"] = str(workspace / ".venv")
-    # Python block-buffers stdout when it isn't a tty, so a long-running
-    # script's progress prints sit in an unflushed buffer — and the
-    # [partial output before timeout] block comes back empty exactly when
-    # it matters most (field case c93232a0521b: a 30-minute search printed
-    # progress the whole way and the timeout returned none of it).
-    env["PYTHONUNBUFFERED"] = "1"
+    # Venv + env-mode filter + sandbox PATH/HOME/VIRTUAL_ENV, shared with
+    # job_start so a background job sees the same toolchain bash does.
+    env = _build_shell_env(workspace, run_dir)
 
     try:
         import resource
-        import signal
 
         as_limit = int(getattr(settings, "shell_address_space_limit_bytes", 0) or 0)
         fsize_limit = int(getattr(settings, "shell_fsize_limit_bytes", 0) or 0)
@@ -783,10 +1139,16 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
                 # Include what the command managed to print — the difference
                 # between "hung silently" and "hung after X" is usually the
                 # whole diagnosis.
-                partial = (_read_capture(out_f) + _read_capture(err_f)).strip()
+                _out_text, _out_meta = _capture_evidence(out_f, "stdout")
+                _err_text, _err_meta = _capture_evidence(err_f, "stderr")
+                partial = (_out_text + _err_text).strip()
                 msg = f"Error: Command timed out after {effective_timeout}s"
                 if partial:
                     msg += f"\n[partial output before timeout]\n{partial[-2000:]}"
+                # 2000 chars is a glance, not the record. A build that ran for
+                # 30 minutes and then timed out printed everything it knew
+                # before it hung, and that evidence outlives the temp files.
+                msg = _prepend_acquisition_notes(msg, [_out_meta, _err_meta])
                 # Pointer at the moment of pain (ARC-3 retest field case: two
                 # solver timeouts, 600s and 1800s, with job_start never
                 # considered — scout-time steering alone doesn't reach the
@@ -797,13 +1159,25 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
                         "timeout, job_start runs it detached with no wall limit on "
                         "your turn — poll job_status/job_tail while you keep working."
                     )
-                return msg
+                # An infrastructure failure, not a command that failed: the
+                # tool never got a verdict out of the process. It keeps the
+                # "Error:" prefix and counts against bash's own health.
+                return msg, {
+                    "exit_code": None,
+                    "timed_out": True,
+                    "cwd": cwd_display,
+                    "truncated": False,
+                    "total_chars": len(partial),
+                    "was_error": True,
+                }
             finally:
                 if _session and _proc_handle is not None:
                     _session.release_process(_proc_handle)
 
-            stdout = _read_capture(out_f)
-            stderr = _read_capture(err_f)
+            # Evidence to disk before the preview transforms run over it.
+            stdout, out_meta = _capture_evidence(out_f, "stdout")
+            stderr, err_meta = _capture_evidence(err_f, "stderr")
+            acquired = [m for m in (out_meta, err_meta) if m.get("captured")]
 
         output = ""
         if stdout:
@@ -813,24 +1187,49 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
                 output += "\n"
             output += stderr
 
-        output = _collapse_repeated_lines(output)
+        output, acquired = _collapse_for_preview(output, acquired)
 
+        trunc = {"truncated": False, "total_chars": len(output)}
         if len(output) > MAX_OUTPUT:
-            output, _meta = truncate_output(output, "bash")
+            output, trunc = truncate_output(output, "bash", sources=acquired)
+        else:
+            # Collapse can shrink 11 MB of repeated warnings to a few hundred
+            # chars, so a short result is no evidence that a short source
+            # produced it. State any loss even when nothing was truncated.
+            output = _prepend_acquisition_notes(output, acquired)
 
-        if process.returncode != 0 and not output:
-            output = f"Exit code: {process.returncode}"
+        rc = process.returncode
 
-        # Prepend CWD context so the agent always knows what directory bash runs in
-        try:
-            cwd_display = run_dir.relative_to(Path.cwd())
-        except ValueError:
-            cwd_display = run_dir
-        prefix = f"[cwd: {cwd_display}]\n"
+        # Prepend CWD context so the agent always knows what directory bash
+        # runs in, and the exit status so it never has to infer the outcome
+        # from the prose. The status used to appear only when the command
+        # printed nothing at all — so "3 failed, 0 passed" and exit 1 read
+        # exactly like a pass, to the model and to the harness alike.
+        prefix = f"[cwd: {cwd_display}] [exit: {rc}]\n"
         if _path_hint:
             prefix = f"{_path_hint}\n{prefix}"
 
-        return prefix + (output or "(no output)")
+        # The structured channel the executor already supports for (str, dict)
+        # returns. `was_error` is the tool's own verdict on the call and
+        # overrides the executor's string-prefix guess, which the cwd header
+        # had defeated for every command bash ever ran.
+        meta = {
+            "exit_code": rc,
+            "timed_out": False,
+            "cwd": cwd_display,
+            "truncated": bool(trunc.get("truncated")),
+            "total_chars": int(trunc.get("total_chars") or len(output)),
+            "was_error": rc != 0,
+        }
+        if rc != 0:
+            # The command failed; bash did not. Kept apart so tool health and
+            # the stuck detector are not told the shell is broken every time a
+            # test fails or a grep finds nothing.
+            from core.tools.executor import COMMAND_FAILED_MARKER
+
+            meta[COMMAND_FAILED_MARKER] = True
+
+        return prefix + (output or "(no output)"), meta
     except subprocess.TimeoutExpired:
         return "Error: Command timed out"
     except Exception as e:
@@ -919,12 +1318,26 @@ def register(reg) -> None:
     reg.register(
         name="file_write",
         func=file_write,
-        description="Write content to a file in the workspace. Creates parent directories if needed.",
+        description=(
+            "Write content to a file in the workspace. Creates parent directories if needed. "
+            "Keeps the mode of a file it overwrites. When you are rewriting a file you read "
+            "earlier, pass expected_sha256 so a change someone else made in between is refused "
+            "instead of silently overwritten."
+        ),
         parameters={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Relative path within workspace"},
                 "content": {"type": "string", "description": "File content to write"},
+                "expected_sha256": {
+                    "type": "string",
+                    "description": (
+                        "Optional read-modify-write precondition: the sha256 of the file's "
+                        "current bytes (get it with bash `sha256sum <path>`), or 'absent' to "
+                        "require that the file does not exist yet. The write is refused if it "
+                        "does not match, and the error names the revision that is actually there."
+                    ),
+                },
             },
             "required": ["path", "content"],
         },
@@ -981,4 +1394,8 @@ def register(reg) -> None:
         max_timeout=BASH_MAX_TIMEOUT,
         parallel_safe=False,
         safety_level="caution",
+        # Identical command text is not identical state: a job finished, a
+        # file changed, a server came up. The cross-round dedup cache must
+        # never answer a shell call from a previous round's output.
+        idempotent=False,
     )

@@ -10,10 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import secrets
 import threading
 import time
-from pathlib import Path
+from dataclasses import dataclass, field
 
 from config import settings
 from db import models as db
@@ -178,11 +177,21 @@ def spawn_worker(
             space_id=getattr(parent, "space_id", None) if parent else None,
         )
 
-    summary_file = f".worker_{worker_id[:12]}_summary.md"
+    # Open this worker's first run BEFORE the charter is written: the charter
+    # has to name the exact path the record will later be read from, or the
+    # worker writes its report where nobody looks (H08). workspace_home is the
+    # space folder its own relative writes resolve into.
+    from core.extensions.orchestration import report as _report
+
+    _worker_home = getattr(manager.get(worker_id), "workspace_home", None)
+    _run = _report.begin_run(worker_id, workspace_home=_worker_home, reason="spawn")
+    summary_file = _run["report_name"]
     system_prompt = (
         f"You are a focused worker agent. Your task:\n{task_description}\n\n"
         "Complete the task using tools as needed.\n"
-        f"When done, write a {summary_file} file in the workspace with what you accomplished.\n"
+        f"When done, write your report to {_run['report_path']} — the bare name "
+        f"{summary_file} resolves there from your own file tools. That file is "
+        "what your parent reads back; nothing else you write is collected.\n"
     )
     if worker_kind is not None:
         system_prompt += _kinds.kind_charter_block(worker_kind)
@@ -367,6 +376,36 @@ def _worker_has_output(wid: str) -> bool:
     return any(m["role"] == "assistant" and m.get("content") for m in messages)
 
 
+def _worker_has_live_process(w) -> bool:
+    """True when the worker still has a subprocess of its own running."""
+    if w is None:
+        return False
+    try:
+        return any(proc is not None and proc.poll() is None for proc in w.all_processes())
+    except Exception:
+        return False
+
+
+def _worker_idle_seconds(w) -> int:
+    """Seconds since the worker last showed activity — 0 while one of its own
+    subprocesses is still running.
+
+    last_activity_time only moves on harness events (tool call start/finish,
+    stream chunks), so a worker that handed a 20-minute build or solve to bash
+    looked idle for the entire time it was working: check_workers reported
+    "idle 900s" and await_workers' stall test abandoned the wave (field case,
+    session 3dc5a307d751). A live child process is activity.
+    """
+    if w is None:
+        return 0
+    if _worker_has_live_process(w):
+        return 0
+    try:
+        return int(w.idle_seconds)
+    except Exception:
+        return 0
+
+
 def check_workers(_context: dict | None = None, _filter_ids: list | None = None) -> str:
     """Check status of all workers spawned by this session.
 
@@ -384,7 +423,11 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
     if not parent:
         return "Error: Session not found in memory"
 
-    if not parent.worker_ids:
+    # The durable inventory, not the memory-only list: after a restart the
+    # in-memory list is empty and this answered "No workers spawned." to a
+    # parent with live children in the database (H09).
+    inventory = manager.worker_inventory(parent)
+    if not inventory:
         return "No workers spawned."
 
     from sessions import state_v2 as sv2
@@ -394,7 +437,7 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
     failed = 0
     empty = 0
     filter_set = set(_filter_ids) if _filter_ids is not None else None
-    wid_list = [w for w in parent.worker_ids if filter_set is None or w in filter_set]
+    wid_list = [w for w in inventory if filter_set is None or w in filter_set]
     for wid in wid_list:
         worker_obj = manager.get(wid)
         _row = db.get_session(wid)
@@ -408,12 +451,21 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
         # transition fires — distinguish via task (set by manager.prompt).
         # Status payload doesn't carry v2 state directly, so read in-memory.
         if worker_obj is None:
-            v2 = sv2.SessionStateV2.IDLE_READY
+            # Not resident: reaped, or the server restarted. The row knows what
+            # memory does not — reading defaults here reported finished workers
+            # as "queued (not yet started)" for the rest of the parent's life.
+            try:
+                v2 = sv2.SessionStateV2((_row or {}).get("state_v2") or "idle_ready")
+            except ValueError:
+                v2 = sv2.SessionStateV2.IDLE_READY
             idle = 0
-            has_started = False
+            try:
+                has_started = db.latest_turn_id(wid) > 0 or bool(db.recent_termination_reasons(wid, 1))
+            except Exception:
+                has_started = False
         else:
             v2 = sv2._current_state(worker_obj)
-            idle = int(worker_obj.idle_seconds)
+            idle = _worker_idle_seconds(worker_obj)
             # Only `_turn_id > 0` truly means a turn ran. AgentSession.task
             # is set the moment run_coroutine_threadsafe schedules the
             # task; using it here would mis-classify a freshly-spawned
@@ -447,7 +499,8 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
             parts.append("WARNING: no output produced")
             empty += 1
         if v2 not in (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_USER):
-            parts.append(f"idle {idle}s")
+            # A live subprocess is work in progress, not silence.
+            parts.append("running subprocess" if _worker_has_live_process(worker_obj) else f"idle {idle}s")
 
         lines.append(f"- {wid[:8]} \"{title}\": {' | '.join(parts)}")
 
@@ -460,7 +513,7 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
     result_text = header + "\n" + "\n".join(lines)
 
     # Cross-pollinate completed worker findings to running siblings
-    if done > 0 and done < len(parent.worker_ids):
+    if done > 0 and done < len(inventory):
         try:
             xp = cross_pollinate(_context=_context)
             if "Cross-pollinated" in xp:
@@ -471,48 +524,200 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
     return result_text
 
 
-def _latest_reflect(worker_id: str) -> dict | None:
-    """Return the worker's most recent reflect row parsed to dict, or None.
-
-    Reflect is the quality gate: if it didn't run, or didn't verdict 'pass',
-    the worker's output should be served as UNVERIFIED so the parent can
-    decide whether to trust it or inspect the full transcript.
-    """
+def _worker_is_mid_turn(worker_obj) -> bool:
+    """True while the worker's turn is still running. A running turn has no
+    ending yet, so the durable log's answer belongs to a previous run."""
+    if worker_obj is None:
+        return False
     try:
-        messages = db.get_messages(worker_id)
-    except Exception as e:
-        # Silent failures here surface later as verdict='unknown' in the
-        # manifest with no breadcrumb pointing back to the DB read. Log it.
-        logger.warning("_latest_reflect: db.get_messages(%s) failed: %s", worker_id, e)
-        return None
-    for m in reversed(messages):
-        if m.get("role") == "reflect":
-            try:
-                return json.loads(m.get("content") or "{}")
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning(
-                    "_latest_reflect: malformed reflect row for worker %s: %s",
-                    worker_id,
-                    e,
+        from sessions import state_v2 as sv2
+
+        return sv2._current_state(worker_obj) is not sv2.SessionStateV2.IDLE_READY
+    except Exception:
+        return False
+
+
+@dataclass
+class TrustState:
+    """What is actually known about a worker's current output.
+
+    Assembled from records only — the run record, the state log, the grade
+    rows and the artifact's digest at grading time. Never from the artifact's
+    own first line: that is a line the worker can type, and a worker-authored
+    `# AUTO-STAMPED (reflect=pass...)` used to suppress the real verdict.
+
+    One builder serves get_worker_result, _finalize_worker's stamp and the
+    parent's resume manifest, because three readers of one record that
+    disagree is exactly the failure this replaces.
+    """
+
+    worker_id: str
+    term_reason: str | None = None
+    error: str = ""
+    verdict: str | None = None
+    reasoning: str = ""
+    verification: str = ""
+    verification_reason: str = ""
+    missing: str = ""
+    stale_verdict: str | None = None
+    stale_seq: int = 0
+    modified: bool = False
+    retired: list = field(default_factory=list)
+
+    _CAPS = ("round_ceiling", "stuck_loop", "budget_exhausted")
+
+    def interruption_note(self) -> str:
+        """How the turn ended, when it did not end by finishing. Emitted
+        regardless of verdict: reflect grading partial output as fine does not
+        un-truncate it, and `verdict == "pass"` used to return before this
+        check ever ran."""
+        r = self.term_reason
+        if r == "cancelled":
+            return "# CANCELLED (worker stopped before it finished)\n"
+        if r in self._CAPS:
+            return (
+                f"# INCOMPLETE (worker terminated: {r} — a hard cap, not completion)\n"
+                f"# Its final message should state what is unfinished; treat missing "
+                f"deliverables as NOT DONE, and use get_worker_transcript({self.worker_id[:12]!r}) "
+                f"or retry_worker to close the gap.\n"
+            )
+        if r == "error" or (r is None and self.error):
+            if self.error:
+                return f"# ERROR (worker exited with error: {self.error})\n"
+            return "# INCOMPLETE (worker terminated: error)\n"
+        if r in ("compaction_failed", "interrupted"):
+            return f"# INCOMPLETE (worker terminated: {r})\n"
+        return ""
+
+    def _missing_note(self) -> str:
+        """Evidence the grade itself said it never saw. Kept whatever the
+        verdict is — it is the one line that names what to go and check."""
+        return f"# Missing evidence: {self.missing[:300]}\n" if self.missing else ""
+
+    def verification_note(self) -> str:
+        """What the grader said about THIS run's output. Empty only for a
+        clean, current, verified pass."""
+        if self.verdict == "escalate":
+            return (
+                f"# ESCALATED (worker reflect: verdict=escalate)\n"
+                f"# Reason: {self.reasoning or '(no reasoning provided)'}\n"
+                + self._missing_note()
+                + f"# Consider get_worker_transcript({self.worker_id[:12]!r}) to inspect "
+                f"the full work stream before trusting this output.\n"
+            )
+        if self.verdict == "retry":
+            return (
+                f"# UNVERIFIED (worker reflect: verdict=retry, retries exhausted)\n"
+                f"# Reason: {self.reasoning or '(no reasoning provided)'}\n" + self._missing_note()
+            )
+        if self.verdict == "pass":
+            # A pass is a retry disposition, not a certificate. When the grade
+            # says so — a confidence downgrade, a self-contradiction, a check
+            # that could not run — the parent hears it here instead of finding
+            # a marker clipped out of the end of `reasoning` (H11).
+            if self.verification and self.verification != "verified":
+                return (
+                    f"# PASS BUT UNVERIFIED (reflect verdict=pass, verification={self.verification})\n"
+                    f"# Why: {self.verification_reason or '(no reason recorded)'}\n"
+                    + self._missing_note()
+                    + f"# The work was not judged worth retrying; that is not the same as checked. "
+                    f"Use get_worker_transcript({self.worker_id[:12]!r}) if the claim matters.\n"
                 )
-                return None
-    return None
+            return self._missing_note()
+        if self.stale_verdict:
+            return (
+                f"# UNVERIFIED (this run has no grade of its own)\n"
+                f"# The last recorded verdict is {self.stale_verdict!r}, and it graded run "
+                f"{self.stale_seq} — different output. It does not carry.\n"
+            )
+        return "# UNVERIFIED (no reflect verdict recorded — quality not gated)\n"
+
+    def mutation_note(self) -> str:
+        """A verdict is a statement about bytes. If the bytes moved, it did not
+        move with them, and the parent is entitled to know before it acts."""
+        if not self.modified:
+            return ""
+        return (
+            "# MODIFIED SINCE VERIFICATION (the report changed after it was graded — "
+            "the verdict above describes the earlier bytes)\n"
+        )
+
+    def footer(self) -> str:
+        """Superseded artifacts, named by run. They are kept rather than
+        deleted, and labelled rather than served: an earlier run's report is
+        that run's output, not this one's."""
+        parts = [
+            f"\n[run {entry.get('seq')}'s report is retained at {entry.get('path')} — "
+            f"an earlier run's output, not this one's]"
+            for entry in self.retired
+        ]
+        return "".join(parts)
+
+    def header(self) -> str:
+        head = self.interruption_note() + self.verification_note() + self.mutation_note()
+        return head + "\n" if head else ""
+
+
+def worker_trust(
+    worker_id: str,
+    *,
+    term_reason: str | None = None,
+    error: str = "",
+    ref=None,
+    include_history: bool = True,
+) -> TrustState:
+    """Build a worker's trust state from the durable record."""
+    from core.extensions.orchestration import report as _report
+
+    current, stale, stale_seq = _report.run_scoped_reflect(worker_id)
+    grade = current or {}
+    return TrustState(
+        worker_id=worker_id,
+        term_reason=term_reason,
+        error=error or "",
+        verdict=grade.get("verdict"),
+        reasoning=grade.get("reasoning", "") or "",
+        verification=grade.get("verification", "") or "",
+        verification_reason=grade.get("verification_reason", "") or "",
+        missing=grade.get("missing", "") or "",
+        stale_verdict=(stale or {}).get("verdict"),
+        stale_seq=stale_seq,
+        modified=include_history and _report.graded_artifact_changed(worker_id, ref),
+        retired=_report.retired_reports(worker_id) if include_history else [],
+    )
+
+
+def worker_termination_reason(worker_id: str, worker_obj=None) -> tuple[str | None, str]:
+    """(termination_reason, error) for a worker, memory first, log behind.
+
+    The in-memory object is the fresh source while a session is resident; after
+    a reap or a restart the durable state log answers. A live turn has no
+    ending yet, so it is never given a previous run's.
+    """
+    if worker_obj is None:
+        from sessions.manager import get_manager as _get_mgr
+
+        worker_obj = _get_mgr().get(worker_id)
+    reason = worker_obj.termination_reason if worker_obj else None
+    error = (worker_obj.error if worker_obj else "") or ""
+    if reason is None and not _worker_is_mid_turn(worker_obj):
+        try:
+            recent = db.recent_termination_reasons(worker_id, 1)
+            reason = recent[0] if recent else None
+        except Exception as e:
+            logger.debug("durable termination lookup failed for %s: %s", worker_id, e)
+    return reason, error
 
 
 def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
     """Get the final output from a completed worker.
 
-    Quality gate: if the worker's latest reflect verdict is not 'pass' (or no
-    reflect ran), the returned content is wrapped in an UNVERIFIED/ESCALATED
-    header with the reflect reasoning, so the parent knows the work needs
-    another look or a transcript scan.
+    Quality gate: the header is built from records — how the turn ended, the
+    grade recorded for THIS run, and whether the artifact still matches the
+    bytes that grade read. A verdict from an earlier run is reported as
+    history, never applied as certification.
     """
-    workspace = Path(settings.workspace_dir)
-
-    # Reflect verdict — the quality gate. Used by every return path below.
-    reflect = _latest_reflect(worker_id)
-    verdict = (reflect or {}).get("verdict")
-    reflect_reason = (reflect or {}).get("reasoning", "")
+    from core.extensions.orchestration import report as _report
 
     # Typed-kind deterministic gate (Feature 4): a cheap, unambiguous check of
     # the kind's core contract (e.g. research output names zero sources).
@@ -528,108 +733,76 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
 
         return kind_gate_warning(_kind_name, body) or ""
 
-    # Check worker termination state (cancelled, errored, round-capped).
-    # The in-memory object is the fresh source; after a restart or reap the
-    # durable state log answers instead — a round-capped worker must not
-    # read as clean just because the process cycled (field case
-    # c11530758fbc: an INCOMPLETE worker diagnosed three reflections late).
     from sessions.manager import get_manager as _get_mgr
 
     _worker_obj = _get_mgr().get(worker_id)
-    term_reason = _worker_obj.termination_reason if _worker_obj else None
-    if term_reason is None and _worker_obj is None:
-        try:
-            _recent = db.recent_termination_reasons(worker_id, 1)
-            term_reason = _recent[0] if _recent else None
-        except Exception:
-            term_reason = None
+    term_reason, _err = worker_termination_reason(worker_id, _worker_obj)
 
-    def _ceiling_note() -> str:
-        """Cap warning that survives a 'pass' verdict. A worker that hit its
-        round ceiling ended mid-work by definition — reflect grading the
-        partial output as fine does not un-truncate it, and the parent is
-        the one who pays for believing it was complete."""
-        if term_reason not in ("round_ceiling", "budget_exhausted"):
-            return ""
-        return (
-            f"# NOTE: worker ended by {term_reason} (hard cap, not completion) — "
-            f"its final message should state what is unfinished; treat missing "
-            f"deliverables as NOT DONE, and use get_worker_transcript({worker_id[:12]!r}) "
-            f"or retry_worker to close the gap.\n\n"
-        )
-
-    def _gate_header() -> str:
-        """Build a header that reflects the worker's trust state. Empty when
-        reflect passed cleanly — everything else gets a prefix the parent
-        cannot miss.
-        """
-        if verdict == "pass":
-            return ""
-        if verdict == "escalate":
-            return (
-                f"# ESCALATED (worker reflect: verdict=escalate)\n"
-                f"# Reason: {reflect_reason or '(no reasoning provided)'}\n"
-                f"# Consider get_worker_transcript({worker_id[:12]!r}) to inspect "
-                f"the full work stream before trusting this output.\n\n"
-            )
-        if verdict == "retry":
-            return (
-                f"# UNVERIFIED (worker reflect: verdict=retry, retries exhausted)\n"
-                f"# Reason: {reflect_reason or '(no reasoning provided)'}\n\n"
-            )
-        # No reflect row (cancelled / crashed before post-hooks)
-        if term_reason == "cancelled":
-            return "# CANCELLED (worker stopped before reflect ran)\n\n"
-        if term_reason in ("error", "round_ceiling", "compaction_failed"):
-            return f"# INCOMPLETE (worker terminated: {term_reason})\n\n"
-        return "# UNVERIFIED (no reflect verdict recorded — quality not gated)\n\n"
-
-    def _cap(full_text: str) -> str:
+    def _cap(full_text: str, ref=None) -> str:
         """Truncate to 3000 chars WITH a visible marker — silently cutting a
         worker's report mid-sentence left the parent with no signal that
-        content was lost or where to find the rest."""
+        content was lost or where to find the rest.
+
+        A preview that clips an artifact hands back the artifact. Both routes
+        out of the cap were unsignposted until now: an absolute path reads the
+        same from any space, and the transcript can be asked for its END."""
         if len(full_text) <= 3000:
             return full_text
-        return (
-            full_text[:3000] + f"\n[truncated at 3000 of {len(full_text)} chars — call "
-            f"get_worker_transcript({worker_id[:12]!r}) for the full output]"
-        )
+        out = full_text[:3000] + f"\n[truncated at 3000 of {len(full_text)} chars"
+        if ref is not None:
+            out += f" — the complete report is on disk: file_read({str(ref.path)!r})"
+        out += f", or get_worker_transcript({worker_id[:12]!r}, select='tail') for the end of the stream]"
+        return out
 
-    # Exact sentinel prefixes _finalize_worker stamps. Matching any leading
-    # "#" here suppressed the quality gate whenever a worker began its own
-    # summary with a markdown heading ("# Results") — unverified output was
-    # then returned to the parent as trusted.
-    _SENTINELS = (
-        "# INCOMPLETE (",
-        "# CANCELLED (",
-        "# ERROR (",
-        "# ESCALATED (",
-        "# UNVERIFIED (",
-        "# AUTO-STAMPED (",
-    )
+    def _served(body: str) -> str:
+        """Mark the result consumed on the way out.
 
-    # Per-worker summary file (new convention). The file itself is trusted
-    # (either written by the worker, or auto-stamped with a marker header).
-    per_worker = workspace / f".worker_{worker_id[:12]}_summary.md"
-    if per_worker.exists():
-        body = per_worker.read_text()
-        # If the summary already carries a sentinel marker from _finalize_worker,
-        # don't double up — just return as-is (the stamp already encodes state).
-        if body.startswith(_SENTINELS):
-            return _cap(body)
-        return _gate_header() + _ceiling_note() + _kind_warn(body) + _cap(body)
+        This call IS the consumption event, and retention needs to know it
+        happened: an uncollected report is unfinished business, a collected
+        one is a transcript that has done its job. Recorded only on the paths
+        that actually return a result — telling the parent "no output" is not
+        a reason to start anyone's deletion clock.
+        """
+        try:
+            db.mark_worker_result_consumed(worker_id)
+        except Exception as e:
+            logger.debug("Could not mark worker %s result consumed: %s", worker_id, e)
+        return body
 
-    # Backward compat: shared summary.md from pre-fix workers
-    legacy_path = workspace / "summary.md"
-    if legacy_path.exists():
-        _legacy_body = legacy_path.read_text()
-        return _gate_header() + _ceiling_note() + _kind_warn(_legacy_body) + _cap(_legacy_body)
+    # The run record names one report path; discovery by the worker id in the
+    # filename covers workers that predate the record; the shared summary.md is
+    # adopted only with provenance, and says so when it is (H08).
+    ref = _report.resolve_report(worker_id)
+    trust = worker_trust(worker_id, term_reason=term_reason, error=_err, ref=ref)
+    if ref is not None:
+        try:
+            body = ref.read()
+        except OSError as _read_err:
+            logger.warning("get_worker_result: could not read %s: %s", ref.path, _read_err)
+            body = ""
+        if body:
+            # A stamp THIS harness wrote for THIS run already encodes the state
+            # — don't double up. Recognized by the recorded digest, not by the
+            # file's first line: that line is one a worker can author, and a
+            # worker-authored sentinel used to suppress a real escalate.
+            if _report.is_our_stamp(worker_id, ref):
+                return _served(ref.label + _cap(body, ref) + trust.footer())
+            return _served(ref.label + trust.header() + _kind_warn(body) + _cap(body, ref) + trust.footer())
 
     # Fallback: last assistant message, always wrapped in a quality header.
     messages = db.get_messages(worker_id)
     for m in reversed(messages):
         if m["role"] == "assistant" and m.get("content"):
-            return _gate_header() + _ceiling_note() + _kind_warn(m["content"]) + _cap(m["content"])
+            return _served(trust.header() + _kind_warn(m["content"]) + _cap(m["content"]) + trust.footer())
+
+    # Retention took the transcript, but not the work. Checked before the "no
+    # output" line below, which is what the parent used to be told about a
+    # worker that had finished and filed a report: "produced no output. It may
+    # have failed silently or timed out. Consider retrying" — three claims,
+    # all false, about work that was sitting in a manifest.
+    archived = _archived_result(worker_id)
+    if archived:
+        return archived
 
     # No output at all
     if _worker_obj and _worker_obj.error:
@@ -637,20 +810,62 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
     return f"Worker {worker_id[:8]} produced no output. It may have failed silently or timed out. Consider retrying with retry_worker()."
 
 
+def _archived_result(worker_id: str) -> str:
+    """A pruned worker's result manifest, rendered for the parent, or "".
+
+    The transcript is gone and cannot be retried into existence, so the header
+    says what happened and points at the durable record rather than inviting a
+    retry that would redo work already done.
+    """
+    try:
+        manifest = db.get_worker_manifest(worker_id)
+    except Exception as e:
+        logger.warning("Could not read worker manifest for %s: %s", worker_id, e)
+        return ""
+    if not manifest:
+        return ""
+    header = (
+        f"# ARCHIVED (worker transcript removed by retention on "
+        f"{str(manifest.get('archived_at') or '')[:10]}; this is its preserved result manifest)\n"
+        f"# Worker: {manifest.get('title') or 'untitled'} — last active "
+        f"{str(manifest.get('last_active_at') or '')[:10]}"
+        + (f", ended by {manifest['termination_reason']}" if manifest.get("termination_reason") else "")
+        + f"\n# Result source: {manifest.get('result_source') or 'unknown'}. The full transcript is not "
+        f"recoverable; retry_worker would redo the work, not retrieve it.\n\n"
+    )
+    body = manifest.get("result") or ""
+    if not body.strip():
+        return header + "(the manifest records no result text for this worker)\n"
+    return header + body
+
+
 def get_worker_transcript(
     worker_id: str,
     include_tool_results: bool = True,
     max_chars: int = 30000,
+    select: str = "head",
+    after_id: int = 0,
+    before_id: int = 0,
+    message_id: int = 0,
     _context: dict | None = None,
 ) -> str:
-    """Read the full message stream of a worker session.
+    """Read a worker's message stream, from either end, one page at a time.
 
     Safety valve for when get_worker_result returns an UNVERIFIED/ESCALATED
-    summary: lets the parent scan what the worker actually did (assistant
-    texts, tool calls, and tool results) and extract the real findings.
+    summary, or clips a long report: lets the parent scan what the worker
+    actually did (assistant texts, tool calls and their arguments, tool
+    results, grades) and read the real findings.
 
-    Output format: one line per message, `[role] content`, truncated to
-    max_chars characters with a trailing `[truncated]` marker when needed.
+    Every line is addressed: `[#<message id> role] content`. Those ids drive
+    the paging.
+
+    select: "head" (default, oldest-first from the start) or "tail" (the END
+        of the stream). A worker's deliverable is the LAST thing it says, and
+        head-first paging under a char budget could never reach it — the
+        recovery route get_worker_result recommends returned early exploration.
+    after_id / before_id: only messages with id above / below these.
+    message_id: return exactly that one message, in full and unclipped. This
+        is what a `[clipped ...]` pointer tells the caller to call.
     """
     try:
         messages = db.get_messages(worker_id)
@@ -660,52 +875,141 @@ def get_worker_transcript(
     if not messages:
         return f"Worker {worker_id[:8]} has no messages."
 
+    if message_id:
+        row = next((m for m in messages if int(m.get("id") or 0) == int(message_id)), None)
+        if row is None:
+            return f"Worker {worker_id[:8]} has no message #{message_id}."
+        return "\n".join(_transcript_lines([row], include_tool_results=True, full=True)) or (
+            f"Message #{message_id} has no renderable content."
+        )
+
+    scoped = [
+        m
+        for m in messages
+        if (not after_id or int(m.get("id") or 0) > after_id) and (not before_id or int(m.get("id") or 0) < before_id)
+    ]
+    if not scoped:
+        return f"Worker {worker_id[:8]} has no messages in that id range."
+
+    lines = _transcript_lines(scoped, include_tool_results=include_tool_results, full=False)
+    if not lines:
+        return f"Worker {worker_id[:8]} has no renderable messages in that range."
+
+    from_tail = str(select or "head").lower() == "tail"
+    kept: list[str] = []
+    budget = max(0, max_chars)
+    used = 0
+    for line in reversed(lines) if from_tail else lines:
+        if used + len(line) + 1 > budget and kept:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    if from_tail:
+        kept.reverse()
+
+    dropped = len(lines) - len(kept)
+    out = "\n".join(kept)
+    if dropped and from_tail:
+        edge = _line_msg_id(kept[0]) if kept else 0
+        out = (
+            f"[{dropped} earlier line(s) omitted — get_worker_transcript(before_id={edge}, select='tail') for the page before this]\n"
+            + out
+        )
+    elif dropped:
+        edge = _line_msg_id(kept[-1]) if kept else 0
+        out += f"\n[truncated — {dropped} later line(s) omitted; get_worker_transcript(after_id={edge}) continues, or select='tail' for the end]"
+    return out
+
+
+# Per-tool-result budget in a paged transcript: one 200KB grep result must not
+# eat the whole page. The clipped line points at the row that holds the rest.
+_TOOL_LINE_CHARS = 800
+
+
+def _line_msg_id(line: str) -> int:
+    """The message id a rendered line is addressed by, 0 if unparseable."""
+    try:
+        return int(line.split("#", 1)[1].split(" ", 1)[0].rstrip("]:"))
+    except (IndexError, ValueError):
+        return 0
+
+
+def _tool_call_summary(tc_raw) -> str:
+    """`name({args})` per call. Names alone were not enough to reconstruct
+    what a worker did: two file_read calls look identical without their paths."""
+    try:
+        tcs = json.loads(tc_raw) if isinstance(tc_raw, str) else tc_raw
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    parts: list[str] = []
+    for tc in tcs if isinstance(tcs, list) else []:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+        name = fn.get("name") or tc.get("name") or "?"
+        args = fn.get("arguments") if fn else tc.get("arguments")
+        if not isinstance(args, str):
+            try:
+                args = json.dumps(args or {})
+            except (TypeError, ValueError):
+                args = ""
+        parts.append(f"{name}({args[:300]})" if args and args != "{}" else str(name))
+    return ", ".join(parts)
+
+
+def _transcript_lines(messages: list, *, include_tool_results: bool, full: bool) -> list[str]:
+    """Render rows to id-addressed lines. `full` disables every per-role clip —
+    that is the single-message read a truncation pointer sends you to."""
     lines: list[str] = []
+
+    def clip(text: str, limit: int, mid: int, what: str) -> str:
+        if full or len(text) <= limit:
+            return text
+        return (
+            f"{text[:limit]}\n[{what} clipped at {limit} of {len(text)} chars — "
+            f"get_worker_transcript(message_id={mid}) for the whole row]"
+        )
+
     for m in messages:
         role = m.get("role", "?")
+        mid = int(m.get("id") or 0)
         if role == "tool" and not include_tool_results:
             continue
         content = (m.get("content") or "").replace("\r", "")
         if role == "assistant":
-            tc_raw = m.get("tool_calls")
-            if tc_raw:
-                try:
-                    tcs = json.loads(tc_raw) if isinstance(tc_raw, str) else tc_raw
-                    names = [
-                        tc.get("name") or tc.get("function", {}).get("name", "?")
-                        for tc in (tcs if isinstance(tcs, list) else [])
-                    ]
-                    if names:
-                        lines.append(f"[assistant:tool_calls] {', '.join(names)}")
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            calls = _tool_call_summary(m.get("tool_calls"))
+            if calls:
+                lines.append(f"[#{mid} assistant:tool_calls] {calls}")
             if content:
-                lines.append(f"[assistant] {content}")
+                lines.append(f"[#{mid} assistant] {content}")
         elif role == "tool":
-            # Truncate per-tool-result to avoid one huge output eating the budget
-            lines.append(f"[tool] {content[:800]}")
+            lines.append(f"[#{mid} tool] {clip(content, _TOOL_LINE_CHARS, mid, 'result')}")
         elif role == "reflect":
             try:
                 r = json.loads(content)
-                lines.append(f"[reflect] verdict={r.get('verdict')} " f"reasoning={r.get('reasoning','')[:200]}")
+                # verification rides beside the verdict, not inside the
+                # reasoning: the downgrade marker lives at the END of that
+                # string and the clip below is exactly where it disappeared.
+                _ver = r.get("verification")
+                _ver_txt = f" verification={_ver}" if _ver else ""
+                lines.append(
+                    f"[#{mid} reflect] verdict={r.get('verdict')}{_ver_txt} "
+                    f"reasoning={clip(r.get('reasoning', ''), 200, mid, 'reasoning')}"
+                )
             except (json.JSONDecodeError, TypeError):
-                lines.append(f"[reflect] {content[:200]}")
+                lines.append(f"[#{mid} reflect] {clip(content, 200, mid, 'grade')}")
         elif role == "scout":
             try:
                 r = json.loads(content)
                 approach = r.get("approach") or r.get("approach_guidance") or ""
-                lines.append(f"[scout] approach={approach[:300]}")
+                lines.append(f"[#{mid} scout] approach={clip(approach, 300, mid, 'approach')}")
             except (json.JSONDecodeError, TypeError):
-                lines.append(f"[scout] {content[:200]}")
+                lines.append(f"[#{mid} scout] {clip(content, 200, mid, 'report')}")
         elif role == "system":
-            lines.append(f"[system] {content[:300]}")
+            lines.append(f"[#{mid} system] {clip(content, 300, mid, 'system note')}")
         elif role == "user":
-            lines.append(f"[user] {content[:1000]}")
-
-    out = "\n".join(lines)
-    if len(out) > max_chars:
-        out = out[:max_chars] + "\n[truncated]"
-    return out
+            lines.append(f"[#{mid} user] {clip(content, 1000, mid, 'message')}")
+    return lines
 
 
 def await_workers(
@@ -956,7 +1260,7 @@ def await_workers(
                 continue
             pending_count += 1
             if v2 in STALE_GATED_STATES:
-                idle = int(w.idle_seconds)
+                idle = _worker_idle_seconds(w)
                 if idle > stale_threshold:
                     stalled.append(wid)
 
@@ -1042,6 +1346,12 @@ def await_workers(
     return f"Timeout after {max_wait}s.\n" + check_workers(_context=_context)
 
 
+# How long the off-loop caller waits for a steer before giving up on it. A
+# module constant so the regression test can shorten it; the value is the
+# same 10s the tool has always used, comfortably inside its 15s tool timeout.
+STEER_DELIVERY_TIMEOUT = 10
+
+
 def message_worker(worker_id: str, message: str, _context: dict | None = None) -> str:
     """Send a fire-and-forget message to a worker.
 
@@ -1078,25 +1388,127 @@ def message_worker(worker_id: str, message: str, _context: dict | None = None) -
             loop = ctx.get("_loop") or asyncio.get_running_loop()
         except RuntimeError:
             return "Error: No event loop"
+        # An IDLE_READY re-prompt is a fresh RUN, exactly like resume_worker:
+        # without a boundary the previous run's artifact stays in place,
+        # _finalize_worker short-circuits on it, and run N's report comes back
+        # as run N+1's result. AWAITING_USER is the opposite case — answering a
+        # question continues the SAME turn, so it keeps the same run.
+        if current is sv2.SessionStateV2.IDLE_READY:
+            from core.extensions.orchestration import report as _report
+
+            _report.begin_run(worker_id, workspace_home=worker.workspace_home, reason="message_worker")
         asyncio.run_coroutine_threadsafe(manager.prompt(worker_id, message), loop)
         return f"Message sent to worker {worker_id[:8]} (will start new turn)"
 
-    # Mid-turn inject: write a user row that the compiler will pick up on
-    # the next tool round. No state transition — this is not a new turn.
-    db.add_message(worker_id, "user", message)
-    worker.emit_event(
+    ctx = _context or {}
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    loop = ctx.get("_loop") or current_loop
+    if loop is None:
+        return "Error: No event loop"
+    delivery = manager.steer(worker_id, message, origin="worker")
+    if current_loop is loop:
+        # The caller is already on the loop, so awaiting the steer here would
+        # deadlock against the worker's session lock. The coroutine is
+        # detached instead — which means this return value cannot honestly
+        # claim delivery. It used to say "Message submitted", so a rejection
+        # (worker cancelling, shutdown draining) was invisible to the agent.
+        manager._spawn_detached(
+            _report_steer_outcome(manager, ctx.get("session_id", ""), worker_id, message, delivery),
+            "worker-steering",
+        )
+        return (
+            f"Queued for worker {worker_id[:8]} — NOT yet delivered. Delivery is confirmed by a "
+            "`worker.steered` event on this session (a `worker.steer_rejected` event carries the "
+            "reason if it fails); either way a one-line note lands in your context next round. "
+            "Do not re-send on the strength of this reply."
+        )
+    future = asyncio.run_coroutine_threadsafe(delivery, loop)
+    try:
+        result = future.result(timeout=STEER_DELIVERY_TIMEOUT)
+    except TimeoutError:
+        # Without the cancel the coroutine kept running on the loop and could
+        # still deliver, while the tool raised into the agent — which then
+        # retried and duplicated the message. Cancel first, then say plainly
+        # that nothing was delivered, so a retry is the safe move.
+        future.cancel()
+        logger.warning(
+            "message_worker: steer to %s timed out after %ss; cancelled",
+            worker_id[:8],
+            STEER_DELIVERY_TIMEOUT,
+        )
+        return (
+            f"Error: message to worker {worker_id[:8]} was NOT delivered — the delivery timed out "
+            f"after {STEER_DELIVERY_TIMEOUT}s and has been cancelled. Retrying is safe."
+        )
+    if result["status"] == "rejected":
+        return f"Refused: {result['reason']}"
+    return f"Message {result['status']} into worker {worker_id[:8]}"
+
+
+async def _report_steer_outcome(manager, parent_id: str, worker_id: str, message: str, delivery) -> None:
+    """Await a detached steer and tell the calling session what happened.
+
+    Two channels, because they answer to different readers: an event for the
+    UI and anything watching the stream, and one `system` row in the parent's
+    transcript, which is what the agent itself actually sees on its next
+    compile_context. A tool that cannot wait for its own result has to put the
+    result somewhere the caller will find it.
+    """
+    from db import models as _db
+
+    try:
+        result = await delivery
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("Detached worker steer to %s failed: %s", worker_id[:8], e)
+        result = {"status": "rejected", "reason": f"{type(e).__name__}: {e}"}
+
+    rejected = result.get("status") == "rejected"
+    # Two literal event names, one per branch, so tests/test_sse_event_sync.py
+    # can see both from the source without evaluating the condition.
+    if rejected:
+        event: dict = {"type": "worker.steer_rejected", "reason": result.get("reason")}
+    else:
+        event = {"type": "worker.steered", "message_id": result.get("message_id")}
+    event.update(
         {
-            "type": "message.injected",
-            "source": "message_worker",
+            "worker_id": worker_id,
+            "status": result.get("status"),
             "preview": message[:120],
         }
     )
-    return f"Injected message into worker {worker_id[:8]} " f"(state={current.value}; visible next tool round)"
+    if not parent_id:
+        return
+    manager.emit(parent_id, event)
+    if rejected:
+        note = (
+            f"[Worker steer NOT delivered] Your message to worker {worker_id[:8]} was refused: "
+            f"{result.get('reason')}. It is safe to send it again."
+        )
+    else:
+        note = f"[Worker steer delivered] Your message to worker {worker_id[:8]} was {result.get('status')}."
+    try:
+        await asyncio.to_thread(_db.add_message, parent_id, "system", note)
+    except Exception as e:
+        logger.warning("Could not record worker-steer note for %s: %s", parent_id[:12], e)
 
 
 def cancel_worker(worker_id: str, _context: dict | None = None) -> str:
     """Cancel a running worker."""
     from sessions.manager import get_manager
+
+    # Cancellation is the parent explicitly giving up on this task, which is
+    # what retention needs in order to ever release a worker it is otherwise
+    # protecting as unfinished business. Recorded before the cancel itself so
+    # it holds even if the loop-affine part below finds nothing to stop.
+    try:
+        db.mark_worker_abandoned(worker_id)
+    except Exception as e:
+        logger.debug("Could not mark worker %s abandoned: %s", worker_id, e)
 
     manager = get_manager()
     session = manager.get(worker_id)
@@ -1124,59 +1536,19 @@ def pause_worker(worker_id: str, _context: dict | None = None) -> str:
     before blocking on `await session.pause_event.wait()`. Pause does not
     interrupt a tool already in flight.
     """
-    from db import models as _m
-    from sessions import state_v2 as sv2
+    from core.events import call_on_loop
     from sessions.manager import get_manager
 
-    session = get_manager().get(worker_id)
-    if not session:
-        return f"Worker {worker_id} not found"
-
-    # State read + pause_event.clear + transition run as one loop callable —
-    # this tool executes on a worker thread, and transition() is loop-affine.
-    def _pause_on_loop() -> str:
-        current = sv2._current_state(session)
-        if current is not sv2.SessionStateV2.PROCESSING:
-            return f"Worker {worker_id[:8]} is in state {current.value}; " f"pause only applies to PROCESSING workers"
-        session.pause_event.clear()
-        try:
-            sv2.transition(session, sv2.SessionStateV2.PAUSE_REQUESTED, "pause-requested")
-        except Exception as e:
-            logger.error("pause-requested transition failed for %s: %s", worker_id, e)
-        return f"Worker {worker_id[:8]} will pause at next checkpoint"
-
-    from core.events import call_on_loop
-
-    return call_on_loop(_pause_on_loop, loop=(_context or {}).get("_loop"))
+    result = call_on_loop(get_manager().control_session, worker_id, "pause", loop=(_context or {}).get("_loop"))
+    return result["detail"]
 
 
 def _resume_paused(session, worker_id: str, _context: dict | None = None) -> str:
-    """Release a paused (or pause-requested) session — the original resume.
-
-    Sets the pause_event. If the worker has already reached PAUSED, it will
-    transition back to PROCESSING at its own pace (via the agent loop's
-    resume branch). If still in PAUSE_REQUESTED (pause never observed),
-    transition back directly here.
-    """
-    from sessions import state_v2 as sv2
-
-    # Loop-marshaled for the same reason as pause_worker: transition() is
-    # loop-affine, and setting pause_event must not interleave with the
-    # agent loop's own PAUSE_REQUESTED→PAUSED observation.
-    def _resume_on_loop() -> str:
-        session.pause_event.set()
-        current = sv2._current_state(session)
-        if current is sv2.SessionStateV2.PAUSE_REQUESTED:
-            try:
-                sv2.transition(session, sv2.SessionStateV2.PROCESSING, "resume")
-            except Exception as e:
-                logger.error("resume (from pause-requested) failed for %s: %s", worker_id, e)
-        # If current == PAUSED, the agent loop will transition on its own.
-        return f"Worker {worker_id[:8]} resumed"
-
     from core.events import call_on_loop
+    from sessions.manager import get_manager
 
-    return call_on_loop(_resume_on_loop, loop=(_context or {}).get("_loop"))
+    result = call_on_loop(get_manager().control_session, worker_id, "resume", loop=(_context or {}).get("_loop"))
+    return result["detail"]
 
 
 def resume_worker(
@@ -1301,14 +1673,14 @@ def resume_worker(
             parent._watched_worker_ids.add(worker_id)
             manager._persist_watched(parent)
 
-        # Clear the previous run's summary file — get_worker_result prefers
-        # it, so a stale INCOMPLETE/CANCELLED stamp (or an outdated real
-        # summary) would shadow everything the resumed run produces.
-        summary_path = Path(settings.workspace_dir) / f".worker_{worker_id[:12]}_summary.md"
-        try:
-            summary_path.unlink(missing_ok=True)
-        except OSError as _e:
-            logger.warning("resume_worker: could not clear stale summary %s: %s", summary_path, _e)
+        # Open run N+1. The previous run's artifact is retired (versioned),
+        # not deleted: it would otherwise shadow everything the resumed run
+        # produces, and deleting a valid report to make room loses work the
+        # parent may still want. The record also moves the transcript boundary,
+        # which is what stops run N's verdict certifying run N+1's output.
+        from core.extensions.orchestration import report as _report
+
+        _new_run = _report.begin_run(worker_id, workspace_home=w.workspace_home, reason="resume_worker")
 
         prior = w.termination_reason or ("unknown — memory was reaped or the server restarted")
         w.termination_reason = None
@@ -1323,12 +1695,13 @@ def resume_worker(
                     "prior_termination": prior,
                 },
             )
-        return prior + "|" + model_note
+        return prior + "|" + model_note + "|" + _new_run["report_path"]
 
     outcome = call_on_loop(_revive_on_loop, loop=loop)
     if outcome.startswith(("Error:", "Worker ")):
         return outcome
-    prior, _sep, model_note = outcome.partition("|")
+    prior, _sep, _rest = outcome.partition("|")
+    model_note, _sep2, report_path = _rest.partition("|")
 
     # Budget parity with spawn_worker: a parent that revives a worker and then
     # awaits it needs its LLM wall-clock extended past the child's runtime,
@@ -1348,8 +1721,8 @@ def resume_worker(
         + (f"Operator note: {note}\n" if note else "")
         + "Your full prior transcript is above (compacted if long). Review what "
         "is already done, then CONTINUE the original task to completion — do not "
-        "start over. The previous summary file was cleared; write a fresh "
-        f".worker_{worker_id[:12]}_summary.md when done."
+        f"start over. The previous report was retired; write this run's report to "
+        f"{report_path} when done."
     )
     asyncio.run_coroutine_threadsafe(get_manager().prompt(worker_id, resume_msg), loop)
     return f"Worker {worker_id[:8]} revived (previous end: {prior}) — continuation turn started."
@@ -1369,8 +1742,6 @@ def retry_worker(
     _context: dict | None = None,
 ) -> str:
     """Retry a failed worker with fresh context. Spawns a replacement."""
-    ctx = _context or {}
-    parent_id = ctx.get("session_id", "")
 
     # Get old worker's output
     old_output = get_worker_result(worker_id)[:2000]
@@ -1464,8 +1835,13 @@ def cross_pollinate(_context: dict | None = None) -> str:
     # trusted — broadcasting it poisons siblings (real case: a preamble-only
     # worker was cross-pollinated and seeded confusion in parallel workers).
     sent_count = 0
+    from core.extensions.orchestration import report as _report
+
     for cwid in completed:
-        reflect = _latest_reflect(cwid)
+        # Run-scoped, like every other reader: a pass that graded an earlier
+        # run of a resumed worker is not a licence to broadcast this run's
+        # findings to its siblings.
+        reflect, _stale, _seq = _report.run_scoped_reflect(cwid)
         if not reflect or reflect.get("verdict") != "pass":
             logger.info(
                 "Skipping cross-pollination from worker %s — reflect verdict=%s " "(only 'pass' is propagated)",
@@ -1670,6 +2046,7 @@ def register(reg) -> None:
         tags=orch_tags + ["status", "check", "monitor"],
         timeout=15,
         parallel_safe=True,
+        idempotent=False,  # a poll's answer changes between rounds — never dedup-cache it
         **common,
     )
     reg.register(
@@ -1695,10 +2072,12 @@ def register(reg) -> None:
         name="get_worker_transcript",
         func=get_worker_transcript,
         description=(
-            "Read a worker's full message stream (user, scout, assistant texts, "
-            "tool calls, tool results, reflect). Use when get_worker_result "
-            "returns an UNVERIFIED/ESCALATED summary and you need to see what "
-            "the worker actually did."
+            "Read a worker's message stream (user, scout, assistant texts, tool "
+            "calls with arguments, tool results, reflect), one id-addressed line "
+            "per message. Use when get_worker_result returns an "
+            "UNVERIFIED/ESCALATED summary or clips a long report. select='tail' "
+            "reads the END of the stream — that is where a worker's deliverable "
+            "is; after_id/before_id page through it; message_id reads one row whole."
         ),
         parameters={
             "type": "object",
@@ -1711,6 +2090,20 @@ def register(reg) -> None:
                 "max_chars": {
                     "type": "integer",
                     "description": "Max total chars to return (default 30000)",
+                },
+                "select": {
+                    "type": "string",
+                    "enum": ["head", "tail"],
+                    "description": (
+                        "'head' (default) reads from the start; 'tail' reads the END — "
+                        "use it to reach a long worker's final report."
+                    ),
+                },
+                "after_id": {"type": "integer", "description": "Only messages with id above this"},
+                "before_id": {"type": "integer", "description": "Only messages with id below this"},
+                "message_id": {
+                    "type": "integer",
+                    "description": "Return exactly this message, unclipped (what a [clipped ...] pointer names)",
                 },
             },
             "required": ["worker_id"],
@@ -1753,6 +2146,7 @@ def register(reg) -> None:
         timeout=1800,
         parallel_safe=False,
         long_poll=True,
+        idempotent=False,  # waiting again is a new wait, not a cached answer
         **common,
     )
     reg.register(

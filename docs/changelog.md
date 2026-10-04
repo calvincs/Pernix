@@ -6,6 +6,45 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## 3.2 preview — preparing for main
+
+This documentation describes `next-3.2-testing`. The branch is being prepared
+for promotion; `main` still carries the 3.1 version identifier. This is not a
+3.2 release announcement. See [upgrade.md](upgrade.md) before switching versions.
+
+- **A smaller supported surface.** Telos, Candor, adaptive policies/trials,
+  heartbeats, toolmaker, skillmaker and the feature-evaluation loop are retired.
+  Skills remain editable Markdown files; goals, gates, workers and cron remain.
+- **Checks and feedback you can inspect.** The four-task canary suite runs on
+  deploy, model change or demand. Trust separates accuracy on graded fixtures
+  from whole-suite success and completion. Factual grading corrections must
+  cite paired tool results; unsupported corrections are withheld from retry
+  guidance and notifications, and count as ungradable in hold-outs.
+- **Safer skill changes.** Self-healing remains on by default, subject to size,
+  confidence, duplicate-content and per-skill rate checks. Migration v44 journals
+  exact backups and revisions. Rollback protects newer edits and supports
+  interrupted applications; old unjournaled applications need manual recovery.
+- **Responsive maintenance.** Consolidation and rerouting save their scan
+  position and work in bounded batches. Cancellation stays cancelled across
+  cycles, slow memory activities cannot starve the rest of the ladder, and
+  failed splits back off while other files progress. Health exposes activity
+  failures, durations and the last successful cycle.
+- **Reliable long work.** Session cancellation, queued turns, worker delivery,
+  SSE recovery, cron outcome records and shutdown handling are hardened.
+  Detached jobs reconcile automatically and new jobs record their actual finish
+  time; legacy unknown timestamps stay unknown.
+- **Clearer everyday controls.** A full-width composer with an expand editor,
+  answer feedback and the Trust tab, plus Needs you / Activity notification
+  tabs and configurable notification tiers. Scout uses one planning round by
+  default; additional rounds remain configurable.
+- **Operational fixes.** Atomic settings and schedule writes, cached skill
+  validation, bounded RLM previews and backup-completion tracking. Application
+  and access logs are separate, with 35 compressed daily archives per stream.
+
+Migrations **v36–v44** run on startup when upgrading from 3.1. Removed settings
+are ignored; historical adaptive tables are retained. The [upgrade guide](upgrade.md#preparing-for-32)
+explains backups, removed integrations and legacy skill recovery.
+
 ## v3.1.0 — 2026-09-03
 
 Everything since v3.0.0 (2026-08-26) in one tagged release: a week of field campaigns on the reference box, one commit per finding. The quick tour of what's new, then what's gone. Most of it ships **off by default**; a couple of exceptions are on by default and called out below.
@@ -44,7 +83,7 @@ The first tagged release since v2.9.0, and the biggest. The quick tour of what's
 
 **Semantic memory retrieval.** Set `embedding_model` and memory search becomes hybrid BM25 + vector with `[[wiki-link]]` expansion at recall. A local CPU embedding fallback keeps recall alive when the remote embedding model goes down.
 
-**The self-improvement stack.** The golden-task **canary suite** measures whether the agent is actually getting better or worse; the governed **adaptive layer** applies low-risk policy edits with a veto window, full history, and one-click rollback; **Telos** adds a non-convergent drive with correction machinery. See [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md) and [internals/telos.md](internals/telos.md).
+**The self-improvement stack.** The golden-task **canary suite** measures whether the agent is actually getting better or worse; the governed **adaptive layer** applies low-risk policy edits with a veto window, full history, and one-click rollback; **Telos** adds a non-convergent drive with correction machinery. See [internals/canary.md](internals/canary.md). (Telos and the adaptive layer were retired in 3.2.)
 
 **RLM grows up.** Every `rlm_process` run now gets a live, read-only trace session nested in the sidebar; a run whose result was orphaned by a turn teardown is surfaced on the next turn instead of vanishing; cancels report as cancels, not failures.
 
@@ -72,7 +111,7 @@ The DB schema lands at **v29** (from v19); all ten migrations run automatically 
 
 **Pernix can now dream: idle-time introspection that fact-checks its own memory.** A new Dream add-on — off by default, Settings → Dream (Introspection) — runs as the final snooze activity: it examines memory, Candor evidence, and post-mortems; raises typed hypotheses about itself (contradictions, stale memory, ineffective lessons, tool patterns); and tries to *falsify* them against recorded outcomes, including counterfactual scout replays of past failed turns. Nothing influences live behavior until validated — the observable output is a weekly report in `workspace/dreams/` and a read-only **Dream journal session** per day in the sidebar (purple dot, own legend filter). See [internals/dream.md](internals/dream.md). (migration v19)
 
-**The agent now learns how reliable its own tools actually are.** A new Candor add-on — off by default, Settings → Candor (Operational Memory) — records tool outcomes and reflect verdicts into an auditable evidence ledger and gives scout an `[OPERATIONAL INTEL]` exception report before each turn: degraded tools are flagged, healthy ones are omitted, so silence means "no known problem." The agent can also answer reliability questions on demand (`predict_reliability`, `why_reliability`). See [internals/candor.md](internals/candor.md).
+**The agent now learns how reliable its own tools actually are.** A new Candor add-on — off by default, Settings → Candor (Operational Memory) — records tool outcomes and reflect verdicts into an auditable evidence ledger and gives scout an `[OPERATIONAL INTEL]` exception report before each turn: degraded tools are flagged, healthy ones are omitted, so silence means "no known problem." The agent can also answer reliability questions on demand (`predict_reliability`, `why_reliability`). (Candor was retired in 3.2.)
 
 **Snooze cycles now run to completion instead of being cut off mid-ladder.** The old 60-second wall clock starved the tail of the maintenance ladder behind one slow model call. Cycles now run until every activity finishes; your activity (a prompt, a cron fire, shutdown) cancels them instantly — even mid-LLM-call — and interrupted work resumes next cycle. `snooze_max_cycle_seconds` (now 900) is demoted to a hang backstop. A localhost-only `POST /api/admin/snooze-cycle` triggers a cycle on demand for debugging.
 

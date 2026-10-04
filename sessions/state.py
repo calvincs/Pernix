@@ -48,6 +48,11 @@ class PendingMessage(NamedTuple):
     # this to set/clear session.goal_continuation_active per turn, so a real
     # user message queued behind a continuation never runs snooze-transparent.
     is_goal_continuation: bool = False
+    # goal_continuations row id for a continuation that was durably debited.
+    # The dispatcher claims that row before starting the turn and settles it
+    # after, so a crash between the debit and the dispatch is recoverable at
+    # boot instead of silently spending the goal's allowance on nothing.
+    continuation_id: int | None = None
 
     @classmethod
     def coerce(cls, entry) -> "PendingMessage":
@@ -74,7 +79,7 @@ class TurnState:
     turn boundary is one assignment: `session.turn = TurnState()`.
 
     Four of these fields were not fields at all: core/gates.py, sessions/hooks.py
-    and core/telos/anomaly.py monkey-patched them onto the AgentSession dataclass
+    and the (since retired) telos anomaly hook monkey-patched them onto the AgentSession dataclass
     from outside its class body, so the object's real shape was invisible from
     its definition. tests/test_state_machine_invariants.py pins that shut.
 
@@ -109,13 +114,13 @@ class TurnState:
     # --- Tool bookkeeping ---
     # Cumulative per-tool execution summary for reflect diagnostic recovery
     # (LogAct-inspired). Accumulated by the agent loop across every attempt of
-    # the turn; read by reflect, Candor and TELOS at turn end.
+    # the turn; read by reflect at turn end.
     tool_summary: dict = field(default_factory=dict)
     # Per-attempt view of the same calls (C2): list indexed by attempt-1, each
     # a {tool: {"calls": n, "failures": n}} dict. Exists because reflect's
     # scope-sensitive rules (thrashing's distinct-tool count, per-attempt
     # honesty) misgrade when they read multi-attempt totals — the cumulative
-    # dict above stays authoritative for Candor/TELOS and the retry ladder.
+    # dict above stays authoritative for the turn summary and the retry ladder.
     tool_summary_attempts: list = field(default_factory=list)
 
     # --- Owned by other subsystems, declared here so the shape is visible ---
@@ -123,23 +128,21 @@ class TurnState:
     # a retry can reuse a prior failure when watch_paths are unchanged. Typed
     # Any to keep sessions/ from importing core.gates.
     gate_history: Any = None
-    # sessions.hooks._maybe_candor delta-tracking: {"turn": id, "tools": {...}}
-    # so a reflect-retry re-entry never double-observes the earlier attempt.
-    candor_emitted: dict | None = None
-    # (turn_id, verdict, failure_cause, experience) stashed by _maybe_reflect
-    # for _maybe_candor, which runs after it.
-    candor_reflect: tuple | None = None
-    # Skill-proposal ids injected as trial hints this turn; the post-verdict
-    # success bump reads them back.
-    injected_trial_proposals: list = field(default_factory=list)
-    # core.telos.anomaly.on_post_task per-turn dedup marker.
-    telos_turn_traced: Any = None
+
+    # --- Late edits to this turn's user row ---
+    # Bumped by the manager's rapid-fire combiner every time it rewrites the
+    # running turn's user message in place. The agent loop re-reads that row
+    # when it compiles a round, so a combine mid-loop is picked up for free —
+    # but a text-only final answer needs no further round, and the appended
+    # text was read by nobody. Comparing this against the version the agent
+    # last compiled is how that case is caught.
+    user_row_version: int = 0
 
 
 def turn_state(session_obj) -> TurnState:
     """Read a session-like object's TurnState, tolerating objects that have none.
 
-    The peripheral hooks (TELOS, Candor, the executor's retry-exclusion guard,
+    The peripheral hooks (the executor's retry-exclusion guard,
     the canary runner) accept duck-typed or partially-built session objects and
     used `getattr(session, "<field>", <default>)` for exactly that reason.
     Returning a throwaway TurnState preserves that forgiveness now that the
@@ -183,8 +186,15 @@ class AgentSession:
     # post-turn force-reset to IDLE so downstream hooks (_finalize_worker,
     # get_worker_result) can classify completion honestly instead of
     # inferring from state.
-    # Legal values: "complete", "round_ceiling", "compaction_failed",
-    # "cancelled", "error". None = never ran or not yet classified.
+    # Legal values: "complete", "round_ceiling", "stuck_loop",
+    # "compaction_failed", "cancelled", "error", "interrupted". None = never
+    # ran or not yet classified. "round_ceiling" is the round budget running
+    # out; "stuck_loop" is the stuck detector force-breaking a repetition loop,
+    # which can happen at any round number; "interrupted" is a turn the process
+    # died in the middle of, classified by the boot reconcile.
+    # Restored from session_state_log when a worker is rehydrated — a capped
+    # worker that reads as clean because memory was reaped is a lie the parent
+    # pays for.
     termination_reason: str | None = None
 
     # Session type
@@ -256,7 +266,7 @@ class AgentSession:
     # Per-session model override (for workers with specific model needs)
     model_override: str | None = None
 
-    # Per-dispatch tool allow-list for scheduled (cron/heartbeat) runs. Set by
+    # Per-dispatch tool allow-list for scheduled (cron) runs. Set by
     # the scheduling extension from the job's `allowed_tools` field before the
     # prompt is dispatched, cleared in the same finally as model_override.
     # When set it is EXCLUSIVE: the schema builder intersects the active tool
@@ -319,6 +329,14 @@ class AgentSession:
     # and this counter's whole job is to outlive the turn it was issued for.
     _deferred_reflect_seq: int = 0
 
+    # One-at-a-time gate for this session's deferred grades (sessions/hooks.py).
+    # Next-turn grading means a rapid-fire burst schedules a grade per turn
+    # instead of one for the last of them; the lock is what keeps that queued
+    # rather than concurrent. Created on first use, not at construction: an
+    # asyncio.Lock binds to the loop that makes it, and sessions are built off
+    # the event loop. Typed Any so state.py stays import-cheap.
+    _deferred_grade_lock: Any = field(default=None)
+
     # Activity tracking
     last_activity_time: float = field(default_factory=time.time)
 
@@ -356,6 +374,11 @@ class AgentSession:
     _retry_index: int = field(default=0)
     _compaction_count: int = field(default=0)
     _state_entered_ms: int | None = field(default=None)
+    # Turn ids (the _turn_id counter above) belonging to HARNESS-initiated
+    # turns — today, worker-resume synthesis. The deferred grader reads this
+    # so a synthetic turn doesn't look like the user moving on from the real
+    # turn it is about to grade (field case, session 3dc5a307d751).
+    _synthetic_turn_ids: set = field(default_factory=set)
 
     def emit_event(self, event: dict) -> None:
         """Broadcast event to all subscribers and buffer it.

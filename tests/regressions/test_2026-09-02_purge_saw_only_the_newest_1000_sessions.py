@@ -14,6 +14,13 @@ under it, and `pinned` — the user saying "keep this" — did nothing at all.
 Pinned here: the scan reaches past any window, the three exclusion rules
 hold and are reported under `skipped`, keep_min counts candidates rather
 than rows, and a dry run reports exactly what the real run then does.
+
+Selection is only half of it. What the route then DOES with this list —
+one `delete_session_async` per candidate, the same three rules re-checked
+immediately before each deletion, and a partial run that still reports what
+it deleted — lives in
+`test_2026-09-08_a_bulk_purge_froze_every_stream.py`. This file stays the
+coverage of the selection itself, which that one takes as given.
 """
 
 from datetime import datetime, timedelta, timezone

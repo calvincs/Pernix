@@ -1528,7 +1528,7 @@ function _jumpToNextError() {
 // ---------------------------------------------------------------------------
 // Map tab — the state machine, drawn once by hand
 //
-// The machine is fixed. Ten states and the 31 distinct edges of the
+// The machine is fixed. Ten states and the distinct edges of the
 // TRANSITIONS table in sessions/state_v2.py, which changes about once a
 // release: it does not need a layout engine, and it certainly did not need
 // the 3.3 MB one that used to draw it. Mermaid cost a megabyte-plus parse on
@@ -1555,7 +1555,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 // The drawing, in user units. Wide rather than tall because the machine reads
 // left to right: idle_ready → scouting → processing → finalizing → idle_ready,
 // with compacting above processing, the four waits below it, and cancelling —
-// which seven states can reach — at the end.
+// at the end.
 const MAP_VIEW = { w: 700, h: 292 };
 const MAP_BOX = { w: 104, h: 34, r: 6 };
 
@@ -1573,9 +1573,8 @@ const MAP_NODES = {
     paused:           [448, 200],
 };
 
-// Every (from, to) pair in TRANSITIONS, once each — 31 edges carrying 48
-// reasons, because half that table is the reaper's and the cancel-finally
-// handler's escape hatches back to idle_ready and they all draw as one line.
+// Every (from, to) pair in TRANSITIONS, once each. Reasons sharing a pair
+// draw as one line; a regression test checks parity with the backend graph.
 //
 // `d` is the path. Long runs are routed through lanes rather than drawn
 // straight, so the edges that cross do so at a right angle instead of
@@ -1588,6 +1587,15 @@ const MAP_NODES = {
 // and the lanes were assigned so that cannot happen for the common ones. `a`
 // is that label's text-anchor where `middle` is the wrong one.
 const MAP_EDGES = [
+    // A pending pause can be withdrawn or the in-flight round can finish,
+    // park for input/workers, or compact before reaching its pause gate.
+    { from: 'pause_requested', to: 'processing', d: 'M368,200 V138', l: [372, 184], a: 'start' },
+    { from: 'pause_requested', to: 'finalizing', d: 'M408,200 V184 H492 V138', l: [450, 181] },
+    { from: 'pause_requested', to: 'awaiting_user', d: 'M324,234 V288 H56 V234', l: [190, 285] },
+    { from: 'pause_requested', to: 'awaiting_workers', d: 'M312,217 H280', l: [296, 213] },
+    { from: 'pause_requested', to: 'compacting', d: 'M344,200 V196 H288 V8 H324 V16', l: [288, 5] },
+    { from: 'compacting', to: 'pause_requested', d: 'M404,50 V96 H424 V196 H396 V200', l: [428, 96], a: 'start' },
+    { from: 'finalizing', to: 'cancelling', d: 'M552,121 H584', l: [568, 117] },
     // The main flow, left to right, and the reaper's way back out of scouting.
     { from: 'idle_ready', to: 'scouting', d: 'M144,114 H176', l: [160, 110] },
     { from: 'scouting', to: 'idle_ready', d: 'M176,128 H144', l: [160, 140] },

@@ -34,7 +34,7 @@ These are the most important settings to configure before first use.
 | `llm_base_url` | `http://localhost:11434/v1` | Base URL for the primary LLM provider. Points to Ollama by default. Change to any OpenAI-compatible endpoint. |
 | `llm_model` | *(empty)* | **Required. Primary** role — agent turns, plus every quality-critical call: compaction summaries, reflect verdicts, eval, and the RLM root. Set this before your first session. |
 | `fallback_model` | *(empty)* | **Backup** role — used whenever a Primary *or* Background call fails: provider failover, agent-loop stream failover, scout's last resort, and the one-shot retry wrapped around every non-streaming call. A different model on the **same** provider counts, so an all-Ollama setup still gets failover. Empty disables failover entirely. |
-| `background_model` | *(empty)* | **Background** role — the fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, refine input prep, LLM-backed Snooze activities, Dream, Telos, and RLM sub-calls. Quality-critical calls (compaction, reflect, eval) run on Primary instead. Empty falls back to `llm_model`. |
+| `background_model` | *(empty)* | **Background** role — the fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, refine input prep, LLM-backed Snooze activities, Dream, and RLM sub-calls. Quality-critical calls (compaction, reflect, eval) run on Primary instead. Empty falls back to `llm_model`. |
 | `llm_max_concurrent` | `1` | Maximum simultaneous requests to Ollama. Increase only if your hardware supports parallel inference. |
 | `llm_session_timeout` | `1800` | Maximum wall-clock seconds a session may hold an LLM slot. Prevents hung sessions from blocking others. Set to `0` for unlimited. |
 | `provider_quota_cooldown_s` | `600` | When a model 403s on an exhausted quota, failover *to* that model is refused for this many seconds — so a dead key can't mask the real error. |
@@ -88,7 +88,7 @@ Context is **auto-managed by default** (`context_auto`): the harness reads each 
 | `compaction_keep_tokens` | `51000` | How many tokens to preserve verbatim after compaction. Recent messages and tool results are kept. |
 | `context_critical_threshold` | `0.85` | Show a visual warning in the UI when context fills to this fraction. |
 | `max_inline_attach_bytes` | `33554432` (32 MB) | Ceiling on the total base64 attachment bytes inlined into a single compile. Past it, the oldest attachments fall back to text markers. 32 MB fits audio (a 19 MB WAV expands to ~25 MB base64). |
-| `turn_ledger_enabled` | `true` | The `[SINCE YOUR LAST TURN]` block in the volatile tail: a delta of what changed since the agent's previous turn — finished workers/jobs/RLM runs, its last reflect verdict + lesson, adaptive changes, canary regressions, platform restarts/updates. Normal and cron sessions only (canaries excluded by isolation, workers stay lean). Renders nothing when nothing changed; `false` makes the tail byte-identical to the pre-ledger shape. |
+| `turn_ledger_enabled` | `true` | The `[SINCE YOUR LAST TURN]` block in the volatile tail: a delta of what changed since the agent's previous turn — finished workers/jobs/RLM runs, its last reflect verdict + lesson, open questions, canary regressions, platform restarts/updates. Normal and cron sessions only (canaries excluded by isolation, workers stay lean). Renders nothing when nothing changed; `false` makes the tail byte-identical to the pre-ledger shape. |
 
 ### View pruning
 
@@ -119,12 +119,13 @@ This used to be an unconditional hardcode: every tool result over 300 characters
 
 ## Scout (Planning Phase)
 
-The scout is a fast sub-agent that runs at the start of each turn to plan the approach: it searches memory, picks tools, and selects skills before handing off to the main agent.
+The scout is a fast sub-agent that runs at the start of each turn to plan the approach: it reads the preloaded memory, tool and skill baseline, picks tools, and selects skills before handing off to the main agent.
 
 | Setting | Default | Description |
 |---|---|---|
 | `scout_enabled` | `true` | Enable/disable the scout phase. Disable only for debugging; the scout significantly improves response quality. |
 | `scout_timeout` | `90` | Seconds before the scout is abandoned and the main agent runs without its guidance. |
+| `scout_max_rounds` | `1` | LLM rounds the scout may use before the turn starts (1–6; Settings → Agent → **Scout Rounds**). At `1` scout gets the preloaded baseline (memory, tools, skills, cross-session findings) and is offered only `submit_report` — fastest, since the turn waits on scout. Raise it to give scout its search tools (`search_memory`, `search_skills`, `read_skill_instructions`, …) and the self-check revision loop back; each extra round adds a few seconds and re-sends the whole scout prompt. |
 | `scout_retry_on_empty_approach` | `true` | Retry scout once if it returns no guidance (empty plan). |
 | `scout_preload_memory_char_limit` | `600` | Characters per memory result in the scout's auto-injected baseline. Only affects the preload phase — active recall tool calls return full entry content. |
 
@@ -140,9 +141,13 @@ After each agent turn, a lightweight reflect pass verifies that the agent actual
 | `reflect_max_retries` | `2` | Maximum number of automatic retries reflect can trigger per turn. |
 | `reflect_min_messages` | `3` | Minimum messages in a conversation before reflect runs. Short exchanges (e.g., a simple one-liner) skip it. |
 | `reflect_deferred_normal` | `true` | Interactive sessions finalize immediately and get their grade later, observe-only — lessons, post-mortems, and experience records are written exactly as before, but no verdict can retry the turn. Off restores synchronous, retry-capable reflect on interactive turns. Cron/worker/canary sessions always keep the synchronous, retry-capable path, and deterministic gates still run (and clamp) in-line. |
-| `reflect_defer_idle_s` | `300` | Quiet seconds before a deferred grade runs. Only the latest completed turn is graded — a turn superseded inside this window never is. |
+| `reflect_next_turn_grading` | `true` | Grade a turn even when the user replies before its quiet window is up, using their next message as evidence ("did they correct us, or move on?") and the turn's captured message-id range so the evidence cannot drift into the newer turn. Every real turn gets a grade; cost stays bounded by one in-flight deferred grade per session. Off restores the latest-turn-only rule, which left roughly a quarter of interactive turns ungraded. |
+| `reflect_defer_idle_s` | `300` | Quiet seconds before a deferred grade runs — the wait for a turn the user never answers. With `reflect_next_turn_grading` on, a reply inside this window triggers the grade early instead of cancelling it. |
 | `reflect_nonpass_confidence_floor` | `0.5` | Materiality floor (2026-08-27 calibration audit): a `retry`/`escalate` verdict the grader itself rates below this confidence (0–1) is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous," and ambiguity should not burn a retry or fire an escalation. Coerced/malformed grades are exempt and stay conservative. `0` disables. |
-| `reflect_experience` | `true` | Parse reflect's per-turn experience read (sentiment, friction, user observations) and feed it to Candor, post-mortems, and user-profile memory. |
+| `reflect_experience` | `true` | Parse reflect's per-turn experience read (sentiment, friction, user observations) and feed it to post-mortems and user-profile memory. |
+| `reflect_next_turn_grading` | `true` | A turn whose deferred grade is still pending when the user's next message arrives is graded *then*, with that message as evidence ("USER'S NEXT MESSAGE"): a correction, a repeat of the request or a complaint reads as a missed intent (non-pass, cause `agent`); moving on or thanking reads as a pass. A deterministic `next_msg_correction` pre-check is stored in the payload whatever the grader concludes. Off, the grade is dropped and the turn has no outcome at all. The 300 s idle grade still covers turns with no reply. |
+| `grader_holdout_enabled` | `true` | Nightly run of the reflect grader over the fixtures in `data/eval/grader/` — cases with a known verdict and failure cause, covering clean pass, phantom deliverable, refusal-as-completion, correct escalate and the over-strict trap. Fixtures are never written to memory or the workspace. The result in `trust.grader_holdout` includes total, attempted, graded, correct, failed and ungradable counts. Trust displays accuracy among graded cases separately from whole-suite success and grading completion; unavailable grades never count as successes. |
+| `grader_holdout_schedule` | `30 3 * * *` | Cron for that run. |
 
 ---
 
@@ -154,23 +159,6 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 |---|---|---|
 | `snooze_enabled` | `true` | Enable/disable idle-time background maintenance. |
 | `snooze_interval_ticks` | `10` | How often snooze checks whether to run (each tick is approximately 60 seconds, so default = every 10 minutes). |
-
----
-
-## Candor (Operational Memory Add-on)
-
-Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Integrations → Operational memory (Candor). How it works: [internals/candor.md](internals/candor.md); design history: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
-
-| Setting | Default | Description |
-|---|---|---|
-| `candor_enabled` | `false` | Master switch. Turn-end emission, snooze maintenance, and the scout brief toggle hot; the agent tools (`predict_reliability`, `why_reliability`, `reliability_questions`) register at startup only, so enabling them needs a restart. |
-| `candor_scout_brief` | `true` | Inject the `[OPERATIONAL INTEL]` exception report (degraded tools, discovered conditions, open questions) into scout's pre-load context. |
-| `candor_max_obs_per_turn` | `200` | Safety valve on how many observations one turn may emit. |
-| `fetch_routing_enabled` | `true` | Candor-driven fetch rerouting (needs `candor_enabled`): `http_get` consults the calibrated per-domain `fetch_ok` rate and refuses domains that historically fail, pointing the agent at `browse_web` instead of burning a timeout on a bot wall. `force=true` on the call overrides. |
-| `fetch_routing_min_obs` | `8` | Minimum observations on a domain before rerouting — below this the rate is noise and never reroutes. |
-| `fetch_routing_threshold` | `0.40` | Reroute when the calibrated probability of `fetch_ok` falls below this. |
-
-The store lives at `data/candor/` (machine-local, not in `settings.json`).
 
 ---
 
@@ -196,7 +184,7 @@ Recursive Language Models (arXiv 2512.24601): the agent processes inputs far bey
 
 ## Dream (Introspection Add-on)
 
-Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems; generates typed hypotheses about itself (contradictions, stale memory, ineffective lessons, tool patterns); validates them against recorded outcomes; and writes a periodic report to `workspace/dreams/`. Hypotheses influence nothing until validated. Each day of dreaming narrates itself into a read-only Dream journal session in the sidebar. Toggles live in Settings → Autonomy & idle work → Dream (Introspection); all apply hot. How it works: [internals/dream.md](internals/dream.md).
+Idle-time introspection: during snooze the agent examines its own memory and post-mortems; generates typed hypotheses about itself (contradictions, stale memory, ineffective lessons); validates them against recorded outcomes; and writes a periodic report to `workspace/dreams/`. Hypotheses influence nothing until validated. Each day of dreaming narrates itself into a read-only Dream journal session in the sidebar. Toggles live in Settings → Autonomy & idle work → Dream (Introspection); all apply hot. How it works: [internals/dream.md](internals/dream.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -226,38 +214,14 @@ Idle-time filing: during Snooze, Pernix reads the last few weeks of ordinary cha
 
 ---
 
-## Telos (Teleological Layer Add-on)
+## Autonomy (Gates, Goals, Session Kernel)
 
-A non-convergent drive with correction machinery over the whole loop: turn anomalies mint Questions, an idle-time SOUP generates cross-domain hypotheses (only falsifiable ones execute; the rest wait in a speculation pool), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (Ordo), detecting Goodhart binding, measuring goal discharge (Hevel), reconciling the agent's self-story against its append-only trace ledger, and keeping exploration entropy above floor. All state is markdown+YAML under `data/telos/`. Toggles live in Settings → Autonomy & idle work → Goals (Telos); everything applies hot except tool registration (restart). How it works: [internals/telos.md](internals/telos.md); derivation: [dev/telos-spec.md](dev/telos-spec.md).
-
-| Setting | Default | Description |
-|---|---|---|
-| `telos_enabled` | `false` | Master switch. Off: no directories created, snooze Activity 16 skipped, cron never installs, post-task hook inert. Registers the `telos_status` / `telos_ask` tools (restart). |
-| `telos_dir` | `data/telos` | Directory holding Telos state: SOUP hypotheses, ledgers, and the append-only JSONL trace, all markdown+YAML. No Settings UI control; set via `POST /api/settings` or `data/settings.json`. |
-| `telos_root_text` | `"What is actually going on here, and what is it for?"` | The root objective — a question with no satisfaction predicate. Re-expressing it is an operator-only edit. |
-| `telos_schedule` | `0 4 * * *` | Daily slow-loop cron (UTC): retirement sweeps, with the weekly entropy-control block watermarked inside it. |
-| `telos_serendipity_budget` | `0.15` | Share of scheduler throughput reserved for high-surprise questions with no goal relevance. |
-| `telos_eig_floor` | `0.15` | Testability-gate admission floor on expected information gain. |
-| `telos_hypotheses_per_question` | `3` | SOUP output cap per generation pass. |
-| `telos_max_gated_backlog` | `12` | Above this many gated hypotheses, every idle step evaluates instead of generating. |
-| `telos_max_eval_tokens` | `20000` | Gate ceiling on a hypothesis's estimated evaluation cost. |
-| `telos_question_max_attempts` | `3` | Dry generation passes before a question is abandoned. |
-| `telos_anomaly_remint_cooldown_days` | `7` | One anomaly line of inquiry per source (`tool:X`, `reflect:retry`, …) per window — stops the same flaky tool minting a near-identical question every day. `0` disables. |
-| `telos_soup_context_entries` | `10` | Memory entries in the band-sampled SOUP context. |
-| `telos_soup_retention_days` | `30` | Age after which an unexamined pooled hypothesis is archived `expired` into `soup/archive/` — moved out of the loop's scans, never deleted. 0 = keep it in the pool forever. |
-| `telos_soup_archive_retention_days` | `180` | Hard-delete horizon for `soup/archive/` — the only place a hypothesis file is unlinked. Long by design: the archive is the calibration review's forensic record. 0 = keep forever. |
-
----
-
-## Autonomy (Gates, Goals, Heartbeats, Session Kernel)
-
-The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, heartbeats steered into running work, and a persistent per-session Python REPL. All off by default; a goal + gates + a heartbeat compose into an autonomous task. Toggles live in Settings → Autonomy & idle work → Autonomy. How it works: [internals/autonomy.md](internals/autonomy.md).
+The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, and a persistent per-session Python REPL. All off by default; a goal + gates compose into an autonomous task. Toggles live in Settings → Autonomy & idle work → Autonomy. How it works: [internals/autonomy.md](internals/autonomy.md).
 
 | Setting | Default | Description |
 |---|---|---|
 | `gates_enabled` | `false` | Deterministic gates: user-authored shell checks that run before Reflect; a failing gate mechanically clamps a `pass` verdict to `retry`. Registers the `add_gate` / `list_gates` / `remove_gate` tools (restart). |
 | `goals_enabled` | `false` | Persistent cross-turn goals with token/time/continuation budgets; only `goal_complete` finishes one. Registers the `goal_create` / `goal_status` / `goal_update` / `goal_complete` tools (restart). |
-| `heartbeats_enabled` | `false` | Recurring instructions steered into running work at round boundaries. Registers the agent's `set_heartbeat` / `clear_heartbeat` / `list_heartbeats` tools (restart) and enables the user heartbeat API. |
 | `session_kernel_enabled` | `false` | Persistent per-session Python REPL (the `repl` tool, registered at startup): variables survive tool rounds, turns, compaction, and — via snapshots — restarts. |
 | `kernel_idle_seconds` | `1500` | Idle seconds before a kernel is snapshotted and reaped. Deliberately below the 1800 s session reap so a kernel never outlives its session as an orphan process. |
 | `kernel_snapshot_max_bytes` | `268435456` | Cap (256 MB) on a kernel's dill snapshot; oversized namespaces skip the offending variables and report them. |
@@ -269,62 +233,28 @@ The long-running-autonomy substrate: deterministic gates Reflect cannot overrule
 
 ## Canary Suite
 
-Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — an adaptive batch (a targeted post-batch probe), a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — plus a small nightly heartbeat that keeps every active canary's history warm. The Adaptive Layer's tripwire reads the post-batch results per task. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Self-tuning → Self-checks tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: the whole suite runs after a deploy or a model swap, and any canary runs when you press Run — never on a schedule. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, retire) surface in the Explorer's Self-tuning → Self-checks tab. How it works: [internals/canary.md](internals/canary.md).
 
 | Setting | Default | Description |
 |---|---|---|
-| `canary_enabled` | `false` | Master switch for the suite: sweeps, the `canary_run` / `canary_status` tools, and the API. |
+| `canary_enabled` | `false` | Master switch for the suite: sweeps (after a deploy, after a model swap, or on Run), the read-only `canary_status` tool, and the run endpoint. |
 | `canaries_dir` | `data/canaries` | Directory scanned for `<name>/CANARY.md` task definitions. |
-| `canary_schedule` | `0 3 * * *` | Cron expression for the nightly heartbeat (default: 03:00). |
-| `canary_heartbeat_per_night` | `2` | How many least-recently-run active (non-parked) canaries each heartbeat runs. |
-| `canary_post_batch_max` | `4` | Cap on canaries per post-batch probe: the ones covering the batch's edit kinds first, `sentinel`-tagged ones riding along. |
 | `canary_retention_days` | `30` | Age after which Snooze prunes `canary_runs` rows and their sessions. |
-| `canary_baseline_runs` | `5` | The green precondition: a canary may testify against a batch only when this many trailing runs before the apply all passed. |
-| `canary_regression_delta` | `0.15` | Drift threshold for the **passive** post-mortem signal only (the canary signal is per-task, not a rate delta). |
-| `canary_auto_admit` | `true` | Auto-admit machine-proposed canaries whose gate commands pass an allowlist proof plus the vetting runs; specs the machine can't prove safe still queue for human review. |
-| `canary_auto_maintain` | `true` | Maintenance sweep: promotes vetted canaries, tags flapping ones flaky, parks long-green ones, syncs skill verify blocks, retires exhausted probes. A canary whose latest run failed is never auto-mutated — except that a red run un-parks. |
-| `canary_vetting_runs` | `3` | Consistent runs required to promote a canary out of vetting. |
-| `canary_park_after_passes` | `25` | Consecutive passes before a canary is parked (off the heartbeat, still in the suite; any red run un-parks it). Replaces `canary_retire_after_passes`. |
-| `canary_purge_after_days` | `30` | Retired canaries (DELETE API, exhausted probes) sit in `.retired/` this long before deletion — the undo window. |
-| `canary_max_suite` | `24` | Auto-admission stops at this suite size (the human path stays open). |
-
----
-
-## Adaptive Layer
-
-A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies that route through the proposal queue: a **veto window**, not an approval gate. Content is gated at the mouth (v3.1): every machine edit passes an actionability lint (instructions in, narrative out), per-entry usage is measured (scout and reflect citations), unused entries retire on their own, and both you and the agent have direct authorship paths. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Autonomy & idle work → Adaptive Layer; entries, events, and proposals surface in the Explorer's Self-tuning → Learning tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
-
-| Setting | Default | Description |
-|---|---|---|
-| `adaptive_enabled` | `false` | Master switch for the store, the producers, and the compiler/scout consumption. |
-| `adaptive_auto_apply` | `true` | Auto-apply low-risk kinds (`routing_hint`, `prompt_note`) during idle windows; high-risk kinds always route through the proposal queue. Run the canary suite for at least a week before relying on this. |
-| `adaptive_auto_rollback` | `false` | Promote a canary-regression tripwire hit to automatic rollback. Off until the metric earns trust — a hit otherwise only flags the batch `suspect`. |
-| `adaptive_max_entries_per_kind` | `24` | Cap on active entries per kind. |
-| `adaptive_max_auto_applies_per_day` | `24` | Cap on auto-applied batches per day. |
-| `adaptive_edit_cooldown_hours` | `24` | Minimum hours between machine edits to the same entry. |
-| `adaptive_tripwire_window_turns` | `20` | Organic turns after a batch over which post-mortem retry drift is watched (the passive tripwire; canary-stamped post-mortems excluded). |
-| `adaptive_max_pending_proposals` | `200` | Review-queue cap; at the cap new proposals are refused (the producer re-raises once the queue drains). `0` = unbounded. |
-| `adaptive_max_pending_per_producer` | `60` | One producer's share of the queue, so a chatty producer cannot silence the quieter ones. `0` = unbounded. |
-| `adaptive_proposal_ttl_days` | `30` | Pending proposals lapse (`expired`) after this — a proposal is a snapshot of evidence, and the producer re-raises it from current evidence if it still holds. `0` = never. |
-| `adaptive_auto_approve_after_hours` | `24` | The veto window. A proposal still pending after this many hours is approved by the system itself — same apply path as a human approval, journaled, swept, rollback-able, resolved as `auto_approved` for the audit trail. Canary-suite proposals are excluded (they keep their human gate; `canary_auto_admit` is their autonomy path). `0` = human approval only. |
-| `adaptive_max_auto_approvals_per_day` | `40` | Cap on veto-window auto-approvals per rolling 24h. |
-| `adaptive_usage_retire_days` | `45` | Entries with zero recorded uses over this many *instrumented* days (counted from the usage epoch, stamped on the sweep's first run) are retired — journaled soft-deletes, one aggregate notification, one-click rollback. Candor-owned and human-authored entries exempt. `0` disables. |
-| `adaptive_prompt_note_ttl_days` | `90` | Backstop TTL for `prompt_note` (the kind with no producer-side retirement loop). `0` = keep forever. |
-| `adaptive_harmful_retire_min_uses` | `5` | Failure-dominated retirement: an entry needs at least this many attributed outcomes (successes + failures, written by synthesis) before its success share is trusted enough to retire it. `0` disables the branch. |
-| `adaptive_harmful_retire_max_success` | `0.3` | Below this success share (0–1), a sufficiently-observed entry retires even though it is used — usage alone used to keep a provably harmful hint alive forever while an uncited good one died at the usage-retire window. Journaled soft-delete, one-click rollback; Candor- and user-authored entries are exempt. |
-| `adaptive_suspect_ttl_days` | `7` | A suspect flag raised by the passive post-mortem signal alone can never self-clear (its windows are frozen at the apply); it auto-clears with an annotation after this many days. Canary-confirmed flags are exempt. `0` = flags wait for your dismiss. |
-| `adaptive_agent_notes_enabled` | `false` | The `adaptive_note` tool: the live agent may mint `prompt_note`/`routing_hint` edits the moment it learns something — content lint applies, 2/day, normal pipeline + tripwire, never `policy`. Registration needs a restart. |
+| `canary_purge_after_days` | `30` | Retired canaries (`DELETE /api/canary/{name}`) sit in `.retired/` this long before snooze retention deletes them — the undo window. |
 
 ---
 
 ## Skill Self-Healing
 
-When a skill fails and the session running it finds a workaround, refine can fold that fix back into the skill's `SKILL.md` — the same veto-window contract as the Adaptive Layer's auto-approve: a pending proposal older than the window is machine-validated (skill exists and is enabled, change bounded, frontmatter preserved) and applied with a timestamped backup under `data/skill_backups/<skill>/`. Reject any proposal from the Explorer's Capabilities → Skills tab inside the window. No Settings UI control for these two knobs; set via `POST /api/settings` or `data/settings.json`.
+When a skill fails and the session running it finds a workaround, refine can propose folding that fix back into the skill's `SKILL.md`. By default those proposals apply themselves after a wait, when they pass the checks: the change is at most 1,500 characters and its confidence at least 0.6; it reads as skill text (a note addressed to an editor, such as "Add a note under Usage: …", is unwrapped to the text inside, and refused when nothing usable is inside); its section does not nearly copy an existing heading; it does not push a skill that fits the 5,000-character prompt limit past it; and the skill has had fewer than 3 auto-applies in 30 days. Each apply takes a timestamped backup under `data/skill_backups/<skill>/`, and Roll back in the Explorer's Capabilities → Skills tab restores it. A refused proposal waits there and is archived after 30 days.
 
 | Setting | Default | Description |
 |---|---|---|
-| `skill_proposal_auto_apply_after_hours` | `24` | Veto window before a pending SKILL.md proposal auto-applies. `0` disables auto-apply (manual Apply only). |
-| `skill_proposal_max_auto_applies_per_day` | `5` | Cap on auto-applied skill proposals per day. |
+| `skill_proposal_auto_apply` | `true` | Apply proposals that pass the checks on their own. Off: every proposal waits for Apply or Reject. |
+| `skill_proposal_auto_apply_after_hours` | `24` | How long a proposal waits before auto-apply may take it (0–168). You can reject it in the Skills tab meanwhile. |
+| `skill_proposal_max_auto_applies_per_day` | `5` | Daily cap across all skills (1–50). |
+
+`skill_proposal_auto_rollback` was removed in 3.2; a stale key in `data/settings.json` is ignored.
 
 ---
 
@@ -479,7 +409,11 @@ Esc cancels a recording without transcribing.
 | `notify_webhook_url` | *(empty)* | If set, Pernix sends a POST request to this URL whenever the agent uses `ask_user` to pause and wait for input. Useful for alerting via Slack, Home Assistant, etc. |
 | `vapid_private_key` | *(auto-generated)* | VAPID private key for Web Push. Auto-generated on first run. |
 | `vapid_public_key` | *(auto-generated)* | VAPID public key shared with service worker subscriptions. |
-| `vapid_subject` | `mailto:admin@localhost` | VAPID subject — typically a `mailto:` address or URL identifying the push sender. |
+| `vapid_subject` | `mailto:admin@localhost` | VAPID subject identifying the push sender. Must be a real contact: a `mailto:` address or an `https:` URL. Not localhost — Apple's push service rejects placeholder subjects, so the default silently breaks push to iPhones and iPads. |
+| `notify_tiers_enabled` | `true` | Tiered notifications. Every notice has a category, and each category one tier: `interrupt` (bell badge + phone push), `bell` (quiet item, never a buzz), `log` (activity log only), `drop` (not recorded). `false` is the kill switch: every notice goes back to the old bell with its old urgency and channels. |
+| `notify_tier_overrides` | `{}` | Per-area or per-category tier: `{"canary": "drop", "jobs.test_failed": "interrupt"}`. Keys are an area (`agent`, `external`, `sessions`, `jobs`, `canary`, `skills`, `review`, `dream`, `spaces`, `system`) or a full category name from `core/notices.py`; values are `interrupt`, `bell`, `log` or `drop`. A category override beats its area's. The API rejects (HTTP 400) unknown keys and tiers, except that a key in a retired area (`adaptive`) is dropped silently; `""` or `"default"` removes an entry. Empty = registry defaults, no tuning needed. Settings → Integrations → Notification tiers has one row per area. |
+| `push_urgency_floor` | `normal` | Web Push floor: only notifications at or above this urgency (`low`, `normal`, `high`, `urgent`) reach a phone. Agent questions always push. The in-app bell still shows everything. |
+| `notification_retention_days` | `30` | Notifications older than this are pruned (snooze Activity 11 + the maintenance 24h tier) — the bell is a recent-events surface, not an archive. `0` = keep forever. |
 
 ---
 
@@ -582,7 +516,7 @@ Same authentication as every other endpoint: a Bearer token in network mode.
 |---|---|---|
 | `max_pending_messages` | `10` | Maximum messages that can queue for a busy session. If a session is processing and more than this many messages arrive, further messages are rejected with a `session.queue_full` event. |
 | `max_concurrent_workers` | `5` | Maximum simultaneously-running worker sub-agents per parent session. |
-| `cron_dispatch_timeout` | `3600` | Wall-clock ceiling (seconds) on one scheduled dispatch — a cron fire or a heartbeat idle tick. A wedged unattended job fails and notifies within the hour instead of holding its slot for the old implicit `tool_timeout` × `max_tool_rounds` product. |
+| `cron_dispatch_timeout` | `3600` | Wall-clock ceiling (seconds) on one scheduled dispatch — a cron fire. A wedged unattended job fails and notifies within the hour instead of holding its slot for the old implicit `tool_timeout` × `max_tool_rounds` product. |
 
 ---
 
@@ -594,17 +528,11 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 |---|---|---|
 | `max_fetch_size` | `100000` | Maximum bytes the `http_get` tool will fetch (100KB). |
 | `browser_timeout` | `30` | Page load timeout for `browse_web` (seconds). |
-| `plan_review_timeout` | `120` | Seconds the planning extension waits for user review before timing out. |
-| `eval_auto` | `false` | Run evaluation extension automatically after qualifying turns. |
-| `eval_threshold` | `0.7` | Minimum eval score to consider a turn successful. |
-| `eval_max_retries` | `2` | Max evaluation-driven retries per turn. |
-| `eval_browser_verify` | `false` | Use browser-based verification when evaluating frontend changes. |
 | `reflect_max_retries_worker` | `2` | Separate retry cap for worker sub-agents (bounds fan-out cost). |
 | `reflect_emit_digest_on_pass` | `false` | Have reflect emit a turn digest even on `pass` verdicts. Default off; the digest is always emitted on `retry`/`escalate` so the next scout can plan around real evidence. |
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Enforced at parse time. |
 | `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op kept for back-compat. |
 | `post_mortem_retention_days` | `90` | Days to keep synthesized post-mortem records before snooze cleans them. |
-| `notification_retention_days` | `30` | Notifications older than this are pruned (snooze Activity 11 + the maintenance 24h tier) — the bell is a recent-events surface, not an archive. `0` = keep forever. |
 | `notify_webhook_timeout` | `10` | HTTP timeout for `notify_webhook_url` POST (seconds). |
 | `snooze_max_cycle_seconds` | `900` | Hang backstop per Snooze cycle — runaway protection, not a budget. Cycles run until the activity ladder completes; user activity cancels them instantly. Local (Ollama) background models get 4x headroom. |
 | `snooze_cooldown_minutes` | `5` | Minimum idle time before Snooze starts running. |
@@ -618,7 +546,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `audio_model_overrides` | *(empty list)* | Force `supports_audio = true` for models where auto-detection misses audio capability. |
 | `backup_keep_count` | `7` | Timestamped snapshots kept in `data/backups` by the 24h backup tier. Rotation is per-artifact (DB snapshots and memory corpora rotate independently), so a restore always has a matching pair, and it counts every database snapshot in the directory whatever naming scheme wrote it — see [Storage](#storage). Clamped to 0–90 at use time; `0` disables scheduled backups (and rotation then removes nothing, rather than reading the zero as "delete what I have"). Edit it under Settings → Storage → Backup schedule. |
 | `tool_executor_workers` | `32` | Threads in the tool-call pool. Tools run on their own pool so they can never occupy asyncio's default executor, which every API route needs for its DB reads. Occupants are blocked on IO, so raising it costs memory and PIDs rather than throughput. |
-| `background_executor_workers` | `8` | Threads for long-running idle-time background work (dream deep probes, canary maintenance, synthesis, backups, memory dedup). Small on purpose: occupants are heavyweight and idle-time-only. |
+| `background_executor_workers` | `8` | Threads for long-running idle-time background work (dream deep probes, synthesis, backups, memory dedup). Small on purpose: occupants are heavyweight and idle-time-only. |
 
 ---
 
@@ -628,3 +556,25 @@ For a deep dive into the session state machine, agent turn loop, compaction algo
 
 - **[internals/state-machine.md](internals/state-machine.md)** — detailed architectural walkthrough
 - **[api.md](api.md)** — REST API and SSE event reference
+
+### Operational maintenance and logs
+
+Memory consolidation uses resumable batches for stores larger than 64 files
+(up to 2,000 candidate pairs or 10 seconds per scan batch). Consolidation, dedup
+and rerouting each have a 60-second activity limit; splitting has 120 seconds.
+A timed-out activity marks the cycle partial and allows later activities to run.
+Snooze health exposes activity durations, failures and the last successful cycle.
+Workers retain their cancellation signal even after a later cycle starts.
+Rerouting scans at most 200 settled entries or 10 seconds per batch, saves its
+file/entry cursor, and skips catalogue scoring for entries that already match
+their current file.
+
+Failed splits use smaller batches and persistent per-file backoff (30 minutes
+through 24 hours), reset when the file revision changes. Other files remain
+eligible. Detached jobs reconcile in bounded pages each maintenance tick; old
+exit sidecars without a completion timestamp retain an unknown finish time.
+
+Application logs rotate daily at UTC midnight into 35 compressed archives.
+Routine HTTP access records use `data/logs/access.log`; application records use
+`data/logs/pernix.log`. Legacy numbered rotations are preserved. Retention starts
+with deployment and cannot recover logs already discarded by the old policy.

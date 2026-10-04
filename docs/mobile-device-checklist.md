@@ -29,8 +29,22 @@ passed in the other.
 - [ ] **The page did not zoom in** when the field took focus. Any input under
       16px makes iOS zoom and never zoom back out; you end up typing off the
       right edge.
+- [ ] **Before you tap it, the composer is one row** — attach, text, send on
+      the same line, about 56px tall. It is only that shape while it is empty
+      and unfocused; the moment it has focus the control row drops beneath the
+      text and the writing area gets the full width.
 - [ ] **Type two lines.** The composer grows, the transcript gives up the room,
       and the last message is still visible above it.
+- [ ] **Every control in that row is at least 44px** — stop, attach, expand,
+      the mic if voice is configured, and send — with a real gap between them,
+      not 44px boxes that overlap.
+- [ ] **Tap expand.** The same text opens as a full-screen sheet with a top bar
+      (Cancel · Compose · Send); closing it puts the text back in the composer
+      unchanged and the caret back where it was.
+- [ ] **Send something while a turn is running.** The composer's border takes
+      the accent colour, the placeholder says the text goes to the running
+      turn, and a chip above the composer names what was queued until the agent
+      picks it up. **Stop** is its own red button while that turn runs.
 - [ ] **Rotate to landscape with those two lines still in the box.** The send
       button and the last message are both on screen. The session header is
       gone (a landscape phone has about 260px of usable height, and the header
@@ -43,6 +57,9 @@ passed in the other.
       above the composer rather than over it (`--bottom-stack`).
 - [ ] **Open the drawer and scroll the session list to the bottom.** It stops
       at the last row instead of dragging the whole page with it.
+- [ ] **Tap an answer's `⋯`, then *Not helpful*.** The note prompt opens as a
+      bottom sheet with the keyboard above it, the field is 16px so the page
+      does not zoom, and **Skip** leaves the thumbs-down saved.
 - [ ] **Home Screen app only:** the status bar area is not overlapped by the
       app's own header, and the composer clears the home indicator.
 
@@ -69,8 +86,10 @@ Nothing here should look like a phone.
 - [ ] **Cmd+Enter sends** from the composer, in either setting of "Enter sends
       the message".
 - [ ] **Ctrl+Enter sends** too.
-- [ ] **Enter alone** does what the preference says — and the hint under the
-      composer says the same thing.
+- [ ] **Enter alone** does what the preference says — and the keyboard's own
+      return key is labelled to match (`enterkeyhint`). The visible hint is a
+      desktop affordance and is deliberately absent here; VoiceOver still reads
+      the binding from the composer's description.
 - [ ] **Escape closes** an open sheet, the model picker and Settings, and
       focus lands back where it started.
 - [ ] **Tab walks** the composer, the send button and the visible controls in a
@@ -107,6 +126,9 @@ this repo verifies.
       screen, so the transcript behind it must be unreachable too.
 - [ ] **Open a session's `⋯` sheet.** It is announced as a dialog with the
       session's name, and every row is read as a button with a real label.
+- [ ] **Rate an answer from its `⋯` sheet.** *Helpful* and *Not helpful* are
+      read as buttons, the rating already given is read out as such, and the
+      result ("Marked helpful") is announced without focus moving.
 - [ ] **Send a message.** The turn finishing is announced, not silent.
 
 ## After a deploy

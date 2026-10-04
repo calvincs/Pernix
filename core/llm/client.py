@@ -79,6 +79,14 @@ def extend_session_budget(session_id: str, additional_seconds: float) -> float:
     starts on one provider may failover to the other mid-turn. Returns the
     new effective Ollama timeout (the typical primary) for diagnostics —
     both schedulers receive the same extension.
+
+    Base-relative and therefore idempotent for a fixed argument: this is the
+    right primitive for a TOTAL cap that scales with the shape of the work
+    (spawn_worker asking for (workers+1) base timeouts, resume_worker asking
+    for two), and the wrong one for a fresh window measured from now. The
+    renewable-phase callers — goal continuation, round-budget renewal — use
+    renew_phase_budget instead; asking here for one base timeout after every
+    exhausted turn granted [1799s, 0s, 0s] across three cycles.
     """
     router = _get_router()
     ollama_sem = getattr(router, "_ollama_semaphore", None)
@@ -109,6 +117,46 @@ def ensure_session_budget(session_id: str, min_remaining_seconds: float) -> floa
         if sem is ollama_sem or result == 0.0:
             result = val
     return result
+
+
+# The absolute wall-clock a single session may ever occupy, whatever it
+# renews. Same 24h clamp spawn_worker already applies to its own extension —
+# past a day, a session that still cannot finish is a task-shape problem, and
+# a renewal loop that ran unbounded would be indistinguishable from one.
+MAX_SESSION_WALL_CLOCK_S = 24 * 3600.0
+
+
+def phase_budget_ceiling(base_seconds: float, phases_authorized: int, worker_count: int = 0) -> float:
+    """The hard cumulative budget a renewable task is allowed to reach.
+
+    One base window for the phase running now, one for each renewal the user
+    authorized (a goal's continuation_budget, a turn's round_cap_auto_continue),
+    and one for each worker whose runtime the parent has to sit through — the
+    same accounting spawn_worker uses, because the parent's wall-clock is
+    dominated by children it is waiting on rather than by its own inference.
+
+    An active goal is not unlimited consent: this is the number that says so.
+    Returns inf for an unlimited (0) configured timeout so that setting keeps
+    meaning what it says.
+    """
+    if not base_seconds or base_seconds <= 0 or base_seconds == float("inf"):
+        return float("inf")
+    units = 1 + max(0, int(phases_authorized)) + max(0, int(worker_count))
+    return min(units * base_seconds, MAX_SESSION_WALL_CLOCK_S)
+
+
+def renew_phase_budget(session_id: str, window_seconds: float, ceiling_seconds: float = 0.0) -> float:
+    """Open a fresh phase window on every provider; return the headroom left.
+
+    Clock-relative (see SessionAwareLLMScheduler.renew_phase_budget) and
+    bounded by `ceiling_seconds`, so repeated renewals cannot become an
+    unlimited spending bypass. Returns the MINIMUM remaining headroom across
+    schedulers — the constraining one is whichever started counting first,
+    and it is the one that will raise LLMSessionTimeoutError.
+    """
+    router = _get_router()
+    granted = [sem.renew_phase_budget(session_id, window_seconds, ceiling_seconds) for sem in _all_semaphores(router)]
+    return min(granted) if granted else float("inf")
 
 
 def reset_session_budget(session_id: str) -> None:
@@ -165,6 +213,13 @@ async def chat_with_backup(client: "LLMClient", *, model: str, **kwargs) -> "Cha
     except Exception as first_err:
         backup = settings.fallback_model
         if not backup or backup == model:
+            raise
+        # The router falls back on its own for one-shot calls, and when that
+        # attempt is the one that failed, the exception arriving here already
+        # IS the backup's. Retrying it would pay for the same failure twice
+        # and double the latency of a turn that is already going badly.
+        if getattr(first_err, "_pernix_backup_attempted", False):
+            logger.warning("chat failed on %s and on backup %s (%s); not retrying the backup", model, backup, first_err)
             raise
         logger.warning("chat failed on %s (%s); retrying once on backup %s", model, first_err, backup)
         return await client.chat(model=backup, **kwargs)
@@ -255,6 +310,22 @@ class LLMClient:
     def resolve_provider(self, model: str = "") -> str:
         """Return provider name ('ollama' or 'openrouter') for a model."""
         return self.router.resolve_provider(model)
+
+    def effective_provider(self, model: str = "") -> str:
+        """The provider that will ACTUALLY serve this model.
+
+        resolve_provider answers from the registry — the intent. The router
+        downgrades to Ollama when the resolved provider reports unavailable
+        (a lost API key, chiefly), and usage booked against the intent then
+        records free local tokens as paid remote spend. Accounting asks this
+        one; routing questions still ask resolve_provider.
+        """
+        try:
+            return getattr(self.router.get_provider(model or settings.llm_model), "name", "") or self.resolve_provider(
+                model
+            )
+        except Exception:
+            return self.resolve_provider(model)
 
     def has_capacity(self, model: str = "") -> bool:
         """Check if the provider for this model has an available semaphore slot."""

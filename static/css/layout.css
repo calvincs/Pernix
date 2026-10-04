@@ -226,10 +226,14 @@ body.sidebar-resizing {
 }
 
 /* The row's actions, over the title's tail rather than beside it.
-   Absolutely positioned against .session-item, so five 24px targets cost the
-   title nothing until a pointer or the keyboard asks for them. The gradient
-   is the seam: the overlay fades in from transparent over its first 20px so
-   it reads as sitting ON the title rather than butting into it. */
+   Absolutely positioned against .session-item, so its 24px targets cost the
+   title nothing until a pointer or the keyboard asks for them.
+
+   Out of flow is not the same as out of the way: at seven buttons the strip
+   was 184px of a 253px row and the row's centre — where a click to OPEN a
+   session lands — was inside button.session-pin. Two controls, 52px, is the
+   contract now, and tools/ui-gate/check.py holds it at <=64px with the title
+   still the element at the row centre. (L02) */
 .session-actions {
     position: absolute;
     top: var(--sp-2);
@@ -238,15 +242,28 @@ body.sidebar-resizing {
     display: inline-flex;
     align-items: center;
     gap: var(--sp-1);
-    padding-left: 20px;
     opacity: 0;
     transition: opacity var(--transition);
-    background: linear-gradient(to right, transparent, var(--row-veil) 20px);
+    background: var(--row-veil);
     /* The strip is a backdrop, not a target: the fade and the gaps between
        the icons pass their clicks down to the row, so a near miss opens the
        session instead of doing nothing. Only the buttons take a click, and
        only once they are visible — an invisible control that is still
        clickable is the bug the touch tier was built to fix. */
+    pointer-events: none;
+}
+/* The seam: the strip fades in from transparent over the 20px to its left so
+   it reads as sitting ON the title rather than butting into it. A pseudo
+   element rather than padding, because padding would put those 20px inside
+   the strip's own box and the width contract above is measured on it. */
+.session-actions::before {
+    content: '';
+    position: absolute;
+    right: 100%;
+    top: 0;
+    bottom: 0;
+    width: 20px;
+    background: linear-gradient(to right, transparent, var(--row-veil));
     pointer-events: none;
 }
 .session-actions > * {
@@ -3279,7 +3296,23 @@ body.sidebar-resizing {
 }
 
 /* ======================================================================
-   Input area
+   Input area — the composer
+   ----------------------------------------------------------------------
+   Text on top, controls beneath. The old shape was a one-line pill at 13px
+   with the buttons sharing the text row: every control narrowed the writing
+   area, the row height was tied to the buttons, and the main thing this app
+   exists for read as a search field. Now the textarea owns the full width of
+   the card, the controls sit under it at platform size, and the card is a
+   12px rectangle rather than a pill — a place to write, not a slot to query.
+
+   The card spans the chat column: the transcript keeps its 960px measure,
+   the composer does not. A composer narrower than the answer above it looks
+   like a different app's control.
+
+   Every rest-height number comes out of the four custom properties on
+   #composer, so touch.css re-tunes the same layout by setting three of them.
+   app.js reads the computed max-height for its auto-grow cap, so this file
+   is the only place the growth ceiling is written down.
    ====================================================================== */
 #input-wrapper {
     border-top: 1px solid var(--border-subtle);
@@ -3287,94 +3320,149 @@ body.sidebar-resizing {
     padding: var(--sp-3) var(--sp-4) var(--sp-5);
 }
 
-#input-bar {
+#composer {
+    /* Desktop: 15px mono at 1.55, two lines at rest.
+       2 x 15px x 1.55 + 2 x 8px = 62.5px of textarea. */
+    --composer-size: var(--text-lg);
+    --composer-lh: 1.55;
+    --composer-pad-y: var(--sp-2);
+    --composer-lines: 2;
+    --composer-target: 40px;
+
     display: flex;
-    align-items: flex-end;
-    gap: var(--sp-3);
-    max-width: var(--chat-max-w);
-    margin: 0 auto;
+    flex-direction: column;
+    gap: var(--sp-1);
     width: 100%;
+    position: relative;
     background: var(--bg-surface);
     border: 1px solid var(--border-subtle);
-    border-radius: 1.5rem;
-    padding: var(--sp-2);
-    transition: border-color var(--transition), box-shadow var(--transition);
-    position: relative;
+    border-radius: 12px;
+    padding: var(--sp-2) var(--sp-3);
     box-shadow: var(--shadow-sm);
+    transition: border-color var(--transition), box-shadow var(--transition);
 }
-#input-bar:focus-within {
+#composer:focus-within {
     border-color: var(--accent-dim);
     box-shadow: 0 0 0 1px var(--accent-dim), var(--shadow-md);
 }
+/* While the agent runs, what you type goes into the turn already in flight.
+   The border says so before you find out by sending. */
+#composer.is-streaming {
+    border-color: var(--accent-dim);
+}
 
-#attach-btn {
+#composer textarea {
+    width: 100%;
     background: transparent;
-    color: var(--text-dim);
     border: none;
-    width: 36px;
-    height: 36px;
+    color: var(--text-bright);
+    font-family: var(--mono);
+    font-size: var(--composer-size);
+    line-height: var(--composer-lh);
+    padding: var(--composer-pad-y) 0;
+    resize: none;
+    outline: none;
+    /* The rest height, and the floor every auto-grow lands on: the inline
+       height app.js writes can only ever make the box taller than this. */
+    min-height: calc(var(--composer-lines) * var(--composer-size) * var(--composer-lh)
+                     + 2 * var(--composer-pad-y));
+    /* ~14 lines before the box stops growing and starts scrolling. dvh, not
+       vh: on a laptop with a short window the ceiling has to come down too. */
+    max-height: 40dvh;
+    overflow-y: auto;
+}
+/* --text-faint measures 4.12:1 on --bg-surface — it clears 4.5:1 against
+   --bg, which is not the surface the placeholder is actually drawn on.
+   --text-dim is 4.73:1 there (6.17:1 on paper). `opacity: 1` because
+   Firefox dims the placeholder again on top of whatever colour it is given. */
+#composer textarea::placeholder {
+    color: var(--text-dim);
+    opacity: 1;
+}
+
+/* ----------------------------------------------------------------------
+   The control row
+   ---------------------------------------------------------------------- */
+#composer-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+}
+/* The spacer that pushes the counter, the hint and Send to the right edge.
+   A flex item rather than `margin-left: auto` on the next thing, because
+   which thing is "next" changes with what is hidden. */
+#composer-row .grow {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+#stop-btn,
+#attach-btn,
+#expand-btn,
+#voice-btn,
+#send-btn {
+    width: var(--composer-target);
+    height: var(--composer-target);
+    border: none;
     border-radius: 50%;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: background var(--transition), color var(--transition), transform var(--transition-fast);
+    transition: background var(--transition), color var(--transition),
+                transform var(--transition-fast), box-shadow var(--transition);
 }
-#attach-btn:hover {
-    background: var(--bg-soft);
-    color: var(--text-bright);
+#stop-btn svg,
+#attach-btn svg,
+#expand-btn svg,
+#voice-btn svg,
+#send-btn svg {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
 }
-#attach-btn:active { transform: scale(0.92); }
-#attach-btn:focus-visible {
+#stop-btn:focus-visible,
+#attach-btn:focus-visible,
+#expand-btn:focus-visible,
+#voice-btn:focus-visible,
+#send-btn:focus-visible {
     outline: 2px solid var(--accent-dim);
     outline-offset: 2px;
+}
+#stop-btn:active,
+#attach-btn:active,
+#expand-btn:active,
+#voice-btn:active { transform: scale(0.92); }
+
+/* The three quiet ones */
+#attach-btn,
+#expand-btn,
+#voice-btn {
+    background: transparent;
+    color: var(--text-dim);
+}
+#attach-btn:hover,
+#expand-btn:hover,
+#voice-btn:hover {
+    background: var(--bg-soft);
+    color: var(--text-bright);
 }
 #attach-btn.has-files {
     color: var(--accent);
 }
 /* A read-only session turns the whole composer off, not just the textarea —
-   these two used to stay live and lead only to a server refusal. */
+   these used to stay live and lead only to a server refusal. */
 #attach-btn:disabled,
+#expand-btn:disabled,
 #voice-btn:disabled {
     opacity: 0.35;
     cursor: not-allowed;
     pointer-events: none;
 }
-#attach-btn svg {
-    width: 18px;
-    height: 18px;
-}
 
-/* Mic button — same footprint as attach; recording state pulses red so a
-   hot mic is never ambiguous. */
-#voice-btn {
-    background: transparent;
-    color: var(--text-dim);
-    border: none;
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    transition: background var(--transition), color var(--transition), transform var(--transition-fast);
-}
-#voice-btn:hover {
-    background: var(--bg-soft);
-    color: var(--text-bright);
-}
-#voice-btn:active { transform: scale(0.92); }
-#voice-btn:focus-visible {
-    outline: 2px solid var(--accent-dim);
-    outline-offset: 2px;
-}
-#voice-btn svg {
-    width: 18px;
-    height: 18px;
-}
+/* Mic — recording state pulses red so a hot mic is never ambiguous. */
 #voice-btn.recording {
     color: var(--error);
     background: color-mix(in srgb, var(--error) 12%, transparent);
@@ -3389,56 +3477,150 @@ body.sidebar-resizing {
     pointer-events: none;
 }
 
-#input-bar textarea {
-    flex: 1;
-    background: transparent;
-    border: none;
-    color: var(--text-bright);
-    font-family: var(--mono);
-    font-size: var(--text-base);
-    padding: var(--sp-2) 0;
-    resize: none;
-    min-height: 24px;
-    max-height: 200px;
-    outline: none;
-    line-height: 1.5;
-}
-#input-bar textarea::placeholder {
-    color: var(--text-faint);
-}
-
-#send-btn {
-    background: var(--accent);
-    color: var(--bg);
-    border: none;
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    transition: background var(--transition), transform var(--transition-fast), box-shadow var(--transition);
-}
-#send-btn:hover {
-    background: var(--text-bright);
-    transform: scale(1.05);
-}
-#send-btn:active { transform: scale(0.95); }
-#send-btn:disabled { opacity: 0.2; cursor: not-allowed; transform: none; }
-#send-btn.stop-mode {
+/* Stop — square, red, and only on screen while there is something to stop.
+   It was the send button wearing a different icon, which meant the control
+   under your cursor changed meaning the moment a turn started. */
+#stop-btn {
     background: var(--error);
+    color: var(--bg);
+    border-radius: 10px;
     animation: stopPulse 2s ease-in-out infinite;
 }
-#send-btn.stop-mode:hover {
+#stop-btn:hover {
     background: var(--error);
     opacity: 0.85;
+    animation: none;
+}
+#stop-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
     animation: none;
 }
 @keyframes stopPulse {
     0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--error) 30%, transparent); }
     50% { box-shadow: 0 0 0 6px transparent; }
+}
+
+#send-btn {
+    background: var(--accent);
+    color: var(--bg);
+}
+#send-btn:hover:not(:disabled) {
+    background: var(--text-bright);
+    transform: scale(1.05);
+}
+#send-btn:active:not(:disabled) { transform: scale(0.95); }
+/* 35%, not the old 20%: a disabled Send still has to read as the send
+   button rather than as a smudge. */
+#send-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* ----------------------------------------------------------------------
+   Hint, counter, long-paste banner, queued chip
+   ---------------------------------------------------------------------- */
+/* The binding, in the open. It lived in a tooltip and in Settings two menus
+   away; the one place anyone would look for it is beside the send button.
+   A button, not a caption, because clicking it flips the preference. */
+#composer-hint {
+    background: transparent;
+    border: none;
+    padding: var(--sp-1);
+    border-radius: var(--radius);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    white-space: nowrap;
+    cursor: pointer;
+    transition: color var(--transition);
+}
+#composer-hint:hover { color: var(--text-bright); }
+#composer-hint:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: 2px;
+}
+/* Below this the row has no room for a sentence, and the binding is not
+   lost: aria-description on the textarea still carries it. */
+@media (max-width: 399px) {
+    #composer-hint { display: none; }
+}
+
+/* Size feedback, from 20,000 characters. Tabular figures so a number that
+   changes on every keystroke does not shuffle the row it sits in. */
+#composer-count {
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+#composer-count.warn { color: var(--warning); }
+
+/* The long-paste offer. Ten thousand lines used to balloon the request in
+   silence until a hard rejection at a million characters. */
+#composer-banner {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    padding: var(--sp-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-raised);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+}
+#banner-text { flex: 1 1 220px; }
+.banner-actions {
+    display: flex;
+    gap: var(--sp-2);
+    flex-shrink: 0;
+}
+#banner-attach,
+#banner-keep {
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    min-height: 28px;
+    padding: var(--sp-1) var(--sp-3);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+    color: var(--text);
+    cursor: pointer;
+    transition: background var(--transition), color var(--transition);
+}
+#banner-attach {
+    border-color: var(--accent-dim);
+    color: var(--accent);
+}
+#banner-attach:hover,
+#banner-keep:hover { background: var(--bg-hover); }
+#banner-attach:focus-visible,
+#banner-keep:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: 2px;
+}
+
+/* What happened to the message you typed while the agent was running. It
+   goes above the chips because it is about the turn in flight, not about
+   the message being composed. */
+#queued-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    max-width: 100%;
+    margin-bottom: var(--sp-2);
+    padding: var(--sp-1) var(--sp-3);
+    border: 1px solid var(--accent-dim);
+    border-radius: 999px;
+    background: var(--accent-subtle);
+    color: var(--text);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 /* SSE health indicator */
@@ -3453,25 +3635,17 @@ body.sidebar-resizing {
 .sse-health.connected { background: var(--success); }
 .sse-health.reconnecting { background: var(--accent); --pulse-dip: 0.3; animation: pulse var(--pulse-fast) infinite; }
 .sse-health.disconnected { background: var(--error); }
-#send-btn svg {
-    width: 16px;
-    height: 16px;
-    fill: none;
-    stroke: currentColor;
-}
 
-/* File attachments in input */
+/* File attachments in input — full width, like the card they belong to. */
 #file-chips {
     display: flex;
     flex-wrap: wrap;
     gap: var(--sp-1);
-    max-width: var(--chat-max-w);
-    margin: 0 auto;
     width: 100%;
     padding: 0;
 }
 #file-chips:empty { display: none; }
-#file-chips:not(:empty) { padding: var(--sp-2) 0 0; }
+#file-chips:not(:empty) { padding: 0 0 var(--sp-2); }
 
 .file-chip {
     position: relative;  /* anchors the upload progress bar */
@@ -3847,6 +4021,22 @@ body.sidebar-resizing {
     background: var(--bg-surface);
     border-color: var(--border-subtle);
 }
+/* The thumbs on an assistant answer. Unrated they are the same quiet chrome
+   as copy; the rating you have actually given is the only one that takes a
+   colour, so a glance down a transcript reads as "these two I marked" rather
+   than as a column of buttons. Up borrows the accent (the app's own "yes"),
+   down the warning amber rather than the destructive red — a thumbs-down is
+   a judgement, not a deletion. */
+.msg-feedback-btn.on {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface));
+}
+.msg-feedback-down.on {
+    color: var(--warning);
+    border-color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 12%, var(--bg-surface));
+}
 
 /* Queued-message remove button */
 .queued-remove {
@@ -4061,7 +4251,10 @@ mark.ts-mark.current {
     background: color-mix(in srgb, var(--success) 15%, transparent);
     border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
 }
-/* Sidebar pin + rename buttons — hover-revealed like the delete button */
+/* Sidebar pin + overflow buttons — hover-revealed, inside .session-actions.
+   .session-rename is kept here for the inline rename editor's own affordance;
+   the row's rename lives in the overflow menu. */
+.session-more,
 .session-pin,
 .session-rename {
     background: none;
@@ -4079,12 +4272,16 @@ mark.ts-mark.current {
     opacity: 0;
     transition: var(--transition);
 }
+.session-item:hover .session-more,
 .session-item:hover .session-pin,
 .session-item:hover .session-rename,
+.session-item:focus-within .session-more,
 .session-item:focus-within .session-pin,
 .session-item:focus-within .session-rename,
+.session-more:focus-visible,
 .session-pin:focus-visible,
 .session-rename:focus-visible { opacity: 1; }
+.session-more:hover,
 .session-pin:hover,
 .session-rename:hover { color: var(--text-bright); }
 .session-pin.pinned { opacity: 1; color: var(--accent); }
@@ -4606,6 +4803,32 @@ mark.ts-mark.current {
 }
 .confirm-body p:last-of-type { margin-bottom: 0; }
 
+/* The optional line behind a thumbs-down. Same card, header and footer as
+   the confirm dialog — the only thing it owns is the width and the field. */
+.msg-note-card { width: min(460px, 92vw); }
+.msg-note-label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+}
+.msg-note-input {
+    width: 100%;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    padding: 7px 10px;
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    outline: none;
+    transition: border-color var(--transition);
+}
+.msg-note-input:focus { border-color: var(--accent-dim); }
+.msg-note-input::placeholder { color: var(--text-faint); }
+
 /* F10 — urgency has to look like urgency. .notif-item lives in modals.css and
    .jobs-indicator in jobs.css; both of these are new selectors, so nothing
    there is overridden in place. The :hover companion is needed because
@@ -4852,3 +5075,175 @@ mark.ts-mark.current {
 .sugg-declined-label { flex: 1; min-width: 0; color: var(--text); font-size: var(--text-sm); }
 .sugg-declined-meta { color: var(--text-faint); font-size: var(--text-xxs); }
 .sugg-declined-all { margin-top: var(--sp-2); }
+
+/* ======================================================================
+   Expand editor — static/js/components/compose-editor.js
+
+   The composer's large surface, opened by #expand-btn. Deliberately NOT a
+   .modal-card: that class is rewritten into a bottom sheet by compact.css and
+   into a 44px-target sheet by touch.css, and this dialog wants neither of
+   those shapes — it has its own answer for a finger (a full-screen sheet, in
+   touch.css) and would otherwise spend every rule fighting one it inherited.
+   It keeps .modal-overlay, which is only a scrim and a centring context, and
+   overrides that from an ID so compact.css's bottom-sheet alignment cannot
+   reach it either.
+
+   Sizes are §7 of docs/dev/composer-plan.md: 70vw x 70vh, floors of 560x360,
+   ceiling of 1100 wide. Every floor and ceiling is written through min() with
+   the available space, so a browser window smaller than the floor gets a
+   dialog that fits rather than one that overflows the scrim.
+   ====================================================================== */
+#compose-editor-overlay.modal-overlay {
+    align-items: center;
+    justify-content: center;
+    padding: var(--sp-4);
+}
+
+#compose-editor {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    width: 70vw;
+    min-width: min(560px, 100%);
+    max-width: min(1100px, 100%);
+    height: 70vh;
+    min-height: min(360px, 100%);
+    max-height: 100%;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    /* The card never scrolls; the textarea inside it does. A scrolling card
+       would take the footer's buttons off the bottom of a long draft. */
+    overflow: hidden;
+    animation: slideUp 0.2s ease;
+}
+
+/* --- top bar: what this is, and that the draft is safe ---------------- */
+.compose-editor-top {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    flex-shrink: 0;
+    padding: var(--sp-3) var(--sp-4);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.compose-editor-eyebrow {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+}
+
+/* Present from the first paint and merely unlit, so nothing in the bar moves
+   when it flashes. Opacity rather than display for the same reason. */
+.compose-editor-saved {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity var(--transition-slow);
+}
+.compose-editor-saved.is-flash { opacity: 1; }
+
+/* --- the writing surface ---------------------------------------------- */
+.compose-editor-body {
+    display: flex;
+    flex: 1 1 auto;
+    /* Without this the textarea's own content height becomes the flex base and
+       the body grows past the card instead of scrolling inside it. */
+    min-height: 0;
+    margin: var(--sp-4);
+    padding: var(--sp-3);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+    transition: border-color var(--transition), box-shadow var(--transition);
+}
+/* Same focus treatment as #input-bar — the textarea itself has no border to
+   put a ring on, and the surface is what reads as "the field". */
+.compose-editor-body:focus-within {
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 1px var(--accent-dim);
+}
+
+#compose-editor-input {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    resize: none;
+    overflow-y: auto;
+    color: var(--text-bright);
+    caret-color: var(--accent);
+    font-family: var(--mono);
+    /* 15px, not var(--text-lg): the plan fixes the composer's type at 15px on
+       desktop and this is the same text in a bigger room. */
+    font-size: 15px;
+    line-height: 1.6;
+}
+#compose-editor-input::placeholder { color: var(--text-faint); }
+
+/* --- footer: bindings, size, and the two ways out --------------------- */
+.compose-editor-foot {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2) var(--sp-3);
+    flex-shrink: 0;
+    padding: var(--sp-3) var(--sp-4);
+    border-top: 1px solid var(--border-subtle);
+}
+
+.compose-editor-spacer { flex: 1 1 auto; }
+
+.compose-editor-hint {
+    min-width: 0;
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+}
+
+/* Always visible here, unlike the composer's #composer-count: the editor is
+   where a long message is written, so its length is what you came to watch.
+   Tabular digits so a growing number does not shuffle the buttons beside it. */
+.compose-editor-count {
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.compose-editor-btn {
+    min-height: 36px;
+    padding: var(--sp-2) var(--sp-4);
+}
+.compose-editor-btn:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: 2px;
+}
+
+/* The dialog is a big fade-and-rise; a user who asked for less motion gets
+   the dialog without the journey. */
+@media (prefers-reduced-motion: reduce) {
+    #compose-editor { animation: none; }
+    .compose-editor-saved { transition: none; }
+}
+
+/* Under the narrowest desktop windows the 560px floor is the whole viewport,
+   so the footer's four items need to be allowed to stack rather than squeeze
+   the buttons to nothing. */
+@media (max-width: 620px) {
+    .compose-editor-hint { flex-basis: 100%; }
+}

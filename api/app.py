@@ -12,6 +12,11 @@ from db.database import init_db
 
 logger = logging.getLogger("pernix.api")
 
+# A deploy queues one full canary sweep this long after boot. Restarts inside
+# the window replace the queued job (same job id), so a burst of rebuilds is
+# measured once, after things have settled.
+_DEPLOY_SWEEP_DELAY_S = 900
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -20,26 +25,9 @@ async def lifespan(app: FastAPI):
     # Skip if run.py already configured the root logger (the normal path);
     # this branch covers test imports and other entry points that load the
     # app without going through run.py.
-    root = logging.getLogger()
-    if not root.handlers:
-        from logging.handlers import RotatingFileHandler
-        from pathlib import Path as _P
+    from core.logging_setup import setup_logging
 
-        log_dir = _P("data/logs")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-        root.setLevel(logging.INFO)
-        console = logging.StreamHandler()
-        console.setFormatter(log_fmt)
-        root.addHandler(console)
-        file_h = RotatingFileHandler(
-            log_dir / "pernix.log",
-            maxBytes=10_000_000,
-            backupCount=3,
-            encoding="utf-8",
-        )
-        file_h.setFormatter(log_fmt)
-        root.addHandler(file_h)
+    setup_logging()
     logger.info("Pernix starting on %s:%d", settings.host, settings.port)
 
     # 0. Capture the main event loop so tool threads can marshal event
@@ -170,6 +158,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Interrupted-session reconcile failed (continuing): %s", e)
 
+    # 3.4 Recover goal continuations a dead process left mid-flight. The three
+    # sweeps above reset interrupted turns to readiness; none of them looks at
+    # work that was authorized but never ran. A goal continuation is debited
+    # durably and used to be dispatched from an in-memory deque, so a crash
+    # between the two spent the allowance on nothing — and the only orphan
+    # sweeps in the codebase run at turn finalization or inside prompt(), i.e.
+    # never without a human. Must follow the reconciles: a recovered
+    # continuation dispatches into a session those have just made ready.
+    try:
+        recovered = await manager.recover_goal_continuations()
+        if recovered:
+            logger.warning("Recovered %d goal continuation(s) at startup", recovered)
+    except Exception as e:
+        logger.warning("Continuation recovery failed (continuing): %s", e)
+
     # 1.5 VAPID key generation (idempotent — skipped if keys already present)
     if not settings.vapid_private_key or not settings.vapid_public_key:
         try:
@@ -211,15 +214,9 @@ async def lifespan(app: FastAPI):
 
     # 4. Scheduler (must init on main event loop before worker threads call it)
     try:
-        from core.extensions.scheduling import ensure_canary_schedule, ensure_telos_schedule, init_scheduler
+        from core.extensions.scheduling import init_scheduler
 
         init_scheduler()
-        # Canary nightly heartbeat: derived from settings each boot, never
-        # persisted — a no-op while canary_enabled is off.
-        ensure_canary_schedule()
-        # TELOS daily slow loops (ordo/binding + weekly audits): same
-        # transient pattern — a no-op while telos_enabled is off.
-        ensure_telos_schedule()
     except Exception as e:
         logger.warning("Scheduler init failed: %s", e)
 
@@ -266,8 +263,10 @@ async def lifespan(app: FastAPI):
             _db.set_snooze_state("app_version_seen", _stamp)
             # First boot ever (no stamp) is a fresh install, not a deploy.
             if _seen and settings.canary_enabled:
+                # Debounced: the sweep waits 15 minutes, and a restart inside
+                # that window replaces the queued job instead of adding one.
                 logger.info("Deploy detected (%s -> %s): full canary sweep queued", _seen, _stamp)
-                enqueue_full_sweep("deploy", delay_s=300)
+                enqueue_full_sweep("deploy", delay_s=_DEPLOY_SWEEP_DELAY_S)
     except Exception as e:
         logger.warning("Deploy detection failed (continuing): %s", e)
 
@@ -334,28 +333,43 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
-    # 3. Cancel any running agent tasks.
+    # 3. Close admission, stop the producers, then drain.
     #
-    # The flag goes up FIRST. Cancelling a parent cascades to its workers,
+    # Admission closes FIRST. Cancelling a parent cascades to its workers,
     # whose completion callbacks resume the parent and dispatch its pending
     # queue — starting a fresh turn against an LLM client that is about to
     # close, and leaving a half-written SCOUTING row for the next boot to
-    # report as an interrupted session.
-    _mgr.shutting_down = True
-    cancelled = []
-    for sid in _mgr.active_session_ids():
-        s = _mgr.get(sid)
-        if s and s.task and not s.task.done():
-            s.task.cancel()
-            cancelled.append(s.task)
+    # report as an interrupted session. The flag used to guard only those two
+    # recovery paths: prompt() itself never read it, so a cron fire or a
+    # heartbeat landing after the snapshot below created a fresh agent task
+    # that nothing here would ever cancel. It is a gate in prompt() now, which
+    # is also the only place that covers the orchestration tool threads —
+    # they reach the loop with run_coroutine_threadsafe and shutdown never
+    # cancels them.
+    _mgr.close_admission()
 
-    # Wait for the cancellations to actually land rather than guessing at a
-    # fixed delay; bounded so a wedged task cannot hold up the shutdown.
-    if cancelled:
-        try:
-            await asyncio.wait_for(asyncio.gather(*cancelled, return_exceptions=True), timeout=5.0)
-        except asyncio.TimeoutError:
-            logger.warning("%d agent task(s) did not stop within 5s", len(cancelled))
+    # Stop the scheduling producer BEFORE collecting tasks, not last. APScheduler
+    # kept firing cron jobs straight through the drain.
+    try:
+        from core.extensions.scheduling import _get_scheduler
+
+        sched = _get_scheduler()
+        if sched and hasattr(sched, "running") and sched.running:
+            sched.shutdown(wait=False)
+            logger.info("Scheduler shut down")
+    except Exception:
+        pass
+
+    # Drain rather than snapshot: a dispatch that was already past the gate and
+    # mid-persist when admission closed still creates its task, and session.task
+    # only ever points at the newest turn. drain_turns re-collects until nothing
+    # is left, bounded so a wedged task cannot hold up the shutdown.
+    try:
+        cancelled_count = await _mgr.drain_turns(timeout=5.0)
+        if cancelled_count:
+            logger.info("Drained %d agent task(s)", cancelled_count)
+    except Exception:
+        logger.exception("Agent task drain failed")
     # Brief pause to let SSE generators finish their current iteration
     await asyncio.sleep(0.5)
 
@@ -365,15 +379,6 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await notifier.stop()
-    except Exception:
-        pass
-    try:
-        from core.extensions.scheduling import _get_scheduler
-
-        sched = _get_scheduler()
-        if sched and hasattr(sched, "running") and sched.running:
-            sched.shutdown(wait=False)
-            logger.info("Scheduler shut down")
     except Exception:
         pass
     try:
@@ -394,20 +399,14 @@ async def lifespan(app: FastAPI):
         _mcp = get_mcp_manager_if_started()
         if _mcp is not None:
             await asyncio.wait_for(_mcp.shutdown(), timeout=8)
-    except Exception:
-        pass
+    except Exception as e:
+        # shutdown() force-closes and untracks whatever the timeout cut short,
+        # but a teardown that had to be abandoned is worth one line in the log.
+        logger.warning("MCP shutdown did not finish cleanly (%s); its connections were force-closed", e)
     try:
         from core.llm.client import get_llm_client
 
         await get_llm_client().close()
-    except Exception:
-        pass
-    try:
-        # Releases the Candor store's writer flock. No-op if the bridge was
-        # never created (candor_enabled=false or unused).
-        from core.extensions.candor.bridge import shutdown_candor_bridge
-
-        await shutdown_candor_bridge()
     except Exception:
         pass
     try:
@@ -562,7 +561,6 @@ app.add_middleware(_AuthMiddleware)
 
 # Mount routers
 from api.routers import (
-    adaptive,
     canary,
     chat,
     context,
@@ -578,14 +576,13 @@ from api.routers import (
     skills,
     spaces,
     storage,
-    telos,
     tools,
+    trust,
     voice,
     workspace,
 )
 
 app.include_router(health.router)
-app.include_router(adaptive.router)
 app.include_router(canary.router)
 app.include_router(sessions.router)
 app.include_router(spaces.router)
@@ -600,10 +597,10 @@ app.include_router(jobs.router)
 app.include_router(skills.router)
 app.include_router(push.router)
 app.include_router(rlm.router)
-app.include_router(telos.router)
 app.include_router(voice.router)
 app.include_router(mcp.router)
 app.include_router(storage.router)
+app.include_router(trust.router)
 
 
 @app.get("/")

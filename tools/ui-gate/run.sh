@@ -29,6 +29,18 @@ APP="$OUT/app-$PORT"
 SHOTS="$OUT/shots"
 PIDFILE="$OUT/server-$PORT.pid"
 
+# A git worktree has no .venv of its own — the interpreter lives once, in the
+# main checkout — and testing a worktree is exactly what REPO is advertised
+# for. Borrow that one rather than making every worktree install Playwright
+# again; the code under test is still $REPO's, only the interpreter is shared.
+if [ ! -x "$PY" ]; then
+    COMMON=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    if [ -n "${COMMON:-}" ] && [ -x "${COMMON%/.git}/.venv/bin/python3.12" ]; then
+        PY="${COMMON%/.git}/.venv/bin/python3.12"
+        echo "using the main checkout's venv: $PY"
+    fi
+fi
+
 if [ ! -x "$PY" ]; then
     echo "no .venv at $PY — see tools/ui-gate/README.md"
     exit 2

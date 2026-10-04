@@ -1,8 +1,8 @@
 """Pernix — Dream validate: test one pending hypothesis against reality.
 
 Per-kind methods:
-  tool_pattern       — pure Candor evidence re-check (no LLM): does the
-                       degradation the hypothesis is built on still hold?
+  tool_pattern       — expired on sight: it was re-checked against Candor
+                       evidence, which is retired (no new ones are generated).
   contradiction /    — re-resolve the memory refs (content-hash guarded;
   memory_stale         moved or rewritten evidence => expired), then one
                        LLM judge call over the quoted entries.
@@ -30,8 +30,6 @@ from db import models as db
 
 logger = logging.getLogger("pernix.dream.validate")
 
-_DEGRADED_P = 0.55  # mirrors candor intel._DEGRADED_P
-_MIN_OBSERVATIONS = 5
 _MAX_UNUSABLE_ATTEMPTS = 2
 
 # A FIXED HEURISTIC PRIOR, not a measurement. Nothing here estimates how
@@ -203,58 +201,9 @@ async def _judge_chat(system_prompt: str, user_content: str) -> dict | None:
 
 
 async def _validate_tool_pattern(row: dict) -> str:
-    from core.dream.hypothesize import candor_keys, existing_candor_keys
-    from core.extensions.candor.bridge import get_candor_bridge
-
-    candor_refs = [e for e in _evidence(row) if e.get("type") == "candor" and e.get("pred")]
-    if not candor_refs:
-        return _finish(row, "expired", "candor_predict", "no candor refs in evidence")
-
-    # Duplicate-evidence gate: when every Candor fact this hypothesis rests
-    # on already backs a resolved tool_pattern, re-checking can only restate
-    # a known verdict — expire it. Drains the paraphrase backlog built
-    # before generation deduped on evidence keys.
-    keys = candor_keys(candor_refs)
-    resolved = [
-        r
-        for r in db.list_dream_hypotheses(kind="tool_pattern", limit=500)
-        if r["id"] != row["id"] and r.get("status") in ("validated", "refuted")
-    ]
-    if keys and keys <= existing_candor_keys(resolved):
-        return _finish(row, "expired", "duplicate_evidence", "all cited candor facts already resolved")
-
-    if not settings.candor_enabled:
-        return _bump_attempts(row, "candor disabled — cannot re-check")
-
-    # Every checkable ref weighs in, not just the first: a hypothesis citing
-    # fetch_ok(*) plus fetch_ok(some.domain) must not validate off the
-    # wildcard alone while the specific claim went unexamined.
-    bridge = get_candor_bridge()
-    degraded: list[str] = []
-    recovered: list[str] = []
-    thin: list[str] = []
-    for ref in candor_refs:
-        result = await bridge.predict(ref["pred"], ref.get("args") or [])
-        if result is None or "p" not in result:
-            continue  # fact gone, bridge inert, or categorical — not checkable
-        p = float(result["p"])
-        n = int(result.get("observations") or 0)
-        note = f"{ref['pred']}({','.join(ref.get('args') or [])}): p={p:.2f} n={n}"
-        if n < _MIN_OBSERVATIONS:
-            thin.append(note)
-        elif p < _DEGRADED_P:
-            degraded.append(note)
-        else:
-            recovered.append(note)
-    if recovered:
-        # Any cited fact back above the degradation line falsifies the
-        # claim as stated.
-        return _finish(row, "refuted", "candor_predict_degradation", "degradation gone — " + "; ".join(recovered))
-    if degraded:
-        return _finish(row, "validated", "candor_predict_degradation", "; ".join(degraded), confidence=VALIDATION_PRIOR)
-    if thin:
-        return _bump_attempts(row, "insufficient observations — " + "; ".join(thin))
-    return _bump_attempts(row, "no checkable candor fact (inert bridge or categorical only)")
+    """Candor, the only evidence a tool_pattern could be re-checked against,
+    is retired. A pending row can never resolve, so it expires on sight."""
+    return _finish(row, "expired", "candor_retired", "Candor evidence retired 2026-10; not re-checkable")
 
 
 async def _validate_memory_claim(store, row: dict) -> str:
@@ -311,6 +260,12 @@ async def _validate_lesson_ineffective(row: dict) -> str:
         return _bump_attempts(
             row, f"replay needs exactly one user turn (found {len(user_msgs)}) and a live post-mortem"
         )
+    if str(pm.get("verdict") or "") == "pass":
+        # A counterfactual plan can only be judged against a failure. On the
+        # live box 15 of 105 replays were judged against a passing turn and
+        # 8 of those became policies — "the plan now addresses the failure"
+        # when there was none.
+        return _finish(row, "expired", "scout_replay", "cited post-mortem passed — nothing to replay against")
 
     original_request = str(user_msgs[0].get("content", ""))[:4000]
     try:

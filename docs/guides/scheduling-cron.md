@@ -129,7 +129,7 @@ For end-to-end recipes, see [recipes.md](recipes.md).
 If you want to know when a cron job did something:
 
 - **Webhook** — set `notify_webhook_url` in Settings. The agent will POST to it whenever `ask_user` fires (which in unattended mode is rare, but happens for explicit user confirmation requests).
-- **Web Push** — if you've subscribed via the UI, push notifications fire on `ask_user`.
+- **Web Push** — if you've subscribed via the UI, push notifications fire on `ask_user`, on a failed job (`Job failed: <name>`) and on a `notify_user` the agent marks urgent from a cron session. Everything else a job does is a quiet bell item or an *Activity* line — see [notifications](notifications.md).
 - **Workspace files** — the agent can write a file the cron job creates; you find it in the Explorer's Files → Workspace tab next time you check.
 - **A follow-up cron job** — schedule a 9 AM "what did the 8 AM job produce?" session.
 
@@ -142,7 +142,7 @@ If you want to know when a cron job did something:
 - **No retry semantics** — if a cron job fails (network error, model down), it just fails for that run. The next run fires on schedule. Build retry into your prompt if you need it.
 - **Crash safety** — each run's row is claimed in the DB before the prompt is dispatched, and any ticks missed while the server was down are coalesced into a single catch-up run at startup rather than replayed one by one.
 - **Run sessions prune after 7 days** — each firing's `Cron:` session (transcript included) is auto-deleted a week after its last activity, whether or not it's bound to a space. **Pin** a run to keep it around, or make sure the job itself writes anything you'll want later into memory or a workspace file — those outlive the session either way.
-- **Time zone** — a job's cron expression is evaluated in the server process's **local** time zone (the container's `TZ`, or the host's if you're running bare — `docker-compose.yml` ships `TZ=America/Chicago` as a default you're expected to change), not UTC. A few internal schedules (the canary sweep, the Telos digest) are deliberately pinned to UTC instead, but user jobs created via `schedule_job` or `POST /api/jobs` follow local time. `data/agent/SESSIONS.md` typically records your timezone for the agent's awareness as well.
+- **Time zone** — a job's cron expression is evaluated in the server process's **local** time zone (the container's `TZ`, or the host's if you're running bare — `docker-compose.yml` ships `TZ=America/Chicago` as a default you're expected to change), not UTC. A few internal schedules (the canary sweep) are deliberately pinned to UTC instead, but user jobs created via `schedule_job` or `POST /api/jobs` follow local time. `data/agent/SESSIONS.md` typically records your timezone for the agent's awareness as well.
 
 ---
 

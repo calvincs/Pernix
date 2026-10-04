@@ -70,56 +70,57 @@ def test_similarity_completely_different():
 
 
 def test_exact_replace_single():
-    results = list(_exact_replace("hello world", "world", "planet", False))
-    assert results == ["hello planet"]
+    attempt = _exact_replace("hello world", "world", "planet", False)
+    assert attempt.content == "hello planet"
+    assert attempt.count == 1
 
 
 def test_exact_replace_all():
-    results = list(_exact_replace("aXaXa", "X", "Y", True))
-    assert results == ["aYaYa"]
+    attempt = _exact_replace("aXaXa", "X", "Y", True)
+    assert attempt.content == "aYaYa"
+    assert attempt.count == 2, "the count the caller is shown must be the count made"
 
 
 def test_exact_replace_no_match():
-    results = list(_exact_replace("hello", "xyz", "abc", False))
-    assert results == []
+    attempt = _exact_replace("hello", "xyz", "abc", False)
+    assert attempt.content is None
+    assert attempt.count == 0
 
 
 def test_whitespace_normalized_single():
     content = "if  (x   == 1):\n    pass"
     old = "if (x == 1):\n    pass"
     new = "if (x == 2):\n    pass"
-    results = list(_whitespace_normalized_replace(content, old, new, False))
-    assert len(results) == 1
-    assert "x == 2" in results[0]
+    attempt = _whitespace_normalized_replace(content, old, new, False)
+    assert attempt.count == 1
+    assert "x == 2" in attempt.content
 
 
 def test_whitespace_normalized_no_match():
-    results = list(_whitespace_normalized_replace("abc", "xyz", "new", False))
-    assert results == []
+    assert _whitespace_normalized_replace("abc", "xyz", "new", False).content is None
 
 
 def test_indentation_flexible():
     content = "    def foo():\n        return 1"
     old = "def foo():\n    return 1"  # Less indentation
     new = "def foo():\n    return 2"
-    results = list(_indentation_flexible_replace(content, old, new, False))
-    assert len(results) == 1
-    assert "return 2" in results[0]
+    attempt = _indentation_flexible_replace(content, old, new, False)
+    assert attempt.count == 1
+    assert "return 2" in attempt.content
 
 
 def test_block_anchor_basic():
     content = "line1\ndef start():\n    x = 1\n    y = 2\n    return x\nline6"
     old = "def start():\n    x = 1\n    y = 2\n    return x"
     new = "def start():\n    x = 10\n    return x"
-    results = list(_block_anchor_replace(content, old, new, False))
-    assert len(results) == 1
-    assert "x = 10" in results[0]
+    attempt = _block_anchor_replace(content, old, new, False)
+    assert attempt.count == 1
+    assert "x = 10" in attempt.content
 
 
 def test_block_anchor_too_short():
     """Block anchor needs at least 3 lines."""
-    results = list(_block_anchor_replace("ab", "a\nb", "c\nd", False))
-    assert results == []
+    assert _block_anchor_replace("ab", "a\nb", "c\nd", False).content is None
 
 
 # ---------------------------------------------------------------------------
@@ -128,22 +129,26 @@ def test_block_anchor_too_short():
 
 
 def test_apply_edit_exact():
-    result, strategy = _apply_edit("foo bar baz", "bar", "qux", False)
-    assert result == "foo qux baz"
-    assert strategy == "exact"
+    edit = _apply_edit("foo bar baz", "bar", "qux", False)
+    assert edit.content == "foo qux baz"
+    assert edit.strategy == "exact"
+    assert edit.count == 1
 
 
 def test_apply_edit_fuzzy_whitespace():
-    result, strategy = _apply_edit("foo   bar", "foo bar", "foo baz", False)
-    assert result is not None
-    assert "baz" in result
-    assert strategy in ("exact", "whitespace-normalized")
+    edit = _apply_edit("foo   bar", "foo bar", "foo baz", False)
+    assert edit.content is not None
+    assert "baz" in edit.content
+    assert edit.strategy in ("exact", "whitespace-normalized")
+    assert edit.count == 1
 
 
 def test_apply_edit_no_match():
-    result, strategy = _apply_edit("hello", "zzzzz_no_match_zzzzz", "new", False)
-    assert result is None
-    assert strategy is None
+    edit = _apply_edit("hello", "zzzzz_no_match_zzzzz", "new", False)
+    assert edit.content is None
+    assert edit.strategy is None
+    assert edit.count == 0
+    assert edit.error is None, "no match is not the same as a refusal to choose"
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +282,9 @@ def test_block_anchor_rejects_low_similarity():
     content = "def foo():\n    completely_unrelated_body_line\n    return x\n"
     old = "def foo():\n    x = 1\n    y = 2\n    z = 3\n    return x"
     new = "def foo():\n    changed\n    return x"
-    results = list(_block_anchor_replace(content, old, new, False))
-    assert results == [], "block-anchor should reject below similarity floor"
+    attempt = _block_anchor_replace(content, old, new, False)
+    assert attempt.content is None, "block-anchor should reject below similarity floor"
+    assert attempt.refusal is None, "below the floor is no match, not an ambiguous one"
 
 
 def test_block_anchor_accepts_high_similarity():
@@ -286,9 +292,9 @@ def test_block_anchor_accepts_high_similarity():
     content = "def foo():\n    x = 1\n    y = 2\n    return x\nend\n"
     old = "def foo():\n    x = 1\n    y = 2\n    return x"
     new = "def foo():\n    x = 10\n    return x"
-    results = list(_block_anchor_replace(content, old, new, False))
-    assert len(results) == 1
-    assert "x = 10" in results[0]
+    attempt = _block_anchor_replace(content, old, new, False)
+    assert attempt.count == 1
+    assert "x = 10" in attempt.content
 
 
 def test_file_edit_falls_through_without_wrong_edit(tmp_path, monkeypatch):

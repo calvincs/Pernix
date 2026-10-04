@@ -12,7 +12,7 @@ Alex Zhang), with their client stack replaced by injected chat callables
 budget tracking replaced by Pernix's caps.
 
 Blocking by design: runs on a tool-executor thread, NEVER on the event loop
-(guarded, following core/extensions/candor/bridge.py).
+(guarded).
 """
 
 import asyncio

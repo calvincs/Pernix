@@ -636,13 +636,19 @@ async def test_sync_reflect_row_is_stamped_sync(mock_llm_client, monkeypatch):
 
 
 async def test_deferred_grade_skips_a_superseded_turn(mock_llm_client, monkeypatch):
-    """Rapid-fire policy: only the latest completed turn gets graded. A turn
-    the user has already moved past is marked ungraded, not graded late."""
+    """Legacy rapid-fire policy (reflect_next_turn_grading off): only the
+    latest completed turn gets graded, and a turn the user has already moved
+    past is marked ungraded rather than graded late.
+
+    With the flag ON this turn IS graded, against the user's next message —
+    see tests/test_ground_truth_hardening.py.
+    """
     from db import models as db
     from sessions.hooks import _deferred_reflect_task, _DeferredGrade
     from sessions.state import AgentSession
 
     monkeypatch.setattr("config.settings.reflect_defer_idle_s", 0)
+    monkeypatch.setattr("config.settings.reflect_next_turn_grading", False)
 
     sid, uid = _graded_turn("Superseded")
     session_obj = AgentSession(session_id=sid)
@@ -658,11 +664,14 @@ async def test_deferred_grade_skips_a_superseded_turn(mock_llm_client, monkeypat
 
 
 async def test_deferred_grade_skips_while_a_turn_is_in_flight(mock_llm_client, monkeypatch):
+    """Legacy rule again — under next-turn grading an in-flight turn is the
+    trigger to grade, not a reason to skip."""
     from db import models as db
     from sessions.hooks import _deferred_reflect_task, _DeferredGrade
     from sessions.state import AgentSession
 
     monkeypatch.setattr("config.settings.reflect_defer_idle_s", 0)
+    monkeypatch.setattr("config.settings.reflect_next_turn_grading", False)
 
     sid, uid = _graded_turn("In flight")
     session_obj = AgentSession(session_id=sid)
@@ -748,67 +757,3 @@ async def test_failing_gate_still_clamps_when_reflect_is_deferred(mock_llm_clien
     assert session_obj.turn.reflect_count == 1
     assert "tests" in session_obj.turn.reflect_lessons
     assert mock_llm_client.call_count == 0
-
-
-async def test_deferred_grade_feeds_candor_the_verdict_and_experience(mock_llm_client, monkeypatch):
-    """Candor ran during post-hooks with no verdict (the grade hadn't happened
-    yet). The deferred grade emits the two families only reflect can produce —
-    otherwise interactive turns, the ones the experience read exists for, would
-    contribute none of it."""
-    from db import models as db
-    from sessions.hooks import _deferred_reflect_task, _DeferredGrade
-    from sessions.state import AgentSession
-
-    monkeypatch.setattr("config.settings.reflect_defer_idle_s", 0)
-    monkeypatch.setattr("config.settings.candor_enabled", True)
-    monkeypatch.setattr("config.settings.reflect_experience", True)
-    monkeypatch.setattr("core.memory.store.get_memory_store", lambda: None)
-
-    recorded = []
-
-    class _FakeBridge:
-        async def record(self, observations):
-            recorded.append(observations)
-            return {"observed": len(observations)}
-
-    monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: _FakeBridge())
-
-    sid, uid = _graded_turn("Candor deferred")
-    session_obj = AgentSession(session_id=sid)
-    session_obj._deferred_reflect_seq = 1
-    mock_llm_client.responses = [
-        _verdict_response(
-            experience={
-                "user_sentiment": "frustrated",
-                "clarification_loop": True,
-                "first_response_sufficient": False,
-                "friction": ["tone_mismatch"],
-                "note": "user had to restate the ask",
-            }
-        )
-    ]
-
-    snap = _DeferredGrade(
-        session_id=sid,
-        ticket=1,
-        turn_id=0,
-        turn_user_msg_id=None,
-        attempt=1,
-        model="test-model",
-        session_kind="normal",
-    )
-    await _deferred_reflect_task(session_obj, snap)
-
-    assert recorded, "deferred grade recorded no Candor observations"
-    preds = {o["pred"] for o in recorded[0]}
-    assert "reflect_verdict" in preds
-    assert {"user_sentiment", "friction_mode", "no_clarification_needed", "first_response_sufficient"} <= preds
-    verdict_obs = next(o for o in recorded[0] if o["pred"] == "reflect_verdict")
-    assert verdict_obs["value"] == "pass"
-    assert verdict_obs["ctx"]["model"] == "test-model"
-    # Tool and turn outcomes belong to the synchronous emission — re-observing
-    # them here would double-count every tool call in the reliability ledger.
-    assert not ({"tool_ok", "turn_ok", "tool_failure_mode"} & preds)
-    # The turn ledger belongs to a turn that is over.
-    assert session_obj.turn.candor_emitted is None
-    assert session_obj.turn.candor_reflect is None

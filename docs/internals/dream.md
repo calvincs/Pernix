@@ -1,12 +1,13 @@
 # Dream — Idle-Time Introspection
 
+> **Notifications.** Every "notification" this page mentions goes through `core/notices.py` and lands in the tier its category is registered under — most self-maintenance receipts are *log* tier (the bell's Activity tab, never a badge); only things that need you interrupt. See [guides/notifications.md](../guides/notifications.md) for the full list.
+
 The Dream subsystem (`core/dream/`) gives Pernix an idle-time faculty that
-examines its own memory, Candor evidence, and post-mortems; generates typed
+examines its own memory and post-mortems; generates typed
 hypotheses about itself; and then **tries to falsify them** against recorded
 outcomes. Nothing a dream produces influences live behavior until it has been
-validated — and validated conclusions reach live behavior only through the
-[Adaptive Layer](canary-and-adaptive.md)'s governed promotion path (itself
-off by default).
+validated — and the only live effect of a validated conclusion is an
+additive memory correction (see [Memory corrections](#memory-corrections)).
 
 Off by default. Enable in Settings → Autonomy & idle work → Dream
 (Introspection); all settings apply hot. Runs as the final activity of the
@@ -16,17 +17,18 @@ so it only ever spends idle time.
 ## The idea
 
 Memory today is a Polaroid — written once, never falsified. An entry that says
-"X always fails" keeps saying it long after X was fixed. Candor gives the
-inbound mirror (outcomes flow in continuously); dreaming closes the loop by
-asking, offline and unhurried, whether the beliefs still square with the
+"X always fails" keeps saying it long after X was fixed. Post-mortems record
+outcomes continuously; dreaming closes the loop by asking, offline and unhurried, whether the beliefs still square with the
 evidence:
 
-- **Contradictions** between memory entries, or between lessons and Candor's
-  outcome records.
+- **Contradictions** between memory entries.
 - **Stale memory** — claims that recorded outcomes have since overtaken.
 - **Ineffective lessons** — lessons that scout recalls but that demonstrably
   don't change the plan.
-- **Tool patterns** — regularities in operational history worth writing down.
+- **Tool patterns** — no longer generated. They were evidenced and
+  re-checked by Candor, which was retired in 3.2; any still-pending
+  `tool_pattern` row expires on its next validation pass
+  (`method: candor_retired`). The kind stays valid for historical rows.
 
 A hypothesis is not a belief. It sits as a row in a sidecar table
 (`dream_hypotheses`, migration v19) doing nothing until a validation pass
@@ -38,7 +40,7 @@ so the dreamer cannot resurrect an idea that already failed.
 One step per snooze cycle, one bounded background-model call:
 
 1. **Observe** — assemble a small, quoted, delimited evidence pack: new
-   post-mortems and Candor events since the last cursors, one memory file
+   post-mortems since the last cursor, one memory file
    sampled by rotation, recently-recalled lessons with their ages.
 2. **Hypothesize** — ask the model for at most `dream_hypotheses_per_cycle`
    typed hypotheses, each required to cite evidence refs from the pack.
@@ -48,14 +50,14 @@ One step per snooze cycle, one bounded background-model call:
    A second, targeted mint path bypasses the model call: Snooze watermarks
    every enabled skill's `SKILL.md` + scripts with a sha256 hash
    (`snooze_state['skill_content_hash:{name}']`), and when one changes — a
-   veto-window auto-apply, an in-session agent edit, or a human edit on disk
+   proposal applied in the Skills tab, an in-session agent edit, or a human edit on disk
    — memory entries that mention the skill are cited directly into
    `memory_stale` hypotheses (hash-guarded refs, capped at 6 per skill,
    deduped against what's already pending, one changed skill per cycle), so
    claims like "the script lacks a CPU flag" get re-judged by the validator
    below instead of contradicting the now-fixed skill for months.
 3. **Validate** (pending hypotheses, oldest first) — the check matches the kind:
-   - *Tool patterns* are re-checked against Candor's numbers directly, no LLM.
+   - *Tool patterns* (historical rows only) expire without a check.
    - *Contradictions / stale memory* get one LLM judge call over the
      re-resolved, content-hash-verified entries; any hedge refutes.
    - *Ineffective lessons* get the strongest test: a **counterfactual scout
@@ -99,42 +101,47 @@ cycle-generated hypotheses — no special write powers.
 
 ## What it deliberately doesn't do
 
-- **No direct promotion — and the proposal queue is a veto window, not an
-  approval gate.** Validated conclusions never reach scout or the live
-  prompt from here; they route through the
-  [Adaptive Layer](canary-and-adaptive.md) (when `adaptive_enabled`). A
-  validated contradiction / stale-memory finding applies immediately on
-  promotion: the proposal row is still minted for the audit trail
-  (resolution `auto_applied`), but the correction itself is additive — a
-  corrective note written beside the disputed entries, nothing edited or
-  deleted — narrated in the dream journal, with at most one operator
-  notification per day. Other dream proposals wait in the queue, where a
-  pending row self-approves after `adaptive_auto_approve_after_hours`
-  (default 24 h) unless you veto it first; every application is journaled
-  and rollback-able. Only *validated* hypotheses promote at all — dream is
-  the most speculative producer in the stack — and since v3.1 the two
-  adaptive channels (`lesson_ineffective→policy`, `tool_pattern→routing_hint`)
-  additionally pass an **actionability gate**: one bounded judge call
-  rewrites the finding into an imperative rule, or rules honestly that none
-  exists (`reported:not-actionable`, terminal — the finding still renders
-  in the dream report). The gate exists because this channel shipped raw
-  hypothesis statements ("Despite ... the agent repeatedly fails ...") into
-  the agent's every-turn prompt; the mechanical adaptive lint backstops it.
-  A tool_pattern restating a live Candor hint is a terminal duplicate.
-  With the adaptive layer off, the dream's entire observable output remains
-  the journal, the report, and sidecar rows.
-- **No permanent shelf space.** Promoted entries are retired again when
-  their evidence stops holding — the originating hypothesis is gone or
-  unpromoted, the cited Candor facts recovered above the degradation line,
-  or the entry outlived its TTL (`core/dream/retire.py`). Minting without
-  retiring silently wedges the per-kind entry cap.
+- **No prompt or scout influence.** Validated conclusions never reach scout
+  or the live prompt. What promotion does depends on the kind:
+  - `contradiction` / `memory_stale` with cited memory files: the
+    correction is written at once (see [Memory corrections](#memory-corrections)),
+    narrated in the dream journal, with at most one log-tier notification per
+    day. `promoted_ref` is `correction:<files>`.
+  - The same finding without a citable file: `reported:no-effector`.
+  - The same files corrected for the same kind within the last 7 days:
+    `reported:duplicate-evidence`.
+  - `tool_pattern` / `lesson_ineffective`: `reported:report-only`. Until 3.2
+    these minted adaptive routing hints and policies; the adaptive layer is
+    retired, so the finding reaches the dream report and nothing else.
+
+  Only *validated* hypotheses promote at all, and every outcome above is
+  terminal, so a validated row never sits waiting (a row that does for
+  `_STALL_DAYS` raises `dream.promotion_stalled`).
 - **No self-modification.** Skills, prompts, and code are untouched.
 - **Strict write-permission rule.** The dream may write its own tables, files
-  under `workspace/dreams/`, and (once promotion ships) memory entries marked
-  `source="dream"` — and may delete only what it authored. Demoting a user- or
+  under `workspace/dreams/`, and corrective memory entries marked
+  `source="dream_fix"` — and may delete only what it authored. Demoting a user- or
   distill-authored entry is proposal-only, applied by a human.
 - **Kill switch is total.** `dream_enabled = false` removes the activity from
   the cycle entirely; the sidecar tables are safe to drop.
+
+## Memory corrections
+
+`apply_memory_correction()` (`core/memory/ingest.py`) is **additive and
+non-destructive**. For each cited memory file (capped at 3, drawn from the
+hypothesis's pinned evidence) it appends one new entry —
+`entry_type="note"`, `weight="high"`, `source="dream_fix"`, tagged
+`correction,<kind>` — prefixed `CONTRADICTION RESOLVED` or `STALE-INFO
+CORRECTION` with the provenance `(auto-applied on validation — dream finding,
+dream:<hypothesis id>)`, and ending with an instruction to treat the note as
+overriding conflicting older entries in that file. **The disputed entries are
+left in place.** Nothing is edited or deleted, so the correction is itself
+reviewable and the original record survives. Undo one by deleting the entry
+tagged `dream:<id>` in that file; `scripts/dream_fix_audit.py` traces those
+tags back to their hypotheses.
+
+Before 3.2 these corrections were minted as adaptive proposals and applied
+through the proposal machinery; that indirection went with the adaptive layer.
 
 ## Settings
 

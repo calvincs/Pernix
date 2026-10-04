@@ -17,6 +17,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 from config import settings
+from core.tools.truncation import MAX_OUTPUT, acquisition_meta, acquisition_note, write_artifact
 
 logger = logging.getLogger("pernix.ext.web")
 
@@ -26,18 +27,16 @@ _tavily_alert_lock = threading.Lock()
 _tavily_alerted: bool = False
 
 
-def _emit_backend_alert(title: str, body: str, urgency: str = "normal") -> None:
+def _emit_backend_alert(category: str, title: str, body: str) -> None:
     """Push a one-shot operator notification when a search backend degrades.
 
-    Best-effort: failures here are logged at debug because the alert is
-    advisory — the wrapper still returns useful errors to the agent.
+    The category (system.tavily_key / system.tavily_limit) carries the tier.
+    Best-effort: notices.notify never raises, because the alert is advisory —
+    the wrapper still returns useful errors to the agent.
     """
-    try:
-        from db import models as _db
+    from core import notices
 
-        _db.add_notification(title=title, body=body, urgency=urgency)
-    except Exception as e:
-        logger.debug("backend alert (%s) could not be persisted: %s", title, e)
+    notices.notify(category, title, body, link={"kind": "tab", "tab": "settings"})
 
 
 # ---------------------------------------------------------------------------
@@ -247,9 +246,9 @@ def search_web(
     except _TavilyKeyError:
         logger.warning("Tavily API key invalid")
         _alert_tavily_once(
+            "system.tavily_key",
             "Tavily API key rejected",
             "TAVILY_API_KEY is invalid. Update it in Settings → Web → Tavily API Key.",
-            "high",
         )
         # On error paths, return the error directly so executor.py's
         # `result.startswith("Error:")` was_error detection still trips.
@@ -260,9 +259,9 @@ def search_web(
     except _TavilyLimitError:
         logger.warning("Tavily usage limit exceeded")
         _alert_tavily_once(
+            "system.tavily_limit",
             "Tavily plan limit reached",
             "TAVILY_API_KEY is over its usage limit. Upgrade your plan or wait for the monthly reset.",
-            "normal",
         )
         return "Error: Tavily usage limit reached. Upgrade your plan or wait for the monthly reset."
     except Exception as e:
@@ -274,14 +273,14 @@ def search_web(
     return web_text
 
 
-def _alert_tavily_once(title: str, body: str, urgency: str) -> None:
+def _alert_tavily_once(category: str, title: str, body: str) -> None:
     """One-shot alert; resets when key is rotated (env vars are idempotent)."""
     global _tavily_alerted
     with _tavily_alert_lock:
         if _tavily_alerted:
             return
         _tavily_alerted = True
-    _emit_backend_alert(title, body, urgency)
+    _emit_backend_alert(category, title, body)
 
 
 def _tavily_search(query: str, num_results: int, api_key: str) -> str:
@@ -336,44 +335,42 @@ class _TavilyLimitError(Exception):
     pass
 
 
-# ---------------------------------------------------------------------------
-# Fetch reliability — per-domain fetch_ok emission + deterministic reroute
-# ---------------------------------------------------------------------------
-
-# Bot walls answer HTTP 200 with challenge HTML, so a "successful" fetch that
-# matches the wall signature is still a failed fetch as far as reliability
-# history is concerned. The signature table lives in nudges (it drives the
-# post-failure hint); sharing it keeps the two classifiers from drifting.
-from core.harness.nudges import _BOT_DETECTION_RE as _WALL_RE  # noqa: E402
-
-
-def _fetch_domain(url: str) -> str | None:
-    """Domain key for reliability tracking: hostname, lowercased, minus `www.`.
-
-    None for anything that isn't a public-looking DNS name (IP literals,
-    single-label hosts) — reliability history is about sites, and loopback or
-    LAN outcomes would poison the aggregate.
-    """
-    try:
-        host = (urlparse(url).hostname or "").lower().rstrip(".")
-    except ValueError:
-        return None
-    if not host or "." not in host:
-        return None
-    import ipaddress
-
-    try:
-        ipaddress.ip_address(host)
-        return None
-    except ValueError:
-        pass
-    return host[4:] if host.startswith("www.") else host
-
-
 # A whole-exchange deadline for http_get. httpx's timeout is per-read, so a
 # server that drips one byte at a time satisfies it forever while holding a
 # tool-executor thread.
+#
+# This is the ONE number that governs the fetch, and the registration below
+# derives its tool timeout from it rather than repeating it. They disagreed
+# before — 15 registered against 60 internal — and the executor enforces the
+# registered one, so a 25s fetch this deadline permitted was killed at 20s
+# while the thread that had nearly finished it kept going unwatched.
 _HTTP_GET_DEADLINE_S = 60.0
+
+# Per-operation ceiling: connect, or one read. Bounded again by whatever is
+# left of the total, so no single operation can outlive the deadline it is
+# supposed to sit inside.
+_HTTP_OP_TIMEOUT_S = 15.0
+
+
+def _http_op_timeout(remaining: float) -> float | None:
+    """The timeout for the next operation, or None when the total is spent."""
+    if remaining <= 0:
+        return None
+    return min(_HTTP_OP_TIMEOUT_S, remaining)
+
+
+def _fetch_cancelled(ctx: dict | None) -> bool:
+    """Whether the dispatch that owns this call has asked it to stop.
+
+    A worker thread cannot be cancelled from outside, and the executor's only
+    lever — killing the call's subprocesses — does nothing for a pure-Python
+    fetch. So the executor sets a flag and the acquisition loop reads it. This
+    is the whole difference between "the model was told the call ended" and
+    "the call ended".
+    """
+    ev = (ctx or {}).get("_cancel_event")
+    return bool(ev is not None and ev.is_set())
+
 
 # Content-Length headroom before refusing outright: the body is streamed and
 # capped anyway, this just avoids starting an obviously hopeless download.
@@ -393,154 +390,239 @@ _TEXTUAL_CONTENT_TYPES = {
 }
 
 
-def _record_fetch(domain: str | None, ok: bool, method: str) -> None:
-    """Log a fetch outcome to Candor. Fire-and-forget — never blocks the fetch.
+def _fetch_outcome(text: str, status: str, url: str, *, source_complete: bool, extra: dict | None = None):
+    """Every http_get return, as (text, status).
 
-    Only actual attempts land here: SSRF/policy blocks and user cancellations
-    say nothing about the domain and must not count against it.
+    One structured channel instead of prefix-sniffing. "Error fetching X: ..."
+    covered a transport failure, a policy refusal and a deadline alike, so the
+    only way to tell a retryable timeout from a permanent content-type refusal
+    was to read English. `fetch_status` is the fact; the prose stays for the
+    model.
     """
-    if domain is None or not settings.candor_enabled:
-        return
-    try:
-        from core.extensions.candor.bridge import get_candor_bridge
-
-        ts = int(time.time() * 1000)
-        ctx = {"method": method}
-        get_candor_bridge().record_nowait(
-            [
-                {
-                    "pred": "fetch_ok",
-                    "args": [domain],
-                    "stmt_type": "frequency",
-                    "outcome": ok,
-                    "ctx": ctx,
-                    "actor": "agent:pernix",
-                    "ts": ts,
-                },
-                {
-                    "pred": "fetch_ok",
-                    "args": ["*"],
-                    "stmt_type": "frequency",
-                    "outcome": ok,
-                    "ctx": {**ctx, "target": domain},
-                    "actor": "agent:pernix",
-                    "ts": ts,
-                },
-            ]
-        )
-    except Exception as e:
-        logger.debug("fetch_ok emission failed: %s", e)
+    meta = {"fetch_status": status, "url": url, "source_complete": source_complete}
+    if extra:
+        meta.update(extra)
+    return text, meta
 
 
-def _reliability_reroute(domain: str | None) -> str | None:
-    """Deterministic pre-flight: refuse a raw fetch of a domain whose calibrated
-    fetch_ok rate is below threshold, before spending a timeout on its bot wall.
+def _finish_fetch(url: str, content: str, cap: int, stop_reason: str, stop_status: str, declared: str | None):
+    """Clip a fetched body to the cap and say honestly what happened to it.
 
-    The rate blends http and browse outcomes, which is the recovery valve: when
-    browse_web keeps succeeding on the domain the blended rate climbs back over
-    the threshold and raw fetches get probed again on their own.
+    A partial fetch also earns a durable artifact. Without one there is no
+    handle to hand rlm_process, and the audit's route from "I fetched a long
+    page" to "the RLM analysed the whole page" ran through a preview that had
+    silently lost its tail.
 
-    Returns the refusal text, or None to proceed. Any reliability-layer error
-    means proceed — a degraded oracle must never take the fetch path down.
+    ``declared`` is the response's content-length, which for a chunked or
+    streamed response is absent. That absence is reported as an unknown total
+    rather than back-filled with the captured size.
     """
-    if domain is None or not (settings.candor_enabled and settings.fetch_routing_enabled):
-        return None
-    try:
-        from core.extensions.candor.bridge import get_candor_bridge
+    kept = content[:cap]
+    total: int | None = None
+    if declared and str(declared).isdigit():
+        total = int(declared)
+    elif not stop_reason:
+        # Read to EOF inside every limit: what arrived IS the whole source.
+        total = len(content.encode("utf-8", "ignore"))
 
-        pred = get_candor_bridge().predict_sync("fetch_ok", [domain], timeout=2.0)
-    except Exception:
-        return None
-    if not pred or not isinstance(pred.get("p"), (int, float)):
-        return None
-    n = int(pred.get("observations") or 0)
-    p = float(pred["p"])
-    if n < settings.fetch_routing_min_obs or p >= settings.fetch_routing_threshold:
-        return None
-    return (
-        f"Skipped: operational memory shows fetches of {domain} succeed only {p:.0%} "
-        f"of the time over {n} logged attempts (usually a bot wall), so the raw HTTP "
-        f"attempt was not made. Use browse_web for this URL — it renders like a real "
-        f"browser — or load_skill('crawl4ai-fetch') if browse_web also fails. To force "
-        f"the raw attempt anyway, call http_get with force=true."
+    meta = acquisition_meta(
+        source=f"http_get {url}",
+        captured=len(kept.encode("utf-8", "ignore")),
+        source_total=total,
+        unit="bytes",
+        truncation_reason=stop_reason or "an acquisition cap",
+    )
+    if stop_reason:
+        # acquisition_meta calls a fetch complete when captured >= total, but
+        # a stop reason is direct evidence that the read ended early — a
+        # deadline can fire on the last chunk of a body whose content-length
+        # we already matched, and "complete" would then be a guess.
+        meta["source_complete"] = False
+        meta["truncation_reason"] = stop_reason
+    if not meta["source_complete"] or len(kept) > MAX_OUTPUT:
+        meta["artifact"] = write_artifact(kept, "http_get", meta=meta)
+    note = acquisition_note(meta)
+    return _fetch_outcome(
+        kept + ("\n" + note if note else ""),
+        stop_status or "ok",
+        url,
+        source_complete=bool(meta["source_complete"]),
+        extra={"captured_bytes": meta["captured"], "artifact": meta.get("artifact", "")},
     )
 
 
-def http_get(url: str, force: bool = False, _context: dict | None = None) -> str:
-    """Fetch content from a URL. Returns plain text, max 100KB."""
+def _clip_html_for_extraction(html: str, url: str, cap: int | None = None) -> tuple[str, dict]:
+    """Bound the DOM handed to the extractor, and record what that cost.
+
+    Extraction over 5 MB of markup is CPU the event loop cannot afford, so the
+    cap stays. What changes is that the markdown produced from a clipped DOM
+    no longer reads as a rendering of the whole page: the conclusion of a long
+    article past the cap was simply absent, with nothing saying so.
+    """
+    limit = _MAX_HTML_BYTES if cap is None else cap
+    if len(html) <= limit:
+        return html, acquisition_meta(
+            source=f"page HTML for {url}", captured=len(html), source_total=len(html), unit="chars"
+        )
+    logger.warning("HTML truncated to %d chars before extraction for %s", limit, url)
+    return html[:limit], acquisition_meta(
+        source=f"page HTML for {url}",
+        captured=limit,
+        source_total=len(html),
+        unit="chars",
+        truncation_reason=f"the {limit:,}-char pre-extraction cap",
+    )
+
+
+def _own_tls_verify(url: str):
+    """The TLS `verify` value for one http_get hop.
+
+    Pernix's own server, in network mode, serves HTTPS with a certificate a
+    public CA bundle does not know (self-signed by default, SAN localhost /
+    127.0.0.1). A fetch of exactly that server — https, host localhost or
+    127.0.0.1, port == settings.port — is verified against Pernix's OWN
+    certificate file: an SSL context whose only trust anchor is that cert,
+    with hostname checking on. Every other URL gets True (the default CA
+    bundle). Verification is never switched off; when the own certificate
+    cannot be found, the default applies and the fetch fails loudly.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in ("localhost", "127.0.0.1"):
+        return True
+    if not getattr(settings, "network_enabled", False) or parsed.port != getattr(settings, "port", None):
+        return True
+    from core import certs
+
+    cert = settings.ssl_cert_path if settings.ssl_mode == "custom" else str(certs.SELF_SIGNED_CERT)
+    if not cert or not os.path.isfile(cert):
+        logger.warning("http_get: own certificate %r not found; using the default CA bundle", cert)
+        return True
+    import ssl
+
+    return ssl.create_default_context(cafile=cert)
+
+
+def http_get(url: str, _context: dict | None = None):
+    """Fetch content from a URL. Returns (text, status), body max 100KB.
+
+    The status dict carries `fetch_status` (ok / capped / deadline / cancelled
+    / refused / error), `source_complete` and the final URL. Callers that need
+    to know WHY a fetch ended read that, not the shape of the prose.
+    """
     allow_loopback = _loopback_allowed()
     try:
         url = _validate_url(url, allow_loopback=allow_loopback)
     except ValueError as e:
-        return f"Error: {e}"
-    domain = _fetch_domain(url)
-    if not force:
-        rerouted = _reliability_reroute(domain)
-        if rerouted:
-            return rerouted
+        return _fetch_outcome(f"Error: {e}", "refused", url, source_complete=False)
     import httpx
 
     try:
         # Follow redirects manually so every hop goes through _validate_url —
         # httpx's automatic following would happily land on a private/metadata
         # address after the initial URL passed the SSRF check.
-        # timeout is per-read, so a slow-drip server could hold the thread
-        # indefinitely under the old single value; bound the whole exchange.
         deadline = time.monotonic() + _HTTP_GET_DEADLINE_S
         cap = int(settings.max_fetch_size)
-        with httpx.Client(timeout=15.0, follow_redirects=False) as client:
-            for _ in range(10):
-                if time.monotonic() > deadline:
-                    _record_fetch(domain, False, method="http")
-                    return f"Error fetching {url}: exceeded {_HTTP_GET_DEADLINE_S}s overall deadline"
-                # stream(), not get(): get() reads and decodes the ENTIRE body
-                # before max_fetch_size is applied, so one `http_get` of a
-                # multi-GB file took the whole container's memory with it.
-                with client.stream("GET", url) as resp:
-                    if resp.is_redirect:
-                        location = resp.headers.get("location")
-                        if not location:
-                            break
-                        url = _validate_url(urljoin(url, location), allow_loopback=allow_loopback)
-                        continue
-                    resp.raise_for_status()
+        for _ in range(10):
+            if _fetch_cancelled(_context):
+                return _fetch_outcome(
+                    f"Error fetching {url}: cancelled before the request was sent",
+                    "cancelled",
+                    url,
+                    source_complete=False,
+                )
+            # Each operation gets the smaller of its own ceiling and what
+            # is left of the total. httpx's timeout is per-read, so a
+            # single fixed value let a slow-drip server satisfy it forever
+            # from inside an exchange the deadline had already ended.
+            op = _http_op_timeout(deadline - time.monotonic())
+            if op is None:
+                return _fetch_outcome(
+                    f"Error fetching {url}: exceeded the {_HTTP_GET_DEADLINE_S:.0f}s overall fetch deadline",
+                    "deadline",
+                    url,
+                    source_complete=False,
+                )
+            # stream(), not get(): get() reads and decodes the ENTIRE body
+            # before max_fetch_size is applied, so one `http_get` of a
+            # multi-GB file took the whole container's memory with it.
+            # One client per hop: TLS verification is chosen for the URL this
+            # hop actually fetches (_own_tls_verify), so a redirect can never
+            # carry the own-certificate trust over to another host.
+            with (
+                httpx.Client(follow_redirects=False, verify=_own_tls_verify(url)) as client,
+                client.stream("GET", url, timeout=op) as resp,
+            ):
+                if resp.is_redirect:
+                    location = resp.headers.get("location")
+                    if not location:
+                        break
+                    url = _validate_url(urljoin(url, location), allow_loopback=allow_loopback)
+                    continue
+                resp.raise_for_status()
 
-                    declared = resp.headers.get("content-length")
-                    if declared and declared.isdigit() and int(declared) > cap * _OVERSIZE_FACTOR:
-                        _record_fetch(domain, False, method="http")
-                        return f"Error fetching {url}: response is {int(declared)} bytes, over the fetch cap"
+                declared = resp.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > cap * _OVERSIZE_FACTOR:
+                    return _fetch_outcome(
+                        f"Error fetching {url}: response is {int(declared)} bytes, over the fetch cap",
+                        "refused",
+                        url,
+                        source_complete=False,
+                    )
 
-                    ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-                    if ctype and not (ctype.startswith("text/") or ctype in _TEXTUAL_CONTENT_TYPES):
-                        _record_fetch(domain, False, method="http")
-                        return f"Error fetching {url}: content-type {ctype} is not text"
+                ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if ctype and not (ctype.startswith("text/") or ctype in _TEXTUAL_CONTENT_TYPES):
+                    return _fetch_outcome(
+                        f"Error fetching {url}: content-type {ctype} is not text",
+                        "refused",
+                        url,
+                        source_complete=False,
+                    )
 
-                    chunks: list[bytes] = []
-                    total = 0
-                    truncated = False
-                    for chunk in resp.iter_bytes():
-                        chunks.append(chunk)
-                        total += len(chunk)
-                        if total > cap:
-                            truncated = True
-                            break
-                        if time.monotonic() > deadline:
-                            truncated = True
-                            break
-                    raw = b"".join(chunks)
-                    content = raw.decode(resp.encoding or "utf-8", errors="replace")
+                chunks: list[bytes] = []
+                total = 0
+                # Which limit stopped the read, not merely that one did.
+                # Both branches used to end in the same "[truncated at
+                # {cap} bytes]" line, so a 3 KB body cut short by the
+                # whole-exchange deadline claimed it had filled the 100 KB
+                # cap — a fetch that should be retried reading as a fetch
+                # that returned everything worth having.
+                stop_reason = ""
+                stop_status = ""
+                for chunk in resp.iter_bytes():
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > cap:
+                        stop_reason, stop_status = f"the {cap:,}-byte fetch cap", "capped"
+                        break
+                    if time.monotonic() > deadline:
+                        stop_reason = f"the {_HTTP_GET_DEADLINE_S:.0f}s whole-exchange deadline"
+                        stop_status = "deadline"
+                        break
+                    if _fetch_cancelled(_context):
+                        # Checked every chunk, so the thread unwinds within
+                        # one read of the cancel rather than running the
+                        # body out with nobody awaiting it.
+                        stop_reason = "cancellation by the dispatcher"
+                        stop_status = "cancelled"
+                        break
+                raw = b"".join(chunks)
+                content = raw.decode(resp.encoding or "utf-8", errors="replace")
 
-                _record_fetch(domain, not _WALL_RE.search(content[:8000]), method="http")
-                if truncated or len(content) > cap:
-                    content = content[:cap] + f"\n[truncated at {cap} bytes]"
-                return content
-            _record_fetch(domain, False, method="http")
-            return f"Error fetching {url}: too many redirects"
+            if len(content) > cap and not stop_reason:
+                stop_reason, stop_status = f"the {cap:,}-byte fetch cap", "capped"
+            return _finish_fetch(url, content, cap, stop_reason, stop_status, declared)
+        return _fetch_outcome(f"Error fetching {url}: too many redirects", "error", url, source_complete=False)
     except ValueError as e:
-        return f"Error: redirect blocked: {e}"
+        return _fetch_outcome(f"Error: redirect blocked: {e}", "refused", url, source_complete=False)
     except Exception as e:
-        _record_fetch(domain, False, method="http")
-        return f"Error fetching {url}: {e}"
+        if _fetch_cancelled(_context):
+            # A socket torn down by our own unwind is a cancellation, not a
+            # fetch failure: say so.
+            return _fetch_outcome(
+                f"Error fetching {url}: cancelled during acquisition ({e})", "cancelled", url, source_complete=False
+            )
+        status = "deadline" if isinstance(e, httpx.TimeoutException) else "error"
+        return _fetch_outcome(f"Error fetching {url}: {e}", status, url, source_complete=False)
 
 
 # ---------------------------------------------------------------------------
@@ -778,10 +860,10 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
         diag.append(f"[pageerror] {e}")
     diag.extend(console_msgs)
 
-    # Cap HTML size before extraction to prevent OOM
-    if len(html) > _MAX_HTML_BYTES:
-        html = html[:_MAX_HTML_BYTES]
-        logger.warning("HTML truncated to %d bytes before extraction for %s", _MAX_HTML_BYTES, url)
+    # Cap HTML size before extraction to prevent OOM. The extracted markdown
+    # inherits whatever this clip cost — the extractor cannot report a section
+    # it was never shown.
+    html, html_meta = _clip_html_for_extraction(html, url)
 
     # Trafilatura — pure CPU over up to 5MB of DOM, on the event loop until
     # now. A heavy page froze every SSE stream, state transition and API
@@ -840,8 +922,24 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
             content = "(Failed to extract content)"
 
     max_size = settings.max_fetch_size
+    extract_meta = acquisition_meta(
+        source=f"extracted text for {final_url}",
+        captured=min(len(content), max_size),
+        source_total=len(content),
+        unit="chars",
+        truncation_reason=f"the {max_size:,}-char extracted-text cap",
+    )
     if len(content) > max_size:
-        content = content[:max_size] + f"\n\n[truncated at {max_size} bytes]"
+        content = content[:max_size]
+    if not extract_meta["source_complete"] or not html_meta["source_complete"]:
+        # A partial page is exactly the input a whole-source analysis must not
+        # be run over unannounced, so give it a handle with its status
+        # attached rather than a bare "[truncated]" line.
+        extract_meta["artifact"] = write_artifact(content, "browse_web", meta=extract_meta)
+
+    notes = "\n".join(n for n in (acquisition_note(html_meta), acquisition_note(extract_meta)) if n)
+    if notes:
+        content = content + "\n\n" + notes
 
     header = f"# {title}\n**URL:** {final_url}\n\n---\n\n" if title else f"**URL:** {final_url}\n\n---\n\n"
 
@@ -897,15 +995,9 @@ def browse_web(url: str, _context: dict | None = None) -> str:
         fut.cancel()
         result = f"Error: browse_web timed out after {settings.browser_timeout}s for {url}"
     except _futures.CancelledError:
-        # A cancellation says nothing about the domain — don't record it.
         return "Error: browse_web was cancelled"
     except Exception as e:
         result = f"Error navigating to {url}: {e}"
-    _record_fetch(
-        _fetch_domain(url),
-        not result.startswith("Error") and not _WALL_RE.search(result[:8000]),
-        method="browse",
-    )
     return result
 
 
@@ -958,29 +1050,23 @@ def register(reg) -> None:
     reg.register(
         name="http_get",
         func=http_get,
-        description=(
-            "Fetch content from a URL. Returns plain text. Max 100KB. Follows redirects. "
-            "Domains with a poor logged fetch success rate are refused up front with a "
-            "pointer to browse_web (deterministic reroute from operational memory); "
-            "force=true attempts the raw fetch anyway."
-        ),
+        description=("Fetch content from a URL. Returns plain text. Max 100KB. Follows redirects."),
         parameters={
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "URL to fetch"},
-                "force": {
-                    "type": "boolean",
-                    "description": (
-                        "Attempt the raw HTTP fetch even when operational memory says "
-                        "this domain usually fails. Default false."
-                    ),
-                },
             },
             "required": ["url"],
         },
         category="web",
         tags=["http", "fetch", "url", "get", "download", "web", "page", "content"],
-        timeout=15,
+        # Derived, never retyped: the executor enforces this number and the
+        # fetch obeys _HTTP_GET_DEADLINE_S, so a literal here can only drift
+        # into the shape the audit found — 15 registered against 60 internal,
+        # killing valid fetches at 20s and abandoning the threads still making
+        # them. _resolve_timeout adds its grace on top, so the fetch's own
+        # deadline still fires first and the model gets its diagnostic.
+        timeout=int(_HTTP_GET_DEADLINE_S),
         parallel_safe=True,
         source="extension",
         safety_level="safe",

@@ -1,0 +1,10 @@
+{
+  "id": "correct-escalate",
+  "user_request": "Deploy the new build to the staging box.",
+  "transcript_excerpt": "[TOOL CALL: bash]\nArguments: {\"command\": \"ssh staging 'docker compose up -d --build'\"}\n[TOOL RESULT: bash]\nssh: Could not resolve hostname staging: Name or service not known\n\n[TOOL CALL: read_file]\nArguments: {\"path\": \"deploy/hosts.yml\"}\n[TOOL RESULT: read_file]\nError: no such file or directory: deploy/hosts.yml\n\n[TOOL CALL: bash]\nArguments: {\"command\": \"grep -ri 'staging' --include='*.yml' --include='*.env' . | head\"}\n[TOOL RESULT: bash]\n(no matches)\n\n[ASSISTANT]\nI can't find the staging host anywhere in the repo.",
+  "final_response": "I can't deploy: 'staging' doesn't resolve and there's no host definition anywhere in the repo (no deploy/hosts.yml, no match in any yml or env file). I need the staging hostname or SSH alias from you before this can run.",
+  "tool_summary": {"bash": {"calls": 2, "failures": 1, "total_latency_ms": 900}, "read_file": {"calls": 1, "failures": 1, "total_latency_ms": 5}},
+  "expected_verdict": "escalate",
+  "expected_failure_cause": "task",
+  "note": "The deliverable genuinely cannot exist without a fact only the user has. The agent searched before saying so, and named exactly what it needs. Escalate with cause task; grading this 'retry' would send an identical attempt at the same wall."
+}

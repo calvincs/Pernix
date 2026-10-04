@@ -309,8 +309,12 @@ SKILLS = capability packages in data/skills/. To use one: load_skill(name) and
 follow the instructions inside. Skills do NOT need validation.
 
 MULTI-STEP PIPELINES — build them from skills plus workers:
-- Write the sequence down as a SKILL (create_skill) whose instructions list the
-  steps in order. That is the durable, reusable artifact.
+- Write the sequence down as a SKILL whose instructions list the steps in
+  order. That is the durable, reusable artifact. Create it with bash as
+  data/skills/<name>/SKILL.md (../skills/<name>/SKILL.md from the workspace):
+  YAML frontmatter with name, description, tags and version, then the
+  instructions; scripts go in scripts/. It is picked up on the next skills
+  rescan (load_skill(name) rescans once if the name is unknown).
 - To RUN a step in isolation, spawn_worker(task, ...) — each worker gets its own
   context, so a long pipeline does not fill this session's window. Run
   independent steps as concurrent workers and collect them with await_workers.
@@ -321,37 +325,6 @@ MULTI-STEP PIPELINES — build them from skills plus workers:
 There is no separate workflow engine and no run_workflow tool — a declared step
 graph could not adapt when a step surprised it, which is precisely what an agent
 is for. Decide the next step from what the last one actually returned."""
-
-
-# Conditional block — appended to the base prompt only when settings.eval_auto is True.
-# When auto-eval is OFF this is omitted entirely, so the model isn't biased toward
-# calling add_feature. Skip-first ordering: the most common over-trigger is treating
-# operational requests as tracked deliverables, so we lead with the rule that prevents that.
-_AUTO_EVAL_BLOCK = """ACCEPTANCE-CRITERIA FLOW (auto-eval is ON for this server).
-
-DO NOT use add_feature for operational requests. If the user asked you to:
-fetch, download, scrape, transcribe, summarize, translate, run, deploy,
-restart, install, look up, find, search, list, or show something — SKIP this
-flow entirely. Just deliver the result. Calling add_feature for these creates
-registry noise and triggers an unneeded auto-eval round that grades you on
-criteria you just made up.
-
-USE this flow ONLY when ALL three are true:
-- User asked you to BUILD or IMPLEMENT a non-trivial artifact
-  (code, document, report).
-- Success is subjective ("idiomatic", "clean", "handles edge cases gracefully").
-- User did NOT give concrete tests like "returns 'X' for input Y" — if they
-  did, just run the test inline with bash; that's faster and zero-cost.
-
-How to use:
-1. add_feature(title, description, criteria) BEFORE you start implementing.
-   Each line of `criteria` is one judgeable condition.
-2. Implement and iterate as usual.
-3. After your turn ends, an LLM judge scores each criterion automatically
-   against workspace files + your messages. Failed criteria may trigger a retry.
-
-NEVER call add_feature after the work is done. The flow is for setting
-expectations up-front, not for self-grading what you already produced."""
 
 
 _RLM_BLOCK = """RECURSIVE PROCESSING (rlm_process is available on this server).
@@ -385,14 +358,9 @@ user-facing output."""
 
 
 def _build_base_system_prompt() -> str:
-    """Assemble the base system prompt, including the auto-eval block only when
-    settings.eval_auto is True. Keeping the block conditional avoids biasing the
-    model toward add_feature on operational requests when the feature isn't even
-    active server-side.
-    """
+    """Assemble the base system prompt plus the blocks for features that are
+    switched on (RLM, the --dangerous approvals notice)."""
     parts = [BASE_SYSTEM_PROMPT]
-    if settings.eval_auto:
-        parts.append(_AUTO_EVAL_BLOCK)
     if settings.rlm_enabled:
         parts.append(_RLM_BLOCK)
     # --dangerous is process-lifetime, so this stays byte-stable across turns
@@ -465,16 +433,16 @@ def _build_server_context() -> str:
             f"can open or examine it in a browser at: {base_url}/workspace/myproject/app.html",
             "Substitute the actual relative path for any artifact you want to verify or share.",
             "",
-            "SELF-INSPECTION — questions about Pernix's own state (notifications, adaptive",
-            "proposals and batches, cron runs, dream, telos, canaries, other sessions):",
+            "SELF-INSPECTION — questions about Pernix's own state (notifications, reflect",
+            "verdicts, cron runs, dream, canaries, other sessions):",
             "- START at SYSTEM-MAP.md in the workspace: the machine-generated map of the DB",
             "  schema, data layout, API routes, and context blocks. Read it BEFORE guessing a",
             "  table name, path, or endpoint — it is regenerated every boot and cannot drift.",
             f"- The store is the SQLite file {db_path} (python3 sqlite3 from bash or repl) and this API.",
             f"- GET {base_url}/openapi.json lists every route with its query params and their DEFAULTS.",
             "  Read it before guessing an endpoint. A list route that defaults to one status hides the",
-            f"  rest: e.g. {base_url}/api/adaptive/proposals?status=all or ?id=<n> for a resolved proposal.",
-            f"- The code that produced the behaviour is under {code_root} (e.g. core/adaptive/engine.py,",
+            f"  rest: e.g. {base_url}/api/notifications?view=log for every row, not just what the bell shows.",
+            f"- The code that produced the behaviour is under {code_root} (e.g. core/reflect.py,",
             "  core/snooze.py). Read the function before asserting WHY something happened.",
             "- When a lookup fails, write 'not retrieved — would need <call>'. Never rebuild an id→content",
             "  mapping from timestamps or proximity; reflect flags table rows no tool result supports.",
@@ -645,18 +613,6 @@ def _build_space_block(session_id: str) -> str:
         return ""
 
 
-def _build_adaptive_block(session_id: str) -> str:
-    """Adaptive-layer prompt_notes + policies (plan 4e). Empty string while
-    the layer is off or holds nothing — never shifts bytes on first deploy."""
-    try:
-        from core.adaptive.render import build_adaptive_block
-
-        return build_adaptive_block(session_id)
-    except Exception as e:
-        logger.warning("Adaptive block unavailable: %s", e)
-        return ""
-
-
 def _build_temporal_context() -> str:
     """Build the STATIC temporal guidance section (birthdate + how to use time).
 
@@ -753,112 +709,6 @@ def _build_goal_burn(session_id: str) -> str:
             elapsed = int((datetime.now(timezone.utc) - datetime.fromisoformat(goal["started_at"])).total_seconds())
             parts.append(f"goal elapsed {elapsed}s/{int(goal['time_budget_s'])}s")
         return "Goal burn: " + " · ".join(parts) if parts else ""
-    except Exception:
-        return ""
-
-
-# The baseline line re-reads the soup directory and the calibration trace
-# window, and the volatile tail is rebuilt on every LLM round — a TTL keeps
-# that cost to once a minute. Baselines are trends, not to-the-second state;
-# a number up to a minute old answers "is the pool growing / is EIG red /
-# did an alarm open" exactly as well as a fresh one.
-_TELOS_BASELINE_TTL_S = 60
-_telos_baseline_cache: tuple[float, str] = (0.0, "")
-# (monotonic stamp, telos_dir, block) — dir-keyed so a redirected store
-# (tests, config change) never serves another store's stale block.
-_telos_drive_cache: tuple[float, str, str | None] = (0.0, "", None)
-
-
-def _telos_baseline_line(store) -> str:
-    """One line of drive-state numbers for the volatile tail.
-
-    Requested by the agent itself (2026-08-17): it was blind to its own pool
-    size, calibration, and alarm count unless it spent a tool call on
-    telos_status — on exactly the turns where the user asks about system
-    state. Injected like the token budget: ambiently, every turn.
-    """
-    import time as _time
-
-    global _telos_baseline_cache
-    stamp, cached = _telos_baseline_cache
-    now = _time.monotonic()
-    if cached and now - stamp < _TELOS_BASELINE_TTL_S:
-        return cached
-
-    hyps = store.list_hypotheses()
-    soup = sum(1 for h in hyps if h.get("status") == "soup")
-    gated = sum(1 for h in hyps if h.get("status") == "gated")
-    archived = store.count_archived("hypothesis")
-    alarms = len(store.list_alarms(open_only=True))
-
-    from core.telos.calibration import eig_calibration
-
-    calib = eig_calibration(store)
-    if calib.get("brier") is None:
-        eig = "EIG unevaluated"
-    else:
-        eig = f"EIG Brier {calib['brier']:.3f}/{calib['n']} (discount {calib['discount']:.2f}x)"
-
-    line = (
-        f"Baseline: pool {soup} soup / {gated} gated / {archived} archived · {eig} · "
-        f"{alarms} live alarm{'s' if alarms != 1 else ''}"
-    )
-    _telos_baseline_cache = (now, line)
-    return line
-
-
-def _build_telos_drive_block() -> str:
-    """Open telos questions + live alarms + baseline numbers for the volatile
-    tail (audit P5 port 3). The agent used to be unaware of its own drive
-    state unless it voluntarily called telos_status. Byte-identical output
-    (empty string) when telos is disabled; capped to three questions to bound
-    tail churn.
-
-    The WHOLE block is behind the 60s TTL now, not just the baseline line:
-    the question and alarm scans used to run raw on every compile — up to
-    max_tool_rounds full directory globs + YAML parses per turn, for FYI
-    content where 60 seconds of staleness costs nothing.
-    """
-    if not settings.telos_enabled:
-        return ""
-    import time as _time
-
-    global _telos_drive_cache
-    stamp, cached_dir, cached = _telos_drive_cache
-    now = _time.monotonic()
-    if cached is not None and cached_dir == settings.telos_dir and now - stamp < _TELOS_BASELINE_TTL_S:
-        return cached
-    try:
-        from core.telos.store import TelosStore
-
-        store = TelosStore.open()
-        qs = sorted(
-            store.list_questions(state="open"),
-            key=lambda q: (-float(q.get("surprise") or 0.0), q.get("created_at") or ""),
-        )[:3]
-        alarms = store.list_alarms(open_only=True)
-        lines = ["[TELOS] " + _telos_baseline_line(store)]
-        if qs:
-            lines.append(
-                "Open questions the idle loop is working on (FYI — answer opportunistically if your task touches one):"
-            )
-            for q in qs:
-                lines.append(
-                    f"- ({q.id}, surprise {float(q.get('surprise') or 0):.2f}) {str(q.get('text') or '')[:180]}"
-                )
-        if alarms:
-            # Alarm TEXT, not just a count — the count alone sent the agent
-            # off to spend a telos_status call on exactly the turns where the
-            # user was asking about system state (first-person audit §2.4).
-            previews = []
-            for a in alarms[:2]:
-                label = str(a.get("text") or a.get("reason") or a.get("kind") or a.get("id") or "alarm")
-                previews.append(label[:80])
-            suffix = f" — {'; '.join(previews)}" if previews else ""
-            lines.append(f"Open telos alarms: {len(alarms)}{suffix} (see telos_status)")
-        block = "\n".join(lines)
-        _telos_drive_cache = (now, settings.telos_dir, block)
-        return block
     except Exception:
         return ""
 
@@ -979,15 +829,24 @@ def _format_turn_ledger(snap: dict, anchor: str, sess: dict) -> str:
     lv = snap.get("last_verdict")
     if lv and lv.get("verdict") and lv["verdict"] != "pass":
         lesson = ""
+        strategy = ""
         try:
             payload = _json.loads(lv.get("payload_json") or "{}")
             lesson = str(payload.get("what_failed") or payload.get("diagnostic") or payload.get("reasoning") or "")
+            strategy = str(payload.get("strategy") or "")
         except Exception:
             pass
         lesson = " ".join(lesson.split())[:150]
+        # The grader's concrete instruction for the next attempt. Field case
+        # (session 3dc5a307d751): reflect said retry and named the approach,
+        # the ledger showed only what_failed, and the agent re-ran a variant
+        # of the same thing. On retry/escalate the strategy IS the actionable
+        # half; a pass never has one.
+        strategy = " ".join(strategy.split())[:400] if lv["verdict"] in ("retry", "escalate") else ""
         lines.append(
             f"- Reflect graded your previous turn: {lv['verdict']} (cause={lv.get('failure_cause', '?')})"
             + (f' — "{lesson}"' if lesson else "")
+            + (f' — suggested next: "{strategy}"' if strategy else "")
             + " [grader's opinion, not ground truth]"
         )
 
@@ -995,15 +854,6 @@ def _format_turn_ledger(snap: dict, anchor: str, sess: dict) -> str:
         lines.append(
             f"- Unanswered question you asked earlier: \"{' '.join(str(q.get('question', '')).split())[:100]}\""
         )
-    for p in snap.get("agent_proposals", []):
-        lines.append(f"- Your adaptive proposal #{p['id']} is still pending review")
-
-    changes = snap.get("adaptive_changes", [])
-    if changes:
-        parts = [f"{c['entry_id']} {c['action']} ({c.get('actor') or '?'})" for c in changes[:4]]
-        more = f" (+{len(changes) - 4} more)" if len(changes) > 4 else ""
-        lines.append(f"- Adaptive changes since your last turn: {', '.join(parts)}{more}")
-
     fails = snap.get("canary_fails", [])
     if fails:
         names = sorted({str(f.get("task") or "?") for f in fails})
@@ -1033,7 +883,6 @@ def _format_turn_ledger(snap: dict, anchor: str, sess: dict) -> str:
 def _build_volatile_tail(
     resource_status: str,
     goal_burn: str = "",
-    telos_block: str = "",
     workers_block: str = "",
     ledger_block: str = "",
 ) -> str:
@@ -1057,8 +906,6 @@ def _build_volatile_tail(
         lines.append(resource_status)
     if goal_burn:
         lines.append(goal_burn)
-    if telos_block:
-        lines.append(telos_block)
     if workers_block:
         lines.append(workers_block)
     if ledger_block:
@@ -1139,6 +986,8 @@ class ContextPayload:
     # tight to hold it — callers that dispatch with their own max_tokens
     # should clamp to this or the request overflows.
     effective_max_output: int = 0
+    # Pending delivery rows included in this request; never sent to the provider.
+    delivered_message_ids: tuple[int, ...] = ()
 
 
 @dataclass
@@ -1200,16 +1049,6 @@ def compile_context(
     if directives_block:
         system_parts.append(directives_block)
 
-    # Adaptive layer block (plan 4e): machine-curated prompt_notes/policies
-    # between directives and the skills catalog. Stable between applies
-    # (applies happen only in idle windows, so no mid-turn prefix bust, I8);
-    # omitted entirely while empty or disabled — flag-off output is
-    # byte-identical. routing_hints deliberately absent here: they render
-    # into the scout prompt only (I5).
-    adaptive_block = _build_adaptive_block(session_id)
-    if adaptive_block:
-        system_parts.append(adaptive_block)
-
     # Static skill catalog — cache-stable across turns; placed before the
     # per-turn scout report so prompt cache hits the same prefix every turn.
     skills_block = _build_available_skills_block()
@@ -1244,7 +1083,6 @@ def compile_context(
     volatile_tail = _build_volatile_tail(
         resource_status,
         goal_burn=_build_goal_burn(session_id) if goal_block else "",
-        telos_block=_build_telos_drive_block(),
         workers_block=_build_watched_workers_block(session_id),
         ledger_block=_build_turn_ledger(session_id, turn_user_msg_id),
     )
@@ -1323,13 +1161,37 @@ def compile_context(
     # the agent shouldn't pre-answer them. EXCEPTION: messages tagged with
     # metadata.injected=true are explicitly delivered via /api/chat/inject and
     # MUST be visible to the running turn (that is the whole point of inject).
+    def _delivery_meta(m: dict) -> dict:
+        raw = m.get("metadata")
+        try:
+            meta = json.loads(raw) if isinstance(raw, str) else raw
+            return meta if isinstance(meta, dict) else {}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {}
+
     def _is_injected(m: dict) -> bool:
+        return bool(_delivery_meta(m).get("injected"))
+
+    def _delivery_pending(m: dict) -> bool:
+        return m.get("role") == "user" and _delivery_meta(m).get("delivery_status") == "pending"
+
+    # Stuck/repeat notices are advice about the round that provoked them.
+    # Stamped with metadata.ephemeral_turn by the agent loop, they drop out of
+    # every LATER turn's history — a stale "You are repeating tool calls" read
+    # as standing policy and steered turns it had nothing to do with (session
+    # 3dc5a307d751). The rows remain in the DB for the transcript UI.
+    def _is_stale_ephemeral(m: dict) -> bool:
+        if m.get("role") != "system":
+            return False
         meta_raw = m.get("metadata")
         if not meta_raw:
             return False
         try:
             meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
-            return bool(meta.get("injected")) if isinstance(meta, dict) else False
+            owner = meta.get("ephemeral_turn") if isinstance(meta, dict) else None
+            if owner is None:
+                return False
+            return turn_user_msg_id is None or int(owner) != int(turn_user_msg_id)
         except (json.JSONDecodeError, TypeError, ValueError):
             return False
 
@@ -1337,10 +1199,11 @@ def compile_context(
         m
         for m in raw_messages
         if m["role"] not in ("compaction", "scout", "notice", "reflect", "model_divider", "eval")
-        and m["id"] > compacted_up_to
+        and (m["id"] > compacted_up_to or _delivery_pending(m))
         and not (
             turn_user_msg_id is not None and m["role"] == "user" and m["id"] > turn_user_msg_id and not _is_injected(m)
         )
+        and not _is_stale_ephemeral(m)
     ]
 
     # Reorder by logical turn group. Each non-user message tagged with
@@ -1496,6 +1359,9 @@ def compile_context(
         # Subscripting made one missing key a hard turn kill, and every
         # `_db_id` reader downstream already tolerates None.
         entry["_db_id"] = msg.get("id")
+        entry["_delivery_pending"] = _delivery_pending(msg)
+        if entry["_delivery_pending"]:
+            entry["_pinned"] = True
         entry["_created_at"] = msg.get("created_at")
         if tool_names:
             entry["_tool_names"] = tool_names
@@ -1542,6 +1408,9 @@ def compile_context(
     needs_compaction = history_tokens > int(history_budget * settings.compaction_threshold)
 
     # --- Strip internal `_`-prefixed fields before returning to the agent ---
+    delivered_message_ids = tuple(
+        m["_db_id"] for m in messages if m.get("_db_id") is not None and m.get("_delivery_pending")
+    )
     messages = _strip_private_fields(messages)
 
     return ContextPayload(
@@ -1560,6 +1429,7 @@ def compile_context(
         ),
         static_prefix_chars=static_prefix_chars,
         effective_max_output=effective_max_output,
+        delivered_message_ids=delivered_message_ids,
     )
 
 
@@ -1680,13 +1550,45 @@ def _trim_history(
 # Trim notice builder
 # ---------------------------------------------------------------------------
 
+# The notice is pinned, so it is the one message in the window that trim can
+# never take back: its tokens are added to history_tokens and stay there for
+# the rest of the turn. A turn that drops three hundred groups must not
+# answer a context problem with a three-hundred-line system message. Entries
+# past the cap collapse into one line naming their count and id span, which
+# session_read reaches exactly as well as a line each.
+_NOTICE_MAX_ENTRIES = 40
+_NOTICE_MAX_CHARS = 6000
+# A dropped plain assistant row gets the same verbatim allowance a dropped
+# user row gets. _snapshot already captured 500 characters of it; the
+# renderer used to show 80 and throw the rest away, so a milestone or a
+# negative result was reduced to its opening clause.
+_ASSISTANT_PREVIEW_CHARS = 500
+_OTHER_PREVIEW_CHARS = 80
+
+
+def _bound_notice_entries(entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split rendered entries into the ones the notice prints and the ones it
+    collapses. Dropped user messages are always printed — quoting the user's
+    intent verbatim is the whole reason the notice exists — and the newest
+    of the rest fill the remaining room, since trim drops oldest-first and
+    the newest drops are the ones the turn is still working with.
+    """
+    if len(entries) <= _NOTICE_MAX_ENTRIES:
+        return entries, []
+    users = [i for i, e in enumerate(entries) if e["kind"] == "user"]
+    others = [i for i, e in enumerate(entries) if e["kind"] != "user"]
+    room = max(_NOTICE_MAX_ENTRIES - len(users), 4)
+    keep = set(users[:_NOTICE_MAX_ENTRIES]) | set(others[-room:])
+    return [e for i, e in enumerate(entries) if i in keep], [e for i, e in enumerate(entries) if i not in keep]
+
 
 def _build_trim_notice(dropped_groups: list[dict]) -> str:
     """Render a single pinned system-role notice describing what trim dropped.
 
     The notice names msg_ids so the agent can recover via session_read(msg_id),
     and quotes any dropped user message verbatim (up to ~500 chars) so the
-    user's intent survives even after eviction.
+    user's intent survives even after eviction. Bounded: see
+    _NOTICE_MAX_ENTRIES.
     """
     if not dropped_groups:
         return ""
@@ -1704,11 +1606,13 @@ def _build_trim_notice(dropped_groups: list[dict]) -> str:
     lines.append("")
     lines.append("Dropped (oldest first):")
 
+    entries: list[dict] = []
     for grp in dropped_groups:
         kind = grp.get("kind")
         msgs = grp.get("msgs") or []
         if not msgs:
             continue
+        ids = [m.get("_db_id") for m in msgs if m.get("_db_id") is not None]
 
         if kind == "user":
             m = msgs[0]
@@ -1719,14 +1623,13 @@ def _build_trim_notice(dropped_groups: list[dict]) -> str:
             if len(full) > 500:
                 quote += "…"
             quote = quote.replace("\n", " ")
-            lines.append(f'  • user msg {mid} ({created}) — "{quote}"')
+            entries.append({"kind": kind, "ids": ids, "line": f'  • user msg {mid} ({created}) — "{quote}"'})
 
         elif kind == "assistant_group":
-            ids = [str(m.get("_db_id")) for m in msgs if m.get("_db_id") is not None]
             head = msgs[0]
             tool_names = head.get("_tool_names") or []
             total_chars = sum(int(m.get("content_len") or 0) for m in msgs)
-            ids_str = ",".join(ids)
+            ids_str = ",".join(str(i) for i in ids)
             if tool_names:
                 tools_label = (
                     f"{tool_names[0]} ×{len(tool_names)}"
@@ -1735,17 +1638,46 @@ def _build_trim_notice(dropped_groups: list[dict]) -> str:
                 )
             else:
                 tools_label = "tool call"
-            lines.append(f"  • assistant+tools {ids_str} ({tools_label}) — ~{total_chars} chars")
+            entries.append(
+                {
+                    "kind": kind,
+                    "ids": ids,
+                    "line": f"  • assistant+tools {ids_str} ({tools_label}) — ~{total_chars} chars",
+                }
+            )
 
         else:
-            # tool_orphan or other — show ids only
             for m in msgs:
                 mid = m.get("_db_id")
                 role = m.get("role")
                 preview = (m.get("content_preview") or "").strip()
-                lines.append(f"  • {role} msg {mid} — {preview[:80]}")
+                limit = _ASSISTANT_PREVIEW_CHARS if role == "assistant" else _OTHER_PREVIEW_CHARS
+                quote = preview[:limit]
+                if int(m.get("content_len") or 0) > len(quote):
+                    quote += "…"
+                entries.append(
+                    {
+                        "kind": kind,
+                        "ids": [mid] if mid is not None else [],
+                        "line": f"  • {role} msg {mid} — {quote}".replace("\n", " "),
+                    }
+                )
 
-    return "\n".join(lines)
+    kept, elided = _bound_notice_entries(entries)
+    lines.extend(e["line"] for e in kept)
+    if elided:
+        elided_ids = [i for e in elided for i in e["ids"]]
+        span = f"msg ids {min(elided_ids)}–{max(elided_ids)}" if elided_ids else "ids not recorded"
+        lines.append(
+            f"  • …and {len(elided)} further dropped item(s), {span} — "
+            "session_read(msg_id) reaches any of them individually"
+        )
+
+    text = "\n".join(lines)
+    if len(text) > _NOTICE_MAX_CHARS:
+        text = text[:_NOTICE_MAX_CHARS].rsplit("\n", 1)[0]
+        text += "\n  • …notice truncated — search_sessions(query) covers the rest of this session"
+    return text
 
 
 def _strip_private_fields(messages: list[dict]) -> list[dict]:

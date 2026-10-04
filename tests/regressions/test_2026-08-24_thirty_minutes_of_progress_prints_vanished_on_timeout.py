@@ -16,12 +16,13 @@ def test_python_child_output_is_unbuffered_and_survives_timeout(tmp_path, monkey
     monkeypatch.setattr("config.settings.shell_env_mode", "allowlist")
     # A python child that prints, then outlives the timeout. Buffered, the
     # print would be lost; unbuffered, the partial block carries it.
-    out = bash("python3 -c \"import time; print('PROGRESS-MARKER-1'); time.sleep(30)\"", timeout=3)
+    out, meta = bash("python3 -c \"import time; print('PROGRESS-MARKER-1'); time.sleep(30)\"", timeout=3)
     assert "timed out" in out
+    assert meta["timed_out"] is True
     assert "PROGRESS-MARKER-1" in out
 
 
 def test_env_carries_unbuffered_flag(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
-    out = bash("echo flag=$PYTHONUNBUFFERED")
+    out, _meta = bash("echo flag=$PYTHONUNBUFFERED")
     assert "flag=1" in out

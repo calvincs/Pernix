@@ -133,17 +133,20 @@ async def test_push_subscribe():
                 "auth": "fake_auth",
             },
         )
-    assert resp.status_code in (200, 400)
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Missing endpoint or keys"
 
 
-async def test_push_public_key():
+async def test_push_public_key(monkeypatch):
+    monkeypatch.setattr("config.settings.vapid_public_key", "")
     from api.routers import push
 
     app = _make_app(push.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/push/vapid-public-key")
     # 503 = VAPID not configured (the endpoint's no-config response)
-    assert resp.status_code in (200, 503)
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "VAPID not configured"
 
 
 # ===========================================================================
@@ -151,14 +154,16 @@ async def test_push_public_key():
 # ===========================================================================
 
 
-async def test_settings_access_qr():
+async def test_settings_access_qr(monkeypatch):
+    monkeypatch.setattr("config.settings.network_enabled", False)
     from api.routers import health
 
     app = _make_app(health.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/settings/access-qr")
     # 404 = network mode disabled; 403 = auth middleware in a full app
-    assert resp.status_code in (200, 403, 404)
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Network mode not enabled"
 
 
 # ===========================================================================
@@ -166,22 +171,34 @@ async def test_settings_access_qr():
 # ===========================================================================
 
 
-async def test_models_validate():
+async def test_models_validate(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     from api.routers import models as models_router
 
     app = _make_app(models_router.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/models/validate?model=test-model")
-    assert resp.status_code in (200, 422, 503)
+    assert resp.status_code == 200
+    assert resp.json() == {"valid": False, "error": "OPENROUTER_API_KEY not set"}
 
 
-async def test_models_ollama():
+async def test_models_ollama(monkeypatch):
+    import httpx
+
+    def response(request):
+        assert request.url.path == "/api/tags"
+        return httpx.Response(200, json={"models": [{"name": "fixture-model", "size": 123}]})
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: AsyncClient(transport=httpx.MockTransport(response), **kwargs)
+    )
     from api.routers import models as models_router
 
     app = _make_app(models_router.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/models/ollama")
-    assert resp.status_code in (200, 503)
+    assert resp.status_code == 200
+    assert resp.json()["models"][0]["name"] == "fixture-model"
 
 
 # ===========================================================================
@@ -206,7 +223,8 @@ async def test_chat_compact_session():
     sid = db.create_session(title="Compact Test")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(f"/api/compact/{sid}")
-    assert resp.status_code in (200, 400)
+    assert resp.status_code == 200
+    assert resp.json()["compacted"] is False
 
 
 async def test_chat_partial():
@@ -326,7 +344,6 @@ async def test_run_post_task_hooks_no_title_change(mock_llm_client, monkeypatch)
     from sessions.state import AgentSession
 
     monkeypatch.setattr("config.settings.reflect_enabled", False)
-    monkeypatch.setattr("config.settings.eval_auto", False)
     monkeypatch.setattr("config.settings.memory_recall", False)
 
     sid = db.create_session(title="Already Titled")
@@ -352,7 +369,7 @@ async def test_context_not_found():
     app = _make_app(context.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/context/nonexistent-session")
-    assert resp.status_code in (200, 404)
+    assert resp.status_code == 404
 
 
 # ===========================================================================

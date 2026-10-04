@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -80,10 +81,10 @@ class ToolExecutionResult:
 # Policy refusals — a disabled tool, a retry exclusion, a scheduled job's
 # allow-list, a session type that may not use the tool, the approval gate —
 # are errors for the MODEL (it must stop calling) but say nothing about the
-# TOOL. They are tagged so the turn summary, reflect, candor and telos count
+# TOOL. They are tagged so the turn summary, reflect and synthesis count
 # them apart from failures: on the live box 15 charter refusals in one week
-# were graded as tool failures, dragging candor's tool_ok for bash/glob down
-# and minting telos hypotheses about tools that never ran.
+# were graded as tool failures and skewed every reliability reading for
+# bash/glob.
 REFUSAL_MARKER = "refused"
 _REFUSAL_CONTENT_HINTS = (
     "is not permitted in this scheduled run",
@@ -95,10 +96,72 @@ _REFUSAL_CONTENT_HINTS = (
 )
 
 
+# By-design unavailability — a tool that cannot do its job in THIS kind of
+# session and says so without anything having gone wrong. `ask_user` in a
+# cron session is the case that motivated it: no user is present to answer,
+# so the tool returns advice instead of a question. That is not an error and
+# not a refusal (nothing was declined), but it opened as "Error:", so the
+# executor set was_error, tool_summary booked a failure, candor emitted
+# tool_ok(ask_user)=False, and the candor producer minted a live routing hint
+# telling every scout to "prefer an alternative" to asking the user — off 8
+# uses and 7 by-design non-answers.
+#
+# A tool signals it by prefixing its returned string with UNAVAILABLE_PREFIX.
+# The prefix stays on the content the model reads (it is a clear, honest
+# label) and is mirrored into metadata so downstream consumers test a flag
+# rather than a string. Health metrics record neither success nor failure:
+# a call that never ran is not evidence about the tool either way.
+UNAVAILABLE_MARKER = "unavailable"
+UNAVAILABLE_PREFIX = "[unavailable]"
+
+
 def _refusal(name: str, content: str) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_name=name, content=content, was_error=True, latency_ms=0, metadata={REFUSAL_MARKER: True}
     )
+
+
+# A negative lookup. The tool answered correctly that the thing asked for
+# does not exist (a skill, a resource path, a memory entry) — the agent asked
+# for the wrong thing, the tool did not fail. The agent still sees an error
+# so it corrects course, but reliability accounting (tool_summary failures,
+# scout_signals) must not read it as an unreliable tool: on
+# the live box four such misses minted a "read_skill_resource degraded —
+# prefer an alternative" routing hint. A tool signals it by prefixing its
+# returned error string with MISS_PREFIX.
+MISS_MARKER = "miss"
+MISS_PREFIX = "[miss]"
+
+
+# A shell command ran to completion and exited non-zero. That is an error the
+# agent must see — but bash worked, so it is not evidence about the tool, and
+# it must not arm the stuck detector's error-retry signals: `grep` exits 1 on
+# no match and a reproduction test is meant to fail. A tool signals it in the
+# structured metadata it returns alongside its output.
+COMMAND_FAILED_MARKER = "command_failed"
+
+# Where a structured result states its own outcome. Present means the tool
+# knows whether the call failed and the executor must not guess from prose.
+OUTCOME_KEY = "was_error"
+
+
+def is_command_failure(result: ToolExecutionResult) -> bool:
+    """True when the command failed but the tool that ran it did not."""
+    return bool((result.metadata or {}).get(COMMAND_FAILED_MARKER))
+
+
+def is_miss(result: ToolExecutionResult) -> bool:
+    """True when the tool correctly reported that the target does not exist."""
+    if (result.metadata or {}).get(MISS_MARKER):
+        return True
+    return (result.content or "").startswith(MISS_PREFIX)
+
+
+def is_unavailable(result: ToolExecutionResult) -> bool:
+    """True when the tool was unavailable by design, not failing."""
+    if (result.metadata or {}).get(UNAVAILABLE_MARKER):
+        return True
+    return (result.content or "").startswith(UNAVAILABLE_PREFIX)
 
 
 def is_policy_refusal(result: ToolExecutionResult) -> bool:
@@ -133,6 +196,14 @@ def _resolve_timeout(tool, arguments: dict | None) -> int:
     `max_timeout` at registration; otherwise asyncio.wait_for below caps the
     call at the tool's default and the caller's override does nothing at all.
 
+    The same agreement runs the other way for a tool with an internal deadline
+    of its own: whatever it registers is what this function enforces, so a
+    registration SMALLER than the tool's own budget means dispatch gives up on
+    work the tool was still authorised to do. http_get registered 15 against a
+    60s whole-exchange deadline and lost valid 25-second fetches at 20s, with
+    the pool thread finishing them for nobody. Tools with an internal deadline
+    derive their registered timeout from it rather than typing it twice.
+
     The grace is added on EVERY path, not just the caller-override one. A
     default `bash` call gives dispatch and the tool the same budget
     (shell_timeout), but the dispatch clock starts before setup the tool does
@@ -165,6 +236,152 @@ def _session_cancel_requested(context: dict | None) -> bool:
     except Exception:
         return False
     return bool(session is not None and getattr(session, "cancel_requested", False))
+
+
+# What a pool thread returns when it declined to enter the tool. A value,
+# not an exception: the task that would have retrieved an exception is by
+# definition already unwinding, and an unretrieved one is only log noise.
+_DISPATCH_CANCELLED = object()
+
+
+class _DispatchGate:
+    """Settles, exactly once, whether one queued call gets to run.
+
+    Both pools are bounded, so a submitted call can sit in the executor queue
+    with no thread on it — and cancelling the task that awaits it cancels
+    neither the queued item nor the callable. The pool thread claims the
+    dispatch immediately before the tool's first line; the cancel path claims
+    it on the way out. Whoever takes the lock first decides, so a cancel that
+    lands an instant before the tool starts drops the call outright, and one
+    that lands an instant after it knows the tool is running and goes after
+    its children instead. Without that hand-off the queue-to-running boundary
+    is a coin toss, and the losing side is a file write that happens after
+    the user pressed stop.
+    """
+
+    __slots__ = ("_lock", "_cancelled", "_running")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._running = False
+
+    def claim_for_run(self) -> bool:
+        """Pool thread: may this call enter the tool?"""
+        with self._lock:
+            if self._cancelled:
+                return False
+            self._running = True
+            return True
+
+    def cancel(self) -> bool:
+        """Dispatcher: this call must not start. True if it already had."""
+        with self._lock:
+            self._cancelled = True
+            return self._running
+
+
+class DispatchCancelled(asyncio.CancelledError):
+    """A tool discovered, from its own thread, that its dispatch is over.
+
+    Tools that hand work to the event loop cannot be recalled by the
+    dispatcher's fut.cancel(): that cancels the wrapper future, never the
+    coroutine behind it. They cooperate instead — they watch their dispatch's
+    scope and raise this the moment it closes.
+
+    It derives from CancelledError on purpose. A tool that returns a string
+    saying "the call was cancelled" hands the model a normal tool result and
+    the round continues as if nothing happened; raising unwinds the round the
+    same way a stop that landed one instruction earlier would.
+    """
+
+
+class AsyncOpScope:
+    """Ownership link between one dispatch and the loop-side work it started.
+
+    A sync tool on a pool thread marshals a coroutine onto the event loop with
+    run_coroutine_threadsafe and blocks on the returned
+    concurrent.futures.Future. Nothing the dispatcher holds reaches that
+    future: cancelling the task that awaits the pool, killing the call's
+    subprocesses, and claiming the gate all miss it. So a stop, a dispatch
+    timeout, or a saturated-pool give-up left the coroutine running to
+    completion — for MCP that means a remote request transmitted after the
+    user pressed stop — and left the pool thread parked on it for the tool's
+    whole timeout.
+
+    Every dispatch now carries a scope. The tool registers its future here;
+    cancelling the scope cancels each registered future, which both wakes the
+    blocked thread at once and propagates cancellation into the coroutine on
+    the loop. Registration and cancellation share one lock, so a future
+    registered after the scope closed is cancelled on the spot rather than
+    slipping through the gap between the two.
+
+    The cooperative flag lives here too, so one object answers "is this
+    dispatch over?" for both kinds of tool: those with a loop-side future
+    register it, those with nothing to cancel poll `event`.
+    """
+
+    __slots__ = ("_lock", "_cancelled", "_futures", "event")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._futures: list = []
+        # The same threading.Event that has always ridden in ctx["_cancel_event"].
+        self.event = threading.Event()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def register(self, fut) -> bool:
+        """Take ownership of a loop-side future.
+
+        False means the dispatch was already over — the future is cancelled
+        here rather than handed back, because the caller is on a pool thread
+        and the window it lost is exactly the one that leaks an operation.
+        """
+        with self._lock:
+            if self._cancelled:
+                fut.cancel()
+                return False
+            self._futures.append(fut)
+            return True
+
+    def unregister(self, fut) -> None:
+        """Terminal path for one operation — result, error, or timeout."""
+        with self._lock:
+            try:
+                self._futures.remove(fut)
+            except ValueError:
+                pass
+
+    def cancel(self) -> None:
+        """Dispatcher: this call is over. Idempotent, because several terminal
+        paths can run for one dispatch (a timeout whose caller then cancels)."""
+        with self._lock:
+            self._cancelled = True
+            futures, self._futures = self._futures, []
+        self.event.set()
+        for fut in futures:
+            try:
+                fut.cancel()
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Could not cancel a registered async op", exc_info=True)
+
+
+def dispatch_cancelled(context: dict | None) -> bool:
+    """Whether the dispatch that owns this tool call is over.
+
+    The read side of AsyncOpScope for code running on a pool thread. Safe on a
+    context that carries neither the scope nor the flag (a direct
+    execute_sync, a test), which simply means nothing has cancelled it.
+    """
+    scope = (context or {}).get("_async_ops")
+    if scope is not None and scope.cancelled:
+        return True
+    ev = (context or {}).get("_cancel_event")
+    return bool(ev is not None and ev.is_set())
 
 
 def _kill_tool_subprocess(context: dict | None, call_id: str) -> None:
@@ -225,10 +442,26 @@ def _batch_timeout(indices: list[int], tool_calls: list[dict], registry: ToolReg
 
 
 def _is_unattended_session(sid: str) -> bool:
-    """Return True for cron/canary sessions and workers spawned from them.
+    """Return True for sessions that cannot reach a human.
 
-    These run without a user present, so the ask_user → approve_dangerous_tool
-    flow is not viable and the dangerous gate is skipped.
+    Three cases, all the same rule: the dangerous gate exists to put a question
+    in front of a person, so where no person is reachable the gate is not a
+    protection — it is a dead end that turns a granted tool into an unusable
+    one.
+
+      1. cron/canary sessions — nobody is watching.
+      2. workers spawned from them — same, one level down.
+      3. any session whose EXCLUSIVE tool_allowlist omits `ask_user` — the
+         harness itself removed the ability to ask. Worker kinds
+         (orchestration/kinds.py) and scheduled-job charters both set that
+         allowlist, and the schema builder intersects it AFTER the builtin
+         force-add, so `ask_user` really is gone from the surface.
+
+    Case 3 is a field fix (Agent Mesh build, 2026-09-07): the `research` worker
+    kind grants `browse_web` (safety_level="dangerous") while its allowlist
+    drops `ask_user`, so all four research workers hit 11 approval refusals on
+    a tool the harness had deliberately handed them, with no move available
+    that could ever clear the gate.
     """
     if not sid:
         return False
@@ -241,7 +474,11 @@ def _is_unattended_session(sid: str) -> bool:
         return True
     if s.session_type == "worker" and s.parent_session_id:
         parent = get_manager().get(s.parent_session_id)
-        return bool(parent and parent.session_type in ("cron", "canary"))
+        if parent and parent.session_type in ("cron", "canary"):
+            return True
+    allowlist = getattr(s, "tool_allowlist", None)
+    if allowlist and "ask_user" not in allowlist:
+        return True
     return False
 
 
@@ -403,16 +640,19 @@ async def _execute_single(
                     latency_ms=0,
                 )
 
-    # Route custom tools to the workspace venv before execution.
-    # ensure_workspace_venv_on_path() is idempotent — no-op if already set.
-    if tool.source == "custom":
-        from core.tools.paths import ensure_workspace_venv_on_path
-
-        ensure_workspace_venv_on_path()
-
     timeout = _resolve_timeout(tool, arguments)
     start = time.monotonic()
     call_id = f"{name}@{next(_call_id_counter)}"
+    # Cooperative cancellation for tools with nothing to kill. _kill_tool_
+    # subprocess is the only lever this module has once a worker thread is
+    # inside a tool, and it does nothing at all for pure-Python work: an
+    # http_get whose dispatch timed out kept fetching, holding a pool slot and
+    # an open socket, long after the model was told the call had ended. Tools
+    # that can unwind read this flag at their own safe points; tools that
+    # marshal a coroutine onto the loop register its future on the scope, so
+    # cancelling this dispatch reaches the coroutine too.
+    scope = AsyncOpScope()
+    cancel_event = scope.event
     try:
         # Capture the running event loop so tools on worker threads can
         # schedule coroutines back onto it via run_coroutine_threadsafe().
@@ -422,6 +662,8 @@ async def _execute_single(
         # Identifies this dispatch to any subprocess the tool registers, so a
         # timeout kills this call's children and nobody else's.
         ctx["_call_id"] = call_id
+        ctx["_cancel_event"] = cancel_event
+        ctx["_async_ops"] = scope
         if workspace_override:
             ctx["workspace_override"] = workspace_override
         if workspace_home:
@@ -441,10 +683,18 @@ async def _execute_single(
         # time, then the tool's real timeout measured from the moment a thread
         # actually enters it.
         started = asyncio.Event()
+        gate = _DispatchGate()
 
         def _runner():
-            # Runs on the pool thread. call_soon_threadsafe, not Event.set:
-            # asyncio.Event is not thread-safe.
+            # Runs on the pool thread, possibly minutes after submission.
+            # Everything the dispatcher decided in the meantime is checked
+            # here, at the last instruction before the tool can touch
+            # anything: the dispatch's own cancel, and the session-wide stop
+            # that a sibling call's dispatcher may have observed instead.
+            if _session_cancel_requested(context) or not gate.claim_for_run():
+                return _DISPATCH_CANCELLED
+            # call_soon_threadsafe, not Event.set: asyncio.Event is not
+            # thread-safe.
             loop.call_soon_threadsafe(started.set)
             return registry.execute_sync(name, arguments, ctx)
 
@@ -459,10 +709,12 @@ async def _execute_single(
         if not started.is_set() and not fut.done():
             # Never got a thread inside the ceiling. Report saturation as
             # itself rather than as a tool timeout — the two have different
-            # causes and different fixes. fut.cancel() drops the queued item
-            # if the executor has not dequeued it yet; if it loses that race
-            # the call runs to completion with nobody awaiting it, which is
-            # the same exposure a dispatch timeout already carries.
+            # causes and different fixes. The dispatcher has given up, so the
+            # call must not run later with nobody awaiting it: the gate stops
+            # it at the pool thread even when fut.cancel() loses the race to
+            # a dequeue.
+            gate.cancel()
+            scope.cancel()
             fut.cancel()
             latency = int((time.monotonic() - start) * 1000)
             registry.metrics[name].record_timeout(latency)
@@ -488,6 +740,12 @@ async def _execute_single(
             )
 
         raw = await asyncio.wait_for(fut, timeout=timeout)
+        if raw is _DISPATCH_CANCELLED:
+            # The pool thread declined to start: the session asked to stop
+            # while this call was queued. Nothing ran, so there is nothing to
+            # kill and nothing to say about the tool — unwind the round the
+            # same way an in-flight cancel does.
+            raise asyncio.CancelledError()
         latency = int((time.monotonic() - start) * 1000)
 
         # execute_sync may return (str, dict) for structured metadata
@@ -496,11 +754,35 @@ async def _execute_single(
         else:
             result, metadata = raw, {}
 
-        was_error = (not result) or result.startswith("Error:") or _is_failure_verdict(result)
+        # By-design unavailability is neither a success nor a failure, so it
+        # is settled before the error test and leaves per-tool health alone.
+        unavailable = isinstance(result, str) and result.startswith(UNAVAILABLE_PREFIX)
+        miss = isinstance(result, str) and result.startswith(MISS_PREFIX)
+        # A tool that returns structured metadata states its own outcome, and
+        # that verdict wins. Prefix classification stays the fallback for the
+        # bare-string tools, which are most of them — but it is a guess, and
+        # bash's `[cwd: ...]` header defeated it for every command bash ever
+        # ran, so a failing test suite was booked as a successful call.
+        declared = metadata.get(OUTCOME_KEY) if isinstance(metadata, dict) else None
+        command_failed = bool(metadata.get(COMMAND_FAILED_MARKER)) if isinstance(metadata, dict) else False
+        if isinstance(declared, bool):
+            was_error = miss or declared
+        else:
+            was_error = miss or (
+                (not unavailable) and ((not result) or result.startswith("Error:") or _is_failure_verdict(result))
+            )
 
-        if was_error:
+        if unavailable:
+            metadata = {**(metadata or {}), UNAVAILABLE_MARKER: True}
+        elif miss:
+            # An error for the agent, but not a mark against the tool.
+            metadata = {**(metadata or {}), MISS_MARKER: True}
+        elif was_error and not command_failed:
             registry.metrics[name].record_failure(result, latency)
         else:
+            # The failed command included: the tool did its job. Health
+            # metrics that said otherwise would mint a "bash degraded"
+            # routing hint out of tests that were meant to fail.
             registry.metrics[name].record_success(latency)
 
         _credit_long_call(context, latency)
@@ -517,7 +799,10 @@ async def _execute_single(
         _credit_long_call(context, latency)
         # The worker thread is still blocked in the tool and cannot be
         # cancelled. Kill any subprocess it spawned so it unwinds instead of
-        # holding a tool-executor thread for the child's full runtime.
+        # holding a tool-executor thread for the child's full runtime, raise
+        # the cooperative flag for tools with no subprocess to kill, and
+        # cancel any coroutine this call left running on the event loop.
+        scope.cancel()
         _kill_tool_subprocess(context, call_id)
         return ToolExecutionResult(
             tool_name=name,
@@ -527,13 +812,32 @@ async def _execute_single(
         )
     except asyncio.CancelledError:
         latency = int((time.monotonic() - start) * 1000)
-        registry.metrics[name].record_failure("cancelled", latency)
-        # Returning an error result here swallowed the cancel: Task.cancel()
-        # was consumed by the awaited future, _must_cancel never set, and the
-        # sequential loop dispatched the NEXT tool while the user's bash
-        # child kept running to its own timeout. Kill the child and let the
-        # cancel unwind the round; the agent loop stubs the tool rows.
-        _kill_tool_subprocess(context, call_id)
+        # Cancelling the task that awaits a pool future cancels neither the
+        # queued item nor the callable, and killing the subprocesses of a
+        # tool that has not started yet cannot stop it — a saturated pool
+        # would hand the call a thread minutes later and run it, side
+        # effects and all, after the session had stopped. Claim the gate
+        # first (so a thread that has not entered the tool drops the call),
+        # then fut.cancel(), which succeeds only while the item is still
+        # queued. Only if the tool really was already running is there a
+        # child to kill or anything to record against the tool.
+        #
+        # scope.cancel() is the third lever, for a tool already inside a
+        # loop-side operation: it cancels the coroutine that tool is blocked
+        # on, which is the only way to stop an MCP request that has not yet
+        # been transmitted and the only way to get the pool thread back
+        # before that call's own timeout.
+        was_running = gate.cancel()
+        scope.cancel()
+        fut.cancel()
+        if was_running:
+            registry.metrics[name].record_failure("cancelled", latency)
+            # Returning an error result here swallowed the cancel: Task.cancel()
+            # was consumed by the awaited future, _must_cancel never set, and the
+            # sequential loop dispatched the NEXT tool while the user's bash
+            # child kept running to its own timeout. Kill the child and let the
+            # cancel unwind the round; the agent loop stubs the tool rows.
+            _kill_tool_subprocess(context, call_id)
         raise
     except Exception as e:
         latency = int((time.monotonic() - start) * 1000)

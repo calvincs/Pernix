@@ -418,7 +418,27 @@ async def test_finalize_worker_header_round_ceiling():
     await mgr._finalize_worker(w)
     text = (Path(_s.workspace_dir) / f".worker_{w.session_id[:12]}_summary.md").read_text()
     assert text.startswith("# INCOMPLETE")
-    assert "round ceiling" in text
+    # The header names the reason it actually got, so the parent can tell a
+    # round ceiling from a stuck loop from a failed compaction.
+    assert "round_ceiling" in text
+
+
+async def test_finalize_worker_header_stuck_loop():
+    """A worker force-broken out of a repetition loop is incomplete too, and
+    must not be reported as the round budget running out (Agent Mesh build:
+    four research workers died at single-digit round numbers)."""
+    from pathlib import Path
+
+    from config import settings as _s
+
+    mgr = _make_manager()
+    w = _make_worker_with_assistant(mgr, "going in circles")
+    w.termination_reason = "stuck_loop"
+    await mgr._finalize_worker(w)
+    text = (Path(_s.workspace_dir) / f".worker_{w.session_id[:12]}_summary.md").read_text()
+    assert text.startswith("# INCOMPLETE")
+    assert "stuck_loop" in text
+    assert "round_ceiling" not in text
 
 
 async def test_finalize_worker_header_cancelled():
@@ -593,7 +613,8 @@ async def test_budget_exhaustion_fires_user_notification(monkeypatch):
          _broadcast_session_timeout_notification.
       2. The notification carries the source session_id and a body
          that explains the user's recovery path ("send a new message").
-      3. db.add_notification persists for the bell panel.
+      3. db.add_notification persists for the bell panel (via core.notices;
+         a normal session's sessions.timeout is interrupt tier → urgency high).
     """
     from sessions import manager as mgr_mod
 
@@ -609,7 +630,8 @@ async def test_budget_exhaustion_fires_user_notification(monkeypatch):
     notify_calls: list[dict] = []
     real_add = mgr_mod.db.add_notification
 
-    def capturing_add(session_id="", title="", body="", urgency="normal"):
+    # core.notices writes the row with extra fields (category, tier, link...).
+    def capturing_add(session_id="", title="", body="", urgency="normal", **_kw):
         notify_calls.append(
             {
                 "session_id": session_id,
@@ -970,7 +992,8 @@ def test_finalizing_reaper_respects_background_refs():
     session = mgr.get(sid)
 
     # Drive into FINALIZING via the state machine.
-    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
     session.termination_reason = "complete"
     sv2.transition(
         session,
@@ -1004,7 +1027,8 @@ def test_finalizing_reaper_fires_when_no_background_refs():
     sid = mgr.create_session(title="Truly Stuck FINALIZING")
     session = mgr.get(sid)
 
-    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
     session.termination_reason = "complete"
     sv2.transition(
         session,
@@ -1189,19 +1213,23 @@ async def test_spawn_detached_ignores_cancellation():
 def test_no_bare_create_task_in_manager():
     """Regression guard: every detached task must go through _spawn_detached.
 
-    Two call shapes are legitimate and excluded:
+    Three call shapes are legitimate and excluded:
       * `session.task = asyncio.create_task(...)` — an owned turn handle;
         the session itself holds the strong reference.
       * the single call inside _spawn_detached, which is the wrapper.
+      * the single call inside _start_turn_task, the turn wrapper: it holds
+        its own strong reference in _live_turn_tasks so the shutdown drain
+        can find turns that session.task has already been overwritten past.
     """
     import ast
     import pathlib
 
     tree = ast.parse(pathlib.Path("sessions/manager.py").read_text())
 
+    wrappers = {"_spawn_detached", "_start_turn_task"}
     offenders: list[int] = []
     for fn in ast.walk(tree):
-        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) or fn.name == "_spawn_detached":
+        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) or fn.name in wrappers:
             continue
         # Assignment targets of the form <something>.task = ... are owned.
         owned_calls = {
@@ -1279,3 +1307,7 @@ def test_no_positional_indexing_of_queue_entries():
     src = pathlib.Path("sessions/manager.py").read_text()
     bad = [ln.strip() for ln in src.splitlines() if re.search(r"\bentry\[\d\]|\b_e\[\d\]|\be\[\d\]", ln)]
     assert not bad, f"positional access to queue entries remains: {bad}"
+
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

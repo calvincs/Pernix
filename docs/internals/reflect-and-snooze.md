@@ -1,11 +1,13 @@
 # Reflect and Snooze
 
+> **Notifications.** Every "notification" this page mentions goes through `core/notices.py` and lands in the tier its category is registered under — most self-maintenance receipts are *log* tier (the bell's Activity tab, never a badge); only things that need you interrupt. See [guides/notifications.md](../guides/notifications.md) for the full list.
+
 Two non-obvious subsystems that run alongside the agent loop:
 
 - **Reflect** — a quality-gate pass that runs after every turn, verifies whether the user's intent was actually fulfilled, and can trigger bounded retries if it wasn't.
 - **Snooze** — idle-time housekeeping that runs in the background when no sessions are active, deduplicating memory, consolidating clusters, extracting user-profile facts, archiving old post-mortems — and, when enabled, running the [Dream](dream.md) introspection step.
 
-Both are off the critical path of any single user request, but they shape how Pernix behaves over weeks and months. This page explains what each does and where to tune it.
+Snooze and deferred ordinary-chat review run in the background; in-turn worker and cron review remains on the completion path. Both shape how Pernix behaves over weeks and months. This page explains what each does and where to tune it.
 
 ---
 
@@ -24,14 +26,28 @@ Reflect sees the **current attempt's transcript** with verbatim tool result bodi
 
 This is what lets reflect verify factual claims against what the tools actually returned, instead of grading them against its own training-data priors.
 
+### Factual correction provenance
+
+The evidence also includes paired tool-call IDs, request arguments and result
+excerpts. A factual failure must cite an observed result and a later verification
+for the same subject, with verbatim quotes. An abandoned earlier fetch cannot
+invalidate a corrected later fetch. The guard withholds unsupported corrections:
+verification becomes `unknown`, corrective retry/lesson fields are cleared, and
+no corrective notification is sent. Deterministic gates remain enforced.
+
+This validates attribution, not arbitrary semantic truth. Truncated or absent
+sources cannot support a correction. The nightly grader hold-out counts a
+withheld factual correction as ungradable rather than crediting it as a pass.
+See [canary.md](canary.md#the-trust-tab) for the Trust view.
+
 ### Refusals are not failures
 
 The TOOL EXECUTION SUMMARY counts `failures` (the tool ran and failed) apart
 from `refusals` (the harness declined the call: a scheduled job's
 allow-list, a retry exclusion, a disabled tool, the approval gate). The
 executor tags refusals at the source (`core.tools.executor.is_policy_refusal`)
-and `core.agent.record_tool_outcome` keeps them out of `failures`, so reflect,
-candor's `tool_ok`, telos' anomaly scan and synthesis never read "bash
+and `core.agent.record_tool_outcome` keeps them out of `failures`, so reflect
+and synthesis never read "bash
 failed 7 times" for seven calls bash was told not to make. Reflect still
 sees them — as `policy refusal(s)` and REFUSED lines — and grades a breach
 only when the user or the charter forbade the tool. The rubric also requires
@@ -140,6 +156,37 @@ separate defensive coercion) and a grade that omits `confidence` entirely
 are excluded on purpose, so the floor can't undo that conservative default
 by flipping it back to pass.
 
+**Verdict is a retry disposition; `verification` is the trust state.** The
+floor answers "should this turn run again?" — and "no" is not the same
+sentence as "the deliverable checks out". Both were carried on `verdict`
+until 2026-09-08, so a grade meaning *I could not see the evidence, and
+another attempt would not produce any* reached the parent as a plain pass;
+the `[downgraded from ...]` marker was appended to the END of `reasoning`,
+which is exactly where `get_worker_transcript`'s 200-char clip removed it.
+
+`ReflectResult.verification` is now a separate channel — `verified` /
+`partial` / `unknown`, plus `verification_reason`, with `""` meaning a grade
+written before the field existed (read as "unstated", behaving exactly as
+before). The floor's downgrade and the `failure_cause=none` coercion both
+record `unknown`; a pass that still names `missing` evidence or an
+unestablished deliverable records `partial`; a model may state its own.
+`apply_verification_receipts` then overlays what the deterministic gates
+actually did: a failing gate leaves `unknown`, a **broken** gate (one that
+could not run at all) caps the state at `partial` no matter how confident
+the grade was, and a gate that ran and passed is evidence the grader did not
+have — enough to lift `unknown` to `partial`, never enough on its own to
+certify work the gate does not cover.
+
+Consumers, and how each reads it:
+
+| Consumer | Reads |
+| --- | --- |
+| `get_worker_result` (`TrustState.verification_note`) | `pass` + non-`verified` → a `# PASS BUT UNVERIFIED` header naming the state and the reason |
+| `_finalize_worker`'s stamp | the same header, from the same builder — so the file and the reader agree |
+| `_build_resume_message` | `pass but UNVERIFIED (verification=…)`, and the worker joins the ⚠ inspect list |
+| `get_worker_transcript` | `verification=` beside `verdict=`, outside the clipped `reasoning` |
+| retry control flow (`hooks._maybe_reflect`), synthesis, metrics, feedback, scout's post-mortem read, dream validation | unchanged: they act on the retry disposition, which is what `verdict` still means. `verification` is advisory to them and deliberately does not gate a retry — the floor exists precisely so ambiguity does not force one. |
+
 ### Failure classification
 
 When reflect returns `retry` or `escalate`, it also classifies the *cause*:
@@ -202,35 +249,45 @@ Each cycle walks an ordered ladder of activities. `core/snooze.py` owns the life
 | 10 | Signal synthesis | Fold post-mortems into tool/skill performance counters (and, per model, into the routing counters behind scout's `[MODEL ROUTING INTEL]` brief). |
 | 11 | Post-mortem TTL | Archive post-mortems past `post_mortem_retention_days` (default 90). |
 | 12a | RLM run cleanup | Delete `data/workspace/rlm/<run_id>/` dirs + `rlm_runs` rows older than `rlm_run_retention_days` (default 30). Running runs are never touched. |
-| 12b | Candor maintenance | When `candor_enabled`: run the admission gate, drain the observation buffer, checkpoint the store. When `adaptive_enabled` too: queue `routing_hint` edits for tools whose calibrated reliability regressed (the Candor producer). |
-| 12c | Canary cleanup | When `canary_enabled`: prune `canary_runs` rows and their sessions past `canary_retention_days` (default 30), and nudge once per canary whose `last_reviewed` is over 90 days old. Never dispatches sweeps — those are enqueued for the next idle window. |
+| 12c | Canary cleanup | When `canary_enabled`: prune `canary_runs` rows and their sessions past `canary_retention_days` (default 30), and delete retired canaries that have sat in `data/canaries/.retired/` longer than `canary_purge_after_days` (default 30). Never dispatches sweeps. |
 | 12e | Session archive sweeps | Two independent rungs (no LLM): when `session_archive_idle_days` > 0 (default 30), archive ordinary chats idle past the horizon — nothing is deleted, the transcript stays searchable, one `PATCH` restores it; when `session_delete_archived_days` > 0 (default 0 = never), hard-delete sessions archived longer than that. A failure in either must not cost the other its cycle. |
-| 12d | Canary suite auto-maintenance | When `canary_auto_maintain`: promote vetted auto-admitted canaries, tag flapping ones flaky, retire long-green ones to quarantine, purge the quarantine (no LLM). A failing canary is never auto-mutated. |
 | 13 | Refine pass | Whole-session refine (`core/refine.py`) — the single session-improvement rung: skill-edit proposals + lessons from any idle session, not gated on the reflect verdict. Selection watermark `refined:{sid}` stores the session's max message id **at selection time**, not a timestamp — a session that grows after its first pass (an `ask_user` gets answered, it resumes, a workaround lands late) re-arms and gets refined again over its full story, instead of being graded once mid-story. Proposals dedupe against existing non-rejected rows per skill so a re-refine can't mint the same change twice; selection also stops treating `awaiting_user`/`awaiting_workers` as idle. |
-| 13b | Skill proposal auto-apply | When `skill_proposal_auto_apply_after_hours` (default 24; `0` disables) has elapsed on a pending SKILL.md proposal: machine-validated (skill exists + enabled, change ≤4000 chars, confidence ≥0.6) and applied with a timestamped backup under `data/skill_backups/<skill>/`, day-capped at `skill_proposal_max_auto_applies_per_day` (default 5), announced as a notification. The veto-window-plus-rollback pattern, not an approval gate; a proposal whose target skill is gone archives instead of parking forever. See [../authoring/writing-skills.md](../authoring/writing-skills.md). |
-| 13c | Skill-change → memory re-validation | Each enabled skill's `SKILL.md` + `scripts/` is content-hashed (`skill_content_hash:{name}`, baseline stamped silently on first sight, no LLM); when the hash changes — auto-apply, an in-session agent edit, or a human edit on disk — memory entries mentioning the skill are cited into `memory_stale` Dream hypotheses (hash-guarded, capped 6/skill, deduped against pending, one skill per cycle) so a claim like "the script lacks a flag" gets re-judged by the Dream validator instead of silently contradicting the fixed skill. |
+| 13b | Skill proposal auto-apply | When `skill_proposal_auto_apply` is on (default), no LLM, idle-only: pending SKILL.md proposals older than `skill_proposal_auto_apply_after_hours` that pass `_validate_for_auto_apply` (size, confidence, skill text not an editor note — unwrapped when possible, no near-duplicate heading, no push past the 5,000-char prompt limit, at most 3 per skill per 30 days) are applied with a backup, up to `skill_proposal_max_auto_applies_per_day`; a log row in Activity lists them. See [../authoring/writing-skills.md](../authoring/writing-skills.md). |
+| 13b″ | Stale skill proposal archive | Every cycle, no LLM: pending SKILL.md proposals older than 30 days become `archived` (`core/skills/proposals.py:archive_stale_skill_proposals`). |
+| 13b′ | Review rollup | Every cycle, no LLM, read-only: count the pending skill proposals auto-apply refused (all of them when auto-apply is off) into the one coalescing `review.pending` bell row, which opens the Skills tab and resolves at zero (`core/skills/review.py`). |
+| 13c | Skill-change → memory re-validation | Each enabled skill's `SKILL.md` + `scripts/` is content-hashed (`skill_content_hash:{name}`, baseline stamped silently on first sight, no LLM); when the hash changes — an applied proposal, an in-session agent edit, or a human edit on disk — memory entries mentioning the skill are cited into `memory_stale` Dream hypotheses (hash-guarded, capped 6/skill, deduped against pending, one skill per cycle) so a claim like "the script lacks a flag" gets re-judged by the Dream validator instead of silently contradicting the fixed skill. |
 | 14 | Dream step | Idle-time introspection (`core/dream/`) — see [dream.md](dream.md). Only when `dream_enabled`. |
-| 14b | Distillation coverage audit | When `distill_audit_enabled`: audit distillation coverage against one sampled raw transcript per run, under a daily budget; misses land in Candor and are written back to memory (`core/memory/audit.py`). |
-| 16 | Telos step | The teleological slow loops (`core/telos/`) — see [telos.md](telos.md). Only when `telos_enabled`. |
-| 15 | Adaptive layer | When `adaptive_enabled`: drain pending auto-applies (safe here — the idle window means no session's cached prefix is mid-turn), enqueue post-batch canary sweeps, evaluate the tripwire (no LLM) — see [canary-and-adaptive.md](canary-and-adaptive.md). |
+| 14b | Distillation coverage audit | When `distill_audit_enabled`: audit distillation coverage against one sampled raw transcript per run, under a daily budget; misses are counted in the cycle stats and written back to memory (`core/memory/audit.py`). |
 | 17 | Fallback-burn watch | Pure store read, no LLM: when `fallback_model` served at least `fallback_burn_alert_share` (default 0.25) of the trailing 24h's tokens with at least `fallback_burn_min_tokens` (default 50000) of volume, one high-urgency notification per day names the share, the volume, and the compose-level `.env` fix. Encodes the 2026-08-19 silent-reroute incident (a dead primary key quietly billed every call to the paid fallback for days) as a standing check; watch-only, never touches routing, `share=0` disables it. |
 
-Activity 16 running *before* 15 is deliberate, not a typo: Telos may queue adaptive edits (a `supported` claim becomes a `routing_hint`), so the adaptive drain has to come after it or those edits wait a whole cycle.
-
-Numbering has gaps because it is historical, not ordinal — an activity that is removed does not renumber the ones after it, so cross-references in code and logs stay valid. Activity 2b (a separate snooze-reflect pass) was removed and folded into Activity 13.
+Numbering has gaps because it is historical, not ordinal — an activity that is removed does not renumber the ones after it, so cross-references in code and logs stay valid. Activity 2b (a separate snooze-reflect pass) was removed and folded into Activity 13; Activities 12b (Candor maintenance), 15 (the adaptive layer's drain, tripwire and sweeps) and 16 (Telos) were removed in 3.2 with those add-ons.
 
 Migration v32 converts every legacy `refined:{sid}` value (an ISO timestamp) to "the session's current max message id" — a one-time rewrite so nothing already graded re-refines on deploy; only future growth re-arms a session from then on. Refine's own attribution also widened in v3.1: `_identify_active_skill` used to see only explicit `load_skill` calls, so a scout-planned session that runs a skill's script directly never attributed its proposal to that skill; it now also matches `skills/<name>/` path references across the transcript and skill names named in the scout plan, validated against the registry so a stray path string can't misroute a proposal. Refine's evidence changed too: instead of only the transcript's last 8000 characters, it now extracts failing tool/job results chronologically (`Error` prefix, `state=failed`, tracebacks, non-zero `exit=`, deduplicated) paired with the assistant intent that preceded each, so a long session's failure-then-workaround arc survives even when it happened well before the tail.
 
-A cycle runs until the ladder **completes** — there is no per-task time slice. Two things end it early:
+A cycle walks the ladder with bounded expensive memory work. Consolidation,
+dedup and rerouting each have a 60-second activity limit; splitting has 120
+seconds. Activity failures mark the cycle `partial` and allow later work to run.
+Consolidation scans above 64 files save a filename-pair cursor (at most 2,000
+pairs or 10 seconds per batch); rerouting saves a file/entry cursor (200 settled
+entries or 10 seconds). Candidate discovery is bounded; original entries still
+undergo merge validation. Failed split revisions back off from 30 minutes to
+24 hours, shrink batches and allow other files to progress.
 
-- **User activity.** A new prompt, cron fire, or shutdown sets the cycle's cancel event, which aborts even in-flight LLM awaits. The interrupted activity records a watermark and resumes on the next cycle.
+Two things can end the whole cycle early:
+
+- **User activity.** A new prompt, cron fire, or shutdown sets the cycle's cancel event, which aborts even in-flight LLM awaits. Resumable scans preserve progress for a later cycle; other interrupted activities retry according to their own state.
 - **The hang backstop.** `snooze_max_cycle_seconds` (default 900) is runaway protection, not a budget — it only fires if an activity genuinely hangs. Local (Ollama) background models get 4x headroom, since slow local inference is normal there, not a hang.
+
+Cycle stats expose `active_rung`, `rung_durations_ms`, `rung_failures`,
+`last_outcome`, `degraded` and `last_successful_cycle`. A normal completed cycle
+clears degraded status; a yield does not erase an earlier unresolved failure.
+See [operations.md](../operations.md) for health, logs and verification.
 
 ### Cooperative scheduling
 
 Snooze checks `idle_minutes` against `snooze_cooldown_minutes` (default 5). A session that just went idle won't trigger Snooze immediately — there's a cooldown so you don't get housekeeping running 30 seconds after every chat. Cycles also skip entirely when nothing happened since the last one — no activity, no work to review.
 
-When a new session starts mid-cycle, Snooze yields immediately: the cancel event aborts the in-flight activity (including a pending LLM call), the activity records its watermark, and the next cycle picks up where it left off. Your work always wins.
+When a new session starts mid-cycle, Snooze yields immediately: the cancel event aborts the in-flight activity (including a pending LLM call), workers retain their own cancellation signal permanently, and later cycles resume eligible work without reviving old worker threads. Your work always wins.
 
 For debugging, a localhost-only `POST /api/admin/snooze-cycle` triggers a cycle on demand, skipping the cadence and cooldown checks (but never the real gates — active sessions still refuse it). It also returns an `idle_blockers()` diagnostic explaining why a cycle *wouldn't* run.
 

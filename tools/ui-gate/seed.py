@@ -646,4 +646,61 @@ tl_log(
     eval_count=1,
 )
 
+# --- notifications: one row per tier, a coalesced repeat, a dismissed row ------
+# check.py's bell pass finds these by title. Only the interrupt row may count
+# on the badge; the two open bell rows make the dot; the log row and the
+# dismissed row live in Activity only.
+db.add_notification(
+    main,
+    "Job failed: nightly-backup",
+    "exit 1 after 42s — the disk is full.",
+    "high",
+    category="jobs.failed",
+    tier="interrupt",
+    link={"kind": "session", "id": main},
+)
+db.add_notification(
+    "",
+    "Embeddings are down",
+    "Falling back to keyword search until the embed server answers.",
+    category="system.embeddings_down",
+    tier="bell",
+    link={"kind": "tab", "tab": "settings"},
+)
+for i in range(3):
+    db.add_notification(
+        "",
+        "Canary sweep: 1 of 4 failed (deploy)",
+        f"3 of 4 canaries passed after deploy sweep #{i + 1}. Failed: link-digest.",
+        category="canary.sweep_failed",
+        tier="bell",
+        subject="suite",
+        coalesce=True,
+        link={"kind": "tab", "tab": "canary"},
+    )
+db.add_notification(
+    "",
+    "Dream: 2 memory correction(s) applied",
+    "Validated dream findings wrote their corrective entries.",
+    "low",
+    category="dream.corrections_applied",
+    tier="log",
+    link={"kind": "tab", "tab": "dream"},
+)
+gone = db.add_notification(
+    "",
+    "MCP server boxpriv unreachable",
+    "Connection refused on :9100.",
+    category="system.mcp_down",
+    tier="bell",
+)
+db.dismiss_notification(gone)
+# The log row and the dismissed row are from yesterday, so Activity has two days.
+_yday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+with connect_sessions() as conn:
+    conn.execute(
+        "UPDATE notifications SET created_at = ? WHERE title IN (?, ?)",
+        (_yday, "Dream: 2 memory correction(s) applied", "MCP server boxpriv unreachable"),
+    )
+
 print(json.dumps({"main": main, "long": long_sid, "parent": parent_sid, "scale": scale_id, "timeline": tl_sid}))

@@ -181,8 +181,12 @@ def mgr(monkeypatch):
     from sessions.manager import SessionManager
 
     monkeypatch.setattr(sv2, "_current_state", lambda s: sv2.SessionStateV2.FINALIZING)
-    m = SimpleNamespace(broadcast=lambda *a, **k: None)
-    m._limit_goal = lambda session, goal, reason: SessionManager._limit_goal(m, session, goal, reason)
+    # A real manager, not a shim: _maybe_enqueue_goal_continuation now leans on
+    # several of its siblings (the outbox debit, the checkpoint, the budget
+    # renewal), and a stub that has to grow a lambda per collaborator stops
+    # testing the thing it stands in for.
+    m = SessionManager()
+    monkeypatch.setattr(m, "broadcast", lambda *a, **k: None)
     return m
 
 
@@ -246,16 +250,26 @@ def test_token_budget_exhaustion_limits_goal(mgr, monkeypatch):
     assert notified and "budget-limited" in notified[0]["title"]
 
 
-def test_budget_exhausted_termination_extends_session_budget(mgr, monkeypatch):
-    extended = []
-    monkeypatch.setattr("core.llm.client.extend_session_budget", lambda sid, secs: extended.append((sid, secs)) or 0.0)
+@pytest.mark.parametrize("termination", ["budget_exhausted", "round_ceiling", "complete"])
+def test_every_continuation_renews_the_session_clock(mgr, monkeypatch, termination):
+    """A synthetic continuation never gets the clock reset a real user message
+    gets, so every one of them needs a fresh window — not only the turn that
+    ran out of time. The renewal is clock-relative and ceilinged; the
+    base-relative extension it replaced granted 0 seconds from the second
+    continuation on (H02, 2026-09-08)."""
+    renewed = []
+    monkeypatch.setattr(
+        "core.llm.client.renew_phase_budget",
+        lambda sid, window, ceiling=0.0: renewed.append((sid, window, ceiling)) or window,
+    )
     sid = db.create_session(title="extend")
     db.create_goal(sid, "objective that outlives the llm session clock", continuation_budget=1)
 
-    s = _fake_session(sid, termination="budget_exhausted")
+    s = _fake_session(sid, termination=termination)
     _run_continuation(mgr, s)
     assert len(s.pending_messages) == 1
-    assert extended and extended[0][0] == sid  # inherited clock deliberately extended
+    assert renewed and renewed[0][0] == sid  # inherited clock deliberately renewed
+    assert renewed[0][2] > renewed[0][1]  # bounded by a cumulative ceiling
 
 
 # ---------------------------------------------------------------------------

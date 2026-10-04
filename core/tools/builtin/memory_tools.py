@@ -106,47 +106,6 @@ def _federated_sections(query: str) -> str:
         return ""
     sections: list[str] = []
 
-    # Adaptive store — the rules currently shaping behavior.
-    try:
-        from db.models import connect_sessions
-
-        like = " OR ".join("(lower(title) LIKE ? OR lower(content) LIKE ?)" for _ in words)
-        params: list[str] = []
-        for w in words:
-            params += [f"%{w}%", f"%{w}%"]
-        with connect_sessions() as conn:
-            rows = conn.execute(
-                f"SELECT id, kind, source, title, content FROM adaptive_entries "
-                f"WHERE status = 'active' AND ({like}) LIMIT {_FED_PER_SOURCE}",
-                params,
-            ).fetchall()
-        for r in rows:
-            body = " ".join(str(r["content"]).split())[:_FED_SNIPPET_CHARS]
-            sections.append(f"[adaptive/{r['kind']} · {r['source']}] {r['title']}: {body}")
-    except Exception:
-        pass
-
-    # Telos claims — validated beliefs with epistemic-class caps.
-    try:
-        from config import settings as _s
-
-        if _s.telos_enabled:
-            from core.telos.store import TelosStore
-
-            store = TelosStore.open()
-            hits = 0
-            for c in store.list("claim"):
-                text = str(c.get("text") or c.get("statement") or c.get("content") or "")
-                if any(w in text.lower() for w in words):
-                    conf = c.get("confidence")
-                    tag = f" (conf {float(conf):.2f})" if conf is not None else ""
-                    sections.append(f"[telos claim{tag}] {' '.join(text.split())[:_FED_SNIPPET_CHARS]}")
-                    hits += 1
-                    if hits >= 2:
-                        break
-    except Exception:
-        pass
-
     # Skills — procedural knowledge that may already cover the topic.
     try:
         from core.skills.registry import get_skill_registry
@@ -826,8 +785,8 @@ def register(reg) -> None:
         description=(
             "LLM-backed memory search with synthesis, FEDERATED across every knowledge "
             "store: long-term memory (FTS5 + ripgrep, query reformulation, attributed "
-            "answer) plus provenance-tagged hits from adaptive entries, telos claims, "
-            "skills, and session transcripts — one query instead of guessing which store "
+            "answer) plus provenance-tagged hits from "
+            "skills and session transcripts — one query instead of guessing which store "
             "to ask. Use when: recall() returns empty/weak results, the query is complex, "
             "or cross-file synthesis is needed. Pass context= to focus the search. "
             "include_seen=true bypasses the per-session dedup ledger (only affects "

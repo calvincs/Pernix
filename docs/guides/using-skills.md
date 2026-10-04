@@ -95,11 +95,19 @@ For permanent disabling, move the skill out of `data/skills/` (e.g., to `data/sk
 
 When a skill fails mid-session and the agent finds a workaround, that lesson doesn't just evaporate at the end of the turn. A background pass (**refine**) can turn it into a proposed edit to the skill's own `SKILL.md` — the fix the skill was missing, folded back in instead of being rediscovered next time.
 
-Pending proposals show up as a banner on Explorer → Capabilities → Skills, one row per proposal: which skill, which section, the problem it addresses, and — once it's been tried since being proposed — a trial tally (uses vs. how many actually helped). **review** opens the skill's editor with the change ready to apply.
+Pending proposals show up as a banner on Explorer → Capabilities → Skills, one row per proposal: which skill, which section and the problem it addresses. **review** opens the skill's editor with the change ready to apply.
 
-You don't have to click anything, though. A proposal older than `skill_proposal_auto_apply_after_hours` (24; 0 disables) applies itself during idle time once it clears a mechanical bar — the target skill still exists and is enabled, the change is under 4,000 characters, confidence is at least 0.6 — capped at `skill_proposal_max_auto_applies_per_day` (5). Before it touches the file, a timestamped copy of the current `SKILL.md` lands in `data/skill_backups/<skill>/`, so an auto-applied change is a rollback away, not a leap of faith. It shows up as a notification either way.
+Proposals apply themselves by default (`skill_proposal_auto_apply`). After a 24-hour wait, a pending proposal is applied when it passes the checks: the change is at most 1,500 characters and its confidence at least 0.6; it reads as skill text (a note addressed to an editor, such as "Add a note under Usage: …", is unwrapped to the text inside, and refused when nothing usable is inside); its section does not nearly copy an existing heading; it does not push a skill that fits the 5,000-character prompt limit past it; and the skill has had fewer than 3 auto-applies in 30 days. At most five apply per day, and only while no session is working. Before it touches the file, a timestamped copy of the current `SKILL.md` lands in `data/skill_backups/<skill>/`, so an applied change is one **Roll back** away in the Skills tab. A proposal that fails a check waits for you there (one bell item counts them) and is archived after 30 days. Turn auto-apply off in Settings → Autonomy → Skill Self-healing to review every proposal yourself. Refine also writes the same knowledge as a lesson memory, which scout surfaces on the next relevant turn.
 
-A skill can also carry its own behavioral test: a `verify:` block in `SKILL.md` becomes a managed canary (`skill--<name>`) that the canary suite runs to check the skill still does what it claims — a proposal that breaks the skill's own test gets caught there, not just by eyeballing the diff. See [../authoring/writing-skills.md](../authoring/writing-skills.md) for the format.
+
+Rollback preserves newer edits: undo more recent proposals first, or restore a
+backup manually if you have edited the skill since application. Open a skill to
+see **Recent skill changes**, including unfinished applications that can be
+recovered with **Roll back**. Applications made before exact backup tracking was
+introduced require manual restoration; Pernix will not guess which old backup
+belongs to them. If a backup cannot be created, the skill is left unchanged.
+
+A `verify:` block in `SKILL.md` used to become a managed canary (`skill--<name>`). Since 3.2 nothing syncs those blocks into the canary suite (the canary maintenance sweep that did is gone); a block in an old skill is harmless and ignored. See [../authoring/writing-skills.md](../authoring/writing-skills.md).
 
 ---
 

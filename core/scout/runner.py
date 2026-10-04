@@ -117,28 +117,25 @@ def _log_scout_error(error: Exception, session_id: str, attempt: int, max_attemp
 # Scout system prompt (multi-turn, tool-calling)
 # ---------------------------------------------------------------------------
 
-SCOUT_SYSTEM_PROMPT = """You are a Scout Agent. Your job is to prepare context for a main agent that will handle the user's request. You do NOT handle the request yourself.
+# The prompt is assembled per run: the multi-round tool block (search tools,
+# PROCEDURE, round budget) is only sent when scout_max_rounds > 1. With one
+# round scout is offered nothing but submit_report, so describing search tools
+# it cannot call would only invite prose.
+_SCOUT_PROMPT_HEAD = """You are a Scout Agent. Your job is to prepare context for a main agent that will handle the user's request. You do NOT handle the request yourself.
 
 Your initial context already includes baseline memory search results, available tools, available skills, and cross-session findings. Review these carefully before deciding if you need more. When baseline memory or cross-session findings substantively cover the user's request, your approach_guidance must synthesize from those findings first — treat external search (search_web/browse_web) as supplementation, not the default opening move.
 
-When [OPERATIONAL INTEL] is present (calibrated reliability from logged outcome history):
-- It is an EXCEPTION REPORT: it lists only degraded or conditional items. A tool or domain absent from the block has no known problem — never report its absence as a concern or a gap.
-- Fold relevant entries into approach_guidance: steer the plan away from targets with low success rates, and toward any stated working condition (e.g. "works when method=browse" means plan browse_web for those domains instead of http_get; a failure-mode line like "rate_limit 38%" means plan for backoff or an alternative source).
-- The percentages are calibrated from real observation counts. Weigh them by evidence: a wide credible interval or few obs is weak evidence; many obs is strong. An [unstable] or [under_specified] tag means the rate is context-dependent — flag that uncertainty in your plan rather than trusting the point estimate.
-- When reliability is central to the task, add predict_reliability / why_reliability / reliability_questions to recommended_tools so the main agent can query live calibrated numbers and their evidence chains.
-
-When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations, and echo the [id] of EVERY hint that influenced the plan — even partially (a tool it steered you toward, a step it added, a pitfall it made you avoid) — in the report's used_hints array. The usage signal you echo is the only evidence the system has that a hint earns its place; a used-but-unechoed hint gets retired as dead weight. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
-
 When [MODEL ROUTING INTEL] is present (observed verdict rates by model and task category): it is an exception report — a model absent from it has no known problem. Steer recommended_model away from listed (model, category) pairs when a viable alternative exists; never report a model's absence as a concern.
 
-You also have tools to search deeper if the baseline is insufficient:
+"""
+
+_SCOUT_PROMPT_MULTI_ROUND = """You also have tools to search deeper if the baseline is insufficient:
 - search_memory: Run additional memory queries with different keywords or modes. If a preloaded snippet is truncated and looks relevant, call search_memory with keywords from that entry and file=<file_name> to retrieve the complete content from that file.
 - search_sessions: Search other sessions with different queries
 - search_tools: Discover additional tools by capability
 - search_skills: Find more skill packages
 - read_skill_instructions: Read full instructions for a skill before recommending it
 - search_post_mortems: Look up past failure narratives (filter by failure_cause or subject tool/skill name). Use when you suspect a prior failure pattern is relevant.
-- search_adaptive: Search machine-curated routing hints, prompt notes, and policies by keyword (only useful when the adaptive layer is enabled).
 
 PROCEDURE:
 1. Review the user message, session context, and pre-loaded baseline data (memory, tools, skills).
@@ -146,11 +143,17 @@ PROCEDURE:
 3. If you need deeper context (e.g., a skill looks promising but you want to read its instructions, or you want to search memory with different keywords), use your tools first.
 4. Call submit_report exactly once to deliver your findings.
 
-IMPORTANT: You have a maximum of 6 tool rounds. You MUST call submit_report by round 5 at the latest — round 6 disables tools and is reserved for emergency text output. Do not exhaust all rounds searching — gather what you need quickly, then submit. If in doubt, submit with what you have rather than searching more.
+IMPORTANT: You have a maximum of {rounds} tool rounds. You MUST call submit_report by round {submit_by} at the latest — round {rounds} offers only submit_report and is reserved for the final submit. Do not exhaust all rounds searching — gather what you need quickly, then submit. If in doubt, submit with what you have rather than searching more.
 
 You MUST call submit_report to deliver your findings. If you cannot use tools, output a raw JSON report instead (same fields as submit_report).
 
-REPORT FIELD GUIDANCE:
+"""
+
+_SCOUT_PROMPT_ONE_ROUND = """All context is preloaded; call submit_report now. If you cannot call tools, output the JSON report instead (same fields as submit_report).
+
+"""
+
+_SCOUT_PROMPT_TAIL = """REPORT FIELD GUIDANCE:
 - memory_context: Relevant knowledge from your memory searches. Quote with attribution. Max 500 tokens. Report FACTS YOU FOUND — never conclusions about what is missing. Do NOT write "no X is configured" or "SESSIONS.md shows X: not set". An unfilled field in SOUL/RULES/SESSIONS is deployment config left blank, not evidence the fact is unknown, and asserting otherwise makes the main agent refuse tasks it could have answered from the very facts you just quoted. If memory answers the request, state the answer plainly and let the agent use it.
 - cross_session_context: Relevant findings from session searches. Quote with session attribution. Max 500 tokens. Empty string if nothing relevant.
 - recommended_tools: Array of tool names the main agent will need (5-15 tools). Only include extension tools — builtin tools are always available.
@@ -164,7 +167,6 @@ REPORT FIELD GUIDANCE:
 - deliverables_plan: Array of concrete work items the agent is expected to produce (0-6). Each item has a "description" (the artifact or outcome, e.g. "Write summary.md with key findings") and an optional "execution_hint" (inline | task | worker). Leave empty for pure Q&A. Reflect will check each item at turn end, so be specific and measurable.
 - execution_mode: Overall approach — "inline" (default, single-agent work) or "tasks" (multi-step sequential via task system).
 - task_type: Classify what KIND of task this is: "research" (finding/verifying information, web or corpus), "coding" (writing or modifying code/config), "data_analysis" (computing over data or files), "writing" (producing documents, summaries, distillations), "ops" (operating this system or external services: settings, deploys, admin actions), "conversational" (questions answered from context/memory, discussion). Pick the dominant kind when mixed. This is a statistics label only — it never changes how the task runs.
-- used_hints: ALWAYS EMIT THIS FIELD. Array of [id] values from the ADAPTIVE ROUTING HINTS block whose guidance influenced this plan, even partially — a tool choice it steered, a step it added, a pitfall it made you avoid. Echo every hint you actually drew on (the retention sweep deletes hints that never record use, so omitting a used hint kills it); emit [] when no hint applied or no hints block was present. Do not echo hints that had no influence.
 
 RULES:
 - Be terse. Every token costs the main agent context space.
@@ -178,11 +180,25 @@ RULES:
 - PYTHON PACKAGES: Workspace venv at data/workspace/.venv/ is auto-activated. Use bash with pip or discover_tools for package management.
 - USER INTENT: When the user names a specific action/tool, prioritize matching tools. User preference > efficiency.
 - COMPLETION TARGET: When the user asks to complete a named unit of work (a game with levels, a challenge set, a multi-part deliverable), deliverables_plan MUST name the FULL unit as the deliverable (e.g. "Game X completed — all N levels cleared"), with intermediate milestones as numbered steps in approach_guidance, never as the deliverable itself — an agent anchors on whatever the plan calls done and stops there. If prior-session memory shows a milestone already achieved, the deliverable is still the full unit; start the plan from the next milestone. (Field case ae952f40e3d1: the plan framed "fix the known Level-1 flaw" as the mission, the agent verifiably cleared Level 1 of 6, declared completion, and stopped with 60 of 100 rounds unused.)
-- LIVE STATE BEATS MEMORY: For mutable operational state — worker limits, scheduled jobs, active models, settings values, feature toggles — the live tool answer (list_scheduled_jobs, list_features, list_available_models, telos_status, the spawn error text itself) is the source of truth. A memory entry about such state records the past: use it to know WHERE to look, never as the current value. When a plan depends on such a value, make the live check a step; do not copy a remembered limit, job list, or setting into approach_guidance as fact. (This is the mutable-state complement of KNOWN FACTS BEAT EMPTY CONFIG below, which covers stable user facts.)
+- LIVE STATE BEATS MEMORY: For mutable operational state — worker limits, scheduled jobs, active models, settings values, feature toggles — the live tool answer (list_scheduled_jobs, list_available_models, the spawn error text itself) is the source of truth. A memory entry about such state records the past: use it to know WHERE to look, never as the current value. When a plan depends on such a value, make the live check a step; do not copy a remembered limit, job list, or setting into approach_guidance as fact. (This is the mutable-state complement of KNOWN FACTS BEAT EMPTY CONFIG below, which covers stable user facts.)
 - KNOWN FACTS BEAT EMPTY CONFIG: If a request needs a fact about the user (location, timezone, name, preferences) and memory has it, put that fact in memory_context and build approach_guidance around USING it. Do not plan a clarifying question for something memory already answers, and do not treat a blank field in SESSIONS.md as contradicting a recalled fact. Ask the user only when neither memory nor config has it, or when memory is genuinely ambiguous (e.g. two conflicting locations) — in which case say so and name the candidates.
 - SESSION HISTORY QUERIES: For "what did we do today/yesterday/recently" — recommend list_recent_sessions (chronological, timestamp-ordered). search_sessions is FTS5 keyword search over message CONTENT; use it to find sessions where a topic was discussed, never to find sessions by date. Pair list_recent_sessions + read_session_summary for deep dives into specific sessions.
 - TIME ZONES: The injected CURRENT DATE/TIME shows both UTC and local time. All harness timestamps (sessions, messages, cron runs) are stored in UTC (+00:00). "Today" and "yesterday" mean local time, not UTC — use the local time for date math. Never assume a date boundary from UTC alone.
 - Do NOT use <think> or reasoning tags. /no_think"""
+
+
+def _scout_base_prompt(max_rounds: int) -> str:
+    """The static scout prompt for a run of `max_rounds` LLM rounds."""
+    if max_rounds <= 1:
+        middle = _SCOUT_PROMPT_ONE_ROUND
+    else:
+        middle = _SCOUT_PROMPT_MULTI_ROUND.format(rounds=max_rounds, submit_by=max_rounds - 1)
+    return _SCOUT_PROMPT_HEAD + middle + _SCOUT_PROMPT_TAIL
+
+
+# The prompt at the default (one round). Kept as a module constant for the
+# rule-text tests; the loop calls _scout_system_prompt().
+SCOUT_SYSTEM_PROMPT = _scout_base_prompt(1)
 
 # Injected into the RULES block only when settings.rlm_enabled (the tool only
 # exists then). Kept out of the static prompt so disabled servers never bias
@@ -240,8 +256,10 @@ _SCOUT_JOBS_RULE = (
 )
 
 
-def _scout_system_prompt() -> str:
-    """SCOUT_SYSTEM_PROMPT plus conditional rules, keeping /no_think last."""
+def _scout_system_prompt(max_rounds: int | None = None) -> str:
+    """The scout prompt for `max_rounds` (default: the setting) plus
+    conditional rules, keeping /no_think last."""
+    base = _scout_base_prompt(_scout_max_rounds() if max_rounds is None else max_rounds)
     rules = []
     if settings.rlm_enabled:
         rules.append(_SCOUT_RLM_RULE)
@@ -252,11 +270,11 @@ def _scout_system_prompt() -> str:
     if settings.jobs_enabled:
         rules.append(_SCOUT_JOBS_RULE)
     if not rules:
-        return SCOUT_SYSTEM_PROMPT
+        return base
     block = "\n".join(rules)
-    head, _, tail = SCOUT_SYSTEM_PROMPT.rpartition("\n- Do NOT use <think>")
+    head, _, tail = base.rpartition("\n- Do NOT use <think>")
     if not head:  # tail marker drifted — fail open with the static prompt
-        return SCOUT_SYSTEM_PROMPT + "\n" + block
+        return base + "\n" + block
     return f"{head}\n{block}\n- Do NOT use <think>{tail}"
 
 
@@ -379,25 +397,6 @@ _SCOUT_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "search_adaptive",
-            "description": "Search the adaptive layer (machine-curated routing hints, prompt notes, policies) by keyword. Use when the preloaded [ADAPTIVE ROUTING HINTS] block ends with a '+N more hints' marker and the task might match one of the unrendered hints, or to check for policy on a specific tool/skill/topic.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Keywords to match against titles and content"},
-                    "kind": {
-                        "type": "string",
-                        "enum": ["routing_hint", "prompt_note", "policy"],
-                        "description": "Optional kind filter",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "submit_report",
             "description": "Submit the final scout report. Call this exactly once when you have gathered enough context. This ends the scout session.",
             "parameters": {
@@ -462,13 +461,8 @@ _SCOUT_TOOLS = [
                         "enum": list(TASK_TYPES),
                         "description": "What KIND of task this is (classification for outcome statistics; never changes execution).",
                     },
-                    "used_hints": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Ids from [ADAPTIVE ROUTING HINTS] that influenced this plan, even partially; [] if none applied.",
-                    },
                 },
-                "required": ["recommended_tools", "approach_guidance", "used_hints"],
+                "required": ["recommended_tools", "approach_guidance"],
             },
         },
     },
@@ -484,8 +478,37 @@ _SCOUT_SUBMIT_ONLY = [t for t in _SCOUT_TOOLS if t["function"]["name"] == "submi
 # ---------------------------------------------------------------------------
 
 
+def memory_recall_denied(brief: SessionBrief) -> bool:
+    """True when this session's scout must not read memory at all.
+
+    Canary isolation (trust-loop hardening W5, plan §5): eval sessions run
+    WITH the treatment under measurement — skills, tools — and
+    WITHOUT memory recall. A canary that can look up "the answer to
+    gen-grep-count" measures the memory index, not the pipeline, and the
+    generated sentinels exist precisely so a memorised answer cannot pass.
+    Enforced at three points, like the tool allowlist: the preload gatherers
+    below, the scout tool schema, and this executor backstop.
+    """
+    return (getattr(brief, "session_type", "") or "") == "canary"
+
+
+def scout_tools_for(brief: SessionBrief) -> list:
+    """The scout tool schema for this session — search_memory removed when
+    memory recall is denied, so the model is never offered a door it would
+    only be refused at."""
+    if not memory_recall_denied(brief):
+        return _SCOUT_TOOLS
+    return [t for t in _SCOUT_TOOLS if t.get("function", {}).get("name") != "search_memory"]
+
+
 def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
     """Execute a scout tool and return the result as a string."""
+
+    if name == "search_memory" and memory_recall_denied(brief):
+        return (
+            "Memory search is not available in this session. Plan from the "
+            "task description, the workspace, and your own tools."
+        )
 
     if name == "search_memory":
         try:
@@ -538,34 +561,6 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
             return result or "No relevant findings in other sessions."
         except Exception as e:
             return f"Session search error: {e}"
-
-    elif name == "search_adaptive":
-        try:
-            from config import settings as _settings
-
-            if not _settings.adaptive_enabled:
-                return "Adaptive layer is disabled."
-            from db import models as db
-
-            query = (args.get("query") or "").lower()
-            words = [w for w in query.split() if len(w) >= 2]
-            entries = db.adaptive_list_entries(kind=args.get("kind") or None)
-            scored = []
-            for e in entries:
-                haystack = f"{e['title']} {e['content']}".lower()
-                hits = sum(1 for w in words if w in haystack)
-                if hits or not words:
-                    scored.append((hits, e))
-            scored.sort(key=lambda t: -t[0])
-            if not scored:
-                return "No matching adaptive entries."
-            lines = [
-                f"[{e['kind']} id={e['id']} v{e['version']} scope={e['scope']}] {e['title']}: {e['content'][:400]}"
-                for _, e in scored[:8]
-            ]
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Adaptive search error: {e}"
 
     elif name == "search_tools":
         try:
@@ -697,11 +692,6 @@ def _extract_report(args: dict) -> ScoutReport:
         deliverables_plan=deliverables,
         execution_mode=mode,
         task_type=task_type,
-        used_hints=(
-            [str(h)[:64] for h in args.get("used_hints", []) if h][:24]
-            if isinstance(args.get("used_hints"), list)
-            else []
-        ),
     )
 
 
@@ -973,10 +963,24 @@ async def build_model_catalog_block() -> str | None:
 # pointing at load_skill.
 SKILL_INJECT_MAX_CHARS = 5000
 
-# Max tool rounds for the scout's internal loop.
-# IMPORTANT: keep the round counts in SCOUT_SYSTEM_PROMPT (line ~104) in sync
-# with this constant — the prompt is hardcoded and will drift if this changes.
-SCOUT_MAX_ROUNDS = 6
+# Ceiling on the scout's internal LLM rounds. The working value is
+# settings.scout_max_rounds (default 1, bounded 1..6): on the reference box
+# each extra round cost ~6 s and re-sent 15-19k prompt tokens while the turn
+# waited, and a one-round scout (preloaded context, submit_report only) ran
+# at p50 8.9 s against 29.7 s for the multi-round normal turn. The prompt
+# states the budget from the same number, so it cannot drift.
+SCOUT_MAX_ROUNDS_CAP = 6
+
+
+def _scout_max_rounds() -> int:
+    """settings.scout_max_rounds clamped to 1..SCOUT_MAX_ROUNDS_CAP."""
+    try:
+        n = int(settings.scout_max_rounds)
+    except (TypeError, ValueError, AttributeError):
+        n = 1
+    return min(max(1, n), SCOUT_MAX_ROUNDS_CAP)
+
+
 # Max self-check revisions scout can request on a single run.
 # Extra slot lets scout fix multiple unrelated issues sequentially
 # (e.g. a contradictory signal AND an unknown model in the same submit).
@@ -1177,29 +1181,50 @@ def should_bypass_scout(message: str, turn_count: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _count_hint_usage(report: ScoutReport) -> None:
-    """Record which adaptive routing hints shaped a FRESH scout plan.
+def _prior_turn_verdict_block(session_id: str) -> str:
+    """The immediately previous turn's non-pass grade, for the next scout.
 
-    Called at the fresh-report acceptance seams in run_scout (primary and
-    fallback-model success paths) — every report passing there came from a
-    live LLM run, so a single claim is counted exactly once. (This used to
-    live inside the report cache's write path; the cache recorded 0 hits in
-    506 live runs over 8 days — exact-string key, 5-minute TTL — and was
-    removed in the 2026-08-28 scout audit. The counting seam survives it.)
-    Citations are sanitized against the live hint ids: the model can only
-    credit hints that exist, and over-echo can at worst delay a retirement,
-    never cause one. Never raises — counting is telemetry, not control flow.
+    Field failure (session 3dc5a307d751): reflect graded a turn `retry` and
+    wrote a concrete strategy for the next attempt; nothing carried it into
+    the following turn's planning, so the scout laid out a variant of the
+    approach that had just been rejected. Only the IMMEDIATELY previous turn
+    counts — an older grade describes work the session has already moved
+    past — and never a pass, which has no strategy by construction.
     """
-    if not report.used_hints or not settings.adaptive_enabled:
-        return
+    if not session_id:
+        return ""
     try:
-        live = {e["id"] for e in db.adaptive_list_entries(kind="routing_hint", status="active", limit=200)}
-        kept = [h for h in dict.fromkeys(h.strip("[] ") for h in report.used_hints) if h in live]
-        report.used_hints = kept
-        for hid in kept:
-            db.upsert_signal("adaptive_entry", hid)
+        rows = db.list_post_mortems(session_id=session_id, limit=1)
+        if not rows:
+            return ""
+        pm = rows[0]
+        if pm.get("verdict") not in ("retry", "escalate"):
+            return ""
+        # Fresh = no completed turn since the grade. The current turn's own
+        # user row is already saved when the scout runs, so exactly one newer
+        # user message is expected; two or more means the grade is stale.
+        pm_at = str(pm.get("created_at") or "")
+        newer_users = sum(
+            1
+            for m in db.get_messages(session_id, last=60)
+            if m.get("role") == "user" and str(m.get("created_at") or "") > pm_at
+        )
+        if newer_users > 1:
+            return ""
+        payload = json.loads(pm.get("payload_json") or "{}")
+        what_failed = " ".join(str(payload.get("what_failed") or payload.get("diagnostic") or "").split())
+        strategy = " ".join(str(payload.get("strategy") or "").split())
+        if not what_failed and not strategy:
+            return ""
+        block = f"[PRIOR TURN GRADED {str(pm['verdict']).upper()} — grader's opinion, not ground truth]"
+        if what_failed:
+            block += f" what_failed: {what_failed}"
+        if strategy:
+            block += f" strategy: {strategy}"
+        return block[:600]
     except Exception as e:
-        logger.debug("adaptive hint-usage count failed: %s", e)
+        logger.debug("prior-turn verdict block failed: %s", e)
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1233,6 +1258,11 @@ async def run_scout(
     if should_bypass_scout(message, brief.turn_count):
         logger.debug("Scout bypassed, using fallback for session %s", session_id)
         return _build_fallback_report(message, brief, reason="bypass")
+
+    # A retry/escalate grade on the turn just finished is planning input for
+    # this one. Kept out of `message` itself so memory/tool discovery still
+    # search the user's words, not the grader's.
+    prior_verdict_block = _prior_turn_verdict_block(session_id)
 
     # Run scout LLM with retry for transient errors (model loading, 500s, etc.)
     max_attempts = 3
@@ -1271,6 +1301,7 @@ async def run_scout(
                     session_id=session_id,
                     session_created_at=sched_created_at,
                     session_priority=sched_priority,
+                    prior_verdict_block=prior_verdict_block,
                 ),
                 timeout=settings.scout_timeout,
             )
@@ -1299,9 +1330,7 @@ async def run_scout(
 
             # A fallback report is a degraded artifact, not a scout result:
             # keep it as the floor but let the dedicated fallback model try
-            # for a real plan first. Breaking out (rather than returning) also
-            # skips hint-usage counting — a deterministic fallback's hints
-            # are not an LLM's claim about what shaped the plan.
+            # for a real plan first.
             if report.from_fallback:
                 logger.warning(
                     "Scout produced only a fallback report for session %s after %d attempt(s)",
@@ -1311,7 +1340,6 @@ async def run_scout(
                 degraded_report = report
                 break
 
-            _count_hint_usage(report)
             if attempt > 1:
                 logger.info("Scout succeeded on attempt %d for session %s", attempt, session_id)
             logger.info(
@@ -1372,6 +1400,7 @@ async def run_scout(
                     session_id=session_id,
                     session_created_at=sched_created_at,
                     session_priority=sched_priority,
+                    prior_verdict_block=prior_verdict_block,
                 ),
                 timeout=settings.scout_timeout,
             )
@@ -1383,7 +1412,6 @@ async def run_scout(
                 logger.warning("Scout fallback model produced no usable plan for session %s", session_id)
                 degraded_report = report
             else:
-                _count_hint_usage(report)
                 logger.info(
                     "Scout fallback model succeeded for session %s in %dms", session_id, report.scout_latency_ms
                 )
@@ -1409,6 +1437,7 @@ async def _run_scout_llm(
     session_id: str = "",
     session_created_at: float = float("inf"),
     session_priority: int = PRIORITY_BACKGROUND,
+    prior_verdict_block: str = "",
 ) -> ScoutReport:
     """Execute the scout as a multi-turn tool-calling agent.
 
@@ -1444,6 +1473,12 @@ async def _run_scout_llm(
         "",
         f"SESSION CONTEXT:\n{brief.to_prompt_text()}",
     ]
+    # The previous turn's non-pass grade, when it is this turn's direct
+    # predecessor. Ahead of the user message on purpose: it frames what the
+    # plan has to do differently (session 3dc5a307d751).
+    if prior_verdict_block:
+        user_content_parts.insert(0, prior_verdict_block)
+        user_content_parts.insert(1, "")
 
     # Read instruction files — through the same space-aware resolution the
     # compiler uses (v33), so a space session's scout plans against the same
@@ -1486,7 +1521,15 @@ async def _run_scout_llm(
     except Exception:
         _space_slug = None
 
+    # Canary isolation (W5): the four memory-derived gatherers below are the
+    # scout's whole recall surface. A canary session gets none of them — the
+    # non-memory preload (tools, skills, models, workspace
+    # state) is the treatment being measured and stays.
+    _no_recall = memory_recall_denied(brief)
+
     def _gather_memory_baseline() -> str | None:
+        if _no_recall:
+            return None
         _step("memory", "Searching memory")
         try:
             from core.memory.store import get_memory_store
@@ -1519,6 +1562,8 @@ async def _run_scout_llm(
             return None
 
     def _gather_deep_memory() -> str | None:
+        if _no_recall:
+            return None
         try:
             from core.scout.search import gather_deep_memory
 
@@ -1531,6 +1576,8 @@ async def _run_scout_llm(
         return None
 
     def _gather_cross_session() -> str | None:
+        if _no_recall:
+            return None
         _step("sessions", "Searching other sessions")
         try:
             from core.scout.search import gather_cross_session_data
@@ -1585,6 +1632,8 @@ async def _run_scout_llm(
         return None
 
     def _gather_lessons() -> str | None:
+        if _no_recall:
+            return None
         # Relevant past lessons (entry_type='lesson') — workarounds extracted
         # by the refine pass from prior failed sessions, via hybrid search.
         try:
@@ -1600,29 +1649,6 @@ async def _run_scout_llm(
         _step("models", "Listing available models")
         return await build_model_catalog_block()
 
-    async def _gather_candor_intel() -> str | None:
-        # Calibrated operational intel (Candor add-on): degraded tools,
-        # admitted conditions, open questions. The bridge serializes store
-        # access on its own thread — awaiting here never blocks the loop.
-        # First call after boot may hit the lazy ledger fold; the timeout
-        # falls back to the last cached brief instead of stalling scout.
-        if not (settings.candor_enabled and settings.candor_scout_brief):
-            return None
-        try:
-            from core.extensions.candor.bridge import get_candor_bridge
-
-            bridge = get_candor_bridge()
-            try:
-                brief = await asyncio.wait_for(bridge.intel_brief(), timeout=4)
-            except asyncio.TimeoutError:
-                brief = bridge.cached_brief()
-            if brief:
-                _step("candor", "Injecting operational reliability intel")
-            return brief
-        except Exception as e:
-            logger.debug("Scout candor intel failed: %s", e)
-            return None
-
     def _gather_model_routing_intel() -> str | None:
         # H2 (plan §12.4): learned (model, task-category) verdict rates as
         # an exception brief steering recommended_model. Pure SQLite read.
@@ -1632,20 +1658,6 @@ async def _run_scout_llm(
             return build_model_routing_brief()
         except Exception as e:
             logger.debug("Scout model-routing intel failed: %s", e)
-            return None
-
-    def _gather_adaptive_hints() -> str | None:
-        # Adaptive routing hints (plan 4e): learned tool/skill selection
-        # guidance renders ONLY here, beside [OPERATIONAL INTEL] — planning
-        # signal for scout, never agent-prompt weight (I5).
-        if not settings.adaptive_enabled:
-            return None
-        try:
-            from core.adaptive.render import build_routing_hints_block
-
-            return build_routing_hints_block() or None
-        except Exception as e:
-            logger.debug("Scout adaptive hints failed: %s", e)
             return None
 
     def _gather_workspace_state() -> str | None:
@@ -1669,8 +1681,6 @@ async def _run_scout_llm(
         asyncio.to_thread(_gather_lessons),
         asyncio.to_thread(_gather_workspace_state),
         _gather_models(),
-        _gather_candor_intel(),
-        asyncio.to_thread(_gather_adaptive_hints),
         asyncio.to_thread(_gather_model_routing_intel),
     )
     user_content_parts.extend(part for part in gathered if part)
@@ -1685,8 +1695,11 @@ async def _run_scout_llm(
     if not client.has_capacity(model):
         _step("waiting", "Waiting for LLM capacity")
 
+    # One number drives both the loop and the prompt's stated budget. Read
+    # once per run: a settings change mid-run must not desync them.
+    max_rounds = _scout_max_rounds()
     messages = [
-        {"role": "system", "content": _scout_system_prompt()},
+        {"role": "system", "content": _scout_system_prompt(max_rounds)},
         {"role": "user", "content": user_content},
     ]
 
@@ -1698,19 +1711,21 @@ async def _run_scout_llm(
     revisions_used = 0
     rounds_used = 0  # LLM rounds actually spent (observability — scout.done)
 
-    for round_num in range(SCOUT_MAX_ROUNDS):
+    for round_num in range(max_rounds):
         rounds_used = round_num + 1
-        is_last_round = round_num == SCOUT_MAX_ROUNDS - 1
+        # With max_rounds == 1 the first round IS the last round: scout is
+        # offered submit_report only and answers from the preloaded context.
+        is_last_round = round_num == max_rounds - 1
         # On the last round, drop the search tools so scout can't keep digging —
         # but keep submit_report. Removing every tool made the final round
         # unwinnable: the round before it tells scout it MUST submit, and a
         # revision request lands there by construction, so scout was ordered to
         # call a tool that was no longer on offer. Text output is still parsed
         # as a fallback below for models that answer in prose anyway.
-        tools = _SCOUT_TOOLS if not is_last_round else _SCOUT_SUBMIT_ONLY
+        tools = scout_tools_for(brief) if not is_last_round else _SCOUT_SUBMIT_ONLY
 
         # On penultimate round, inject a reminder to submit next round
-        if round_num == SCOUT_MAX_ROUNDS - 2 and report is None:
+        if round_num == max_rounds - 2 and report is None:
             messages.append(
                 {
                     "role": "user",
@@ -1827,7 +1842,7 @@ async def _run_scout_llm(
                 # failures every revision was triggered by a name the sanitizer
                 # would have dropped, and none ever produced a second submit.
                 blocking = _unfixable_issues(candidate)
-                rounds_remaining = SCOUT_MAX_ROUNDS - round_num - 1
+                rounds_remaining = max_rounds - round_num - 1
                 if blocking and revisions_used < _MAX_REVISIONS and rounds_remaining >= 1:
                     _step("revising", f"Scout self-check flagged {len(blocking)} blocking issue(s)")
                     revisions_used += 1
@@ -1871,7 +1886,7 @@ async def _run_scout_llm(
     # reinvents capabilities it already has. The deterministic fallback keeps
     # that context, so a degraded scout turn stays workable.
     if report is None:
-        logger.warning("Scout did not submit report after %d rounds, using deterministic fallback", SCOUT_MAX_ROUNDS)
+        logger.warning("Scout did not submit report after %d rounds, using deterministic fallback", max_rounds)
         report = _build_fallback_report(message, brief)
     elif _is_degenerate_report(report):
         logger.warning("Scout returned an empty report — replacing with deterministic fallback")
@@ -2122,16 +2137,18 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
     every turn, fallback or not — this report carries only what scout would
     have curated.
     """
-    # Basic memory recall
+    # Basic memory recall — skipped entirely for canary sessions (W5): the
+    # fallback path must not become the recall hole the LLM path just closed.
     memory_context = ""
-    try:
-        from core.memory.store import get_memory_store
+    if not memory_recall_denied(brief):
+        try:
+            from core.memory.store import get_memory_store
 
-        store = get_memory_store()
-        if store:
-            memory_context = store.recall(message, top=3) or ""
-    except Exception:
-        pass
+            store = get_memory_store()
+            if store:
+                memory_context = store.recall(message, top=3) or ""
+        except Exception:
+            pass
 
     # Default tools: core + recently used
     from core.tools.registry import get_registry

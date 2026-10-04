@@ -1,5 +1,6 @@
 """Tests for scout agent pattern."""
 
+from config import settings
 from core.scout.report import ScoutReport, SessionBrief
 from core.scout.runner import (
     _build_fallback_report,
@@ -245,54 +246,16 @@ def test_bypass_fallback_stays_quiet():
     assert "[SCOUT STATUS]" not in report.to_system_prompt_section()
 
 
-def test_extract_report_parses_used_hints():
+def test_extract_report_ignores_a_stray_used_hints_key():
+    """used_hints was retired with the adaptive layer (3.2); a model that
+    still emits it must not break report extraction."""
     from core.scout.runner import _extract_report
 
     report = _extract_report(
-        {
-            "recommended_tools": ["bash"],
-            "approach_guidance": "do the thing",
-            "used_hints": ["[yt-dlp-403-captions-fallback]", "plain-id", 42, ""],
-        }
+        {"recommended_tools": ["bash"], "approach_guidance": "do the thing", "used_hints": ["[old-hint]"]}
     )
-    # Brackets tolerated, non-strings dropped at count time (str() here), empties dropped.
-    assert "[yt-dlp-403-captions-fallback]" in report.used_hints or "yt-dlp-403-captions-fallback" in report.used_hints
-    assert "" not in report.used_hints
-
-
-def test_count_hint_usage_sanitizes_and_counts_once(monkeypatch):
-    """Citations are checked against LIVE hint ids and counted at the fresh-
-    report seam — a fabricated id never lands a row, a real one lands one."""
-    from datetime import datetime, timezone
-
-    from core.scout.report import ScoutReport
-    from core.scout.runner import _count_hint_usage
-    from db import models as db
-
-    monkeypatch.setattr("config.settings.adaptive_enabled", True)
-    now = datetime.now(timezone.utc).isoformat()
-    db.adaptive_put_entry(
-        {
-            "id": "real-hint",
-            "kind": "routing_hint",
-            "scope": "global",
-            "title": "real",
-            "content": "prefer x",
-            "risk": "low",
-            "version": 1,
-            "status": "active",
-            "source": "refine",
-            "created_at": now,
-            "updated_at": now,
-        }
-    )
-    db.delete_signal("adaptive_entry", "real-hint")
-    report = ScoutReport(used_hints=["[real-hint]", "made-up-hint", "real-hint"])
-    _count_hint_usage(report)
-    assert report.used_hints == ["real-hint"]  # sanitized + deduped
-    row = db.get_signal("adaptive_entry", "real-hint")
-    assert row is not None and row["reinforcements"] == 1
-    assert db.get_signal("adaptive_entry", "made-up-hint") is None
+    assert report.approach_guidance == "do the thing"
+    assert not hasattr(report, "used_hints")
 
 
 # ---------------------------------------------------------------------------
@@ -300,20 +263,16 @@ def test_count_hint_usage_sanitizes_and_counts_once(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_used_hints_is_required_in_schema():
-    """The echo went 0-for-215 organic turns while optional; required (with []
-    allowed) makes emission the norm and density measurable."""
-    from core.scout.runner import _SCOUT_TOOLS
+def test_scout_schema_has_no_adaptive_surface():
+    """search_adaptive and the used_hints echo went with the adaptive layer."""
+    from core.scout.runner import _SCOUT_TOOLS, SCOUT_SYSTEM_PROMPT
 
+    names = {t["function"]["name"] for t in _SCOUT_TOOLS}
+    assert "search_adaptive" not in names
     schema = [t for t in _SCOUT_TOOLS if t["function"]["name"] == "submit_report"][0]
-    assert "used_hints" in schema["function"]["parameters"]["required"]
-
-
-def test_extract_report_defaults_missing_used_hints_to_empty():
-    from core.scout.runner import _extract_report
-
-    r = _extract_report({"recommended_tools": [], "approach_guidance": "x" * 40})
-    assert r.used_hints == []
+    assert "used_hints" not in schema["function"]["parameters"]["properties"]
+    assert schema["function"]["parameters"]["required"] == ["recommended_tools", "approach_guidance"]
+    assert "ADAPTIVE" not in SCOUT_SYSTEM_PROMPT and "used_hints" not in SCOUT_SYSTEM_PROMPT
 
 
 def test_scout_report_carries_rounds_field():
@@ -330,3 +289,225 @@ def test_cache_is_gone():
 
     for name in ("_cache", "_get_cached", "_put_cache", "_cache_key", "CACHE_TTL"):
         assert not hasattr(runner, name), name
+
+
+# ---------------------------------------------------------------------------
+# Scout structural-gate rule (moved from test_fetch_reliability.py)
+# ---------------------------------------------------------------------------
+
+
+def test_scout_prompt_injects_gate_rule_when_gates_enabled(monkeypatch):
+    from core.scout.runner import _scout_system_prompt
+
+    monkeypatch.setattr(settings, "gates_enabled", False)
+    monkeypatch.setattr(settings, "rlm_enabled", False)
+    assert "STRUCTURAL SPECS" not in _scout_system_prompt()
+    monkeypatch.setattr(settings, "gates_enabled", True)
+    prompt = _scout_system_prompt()
+    assert "STRUCTURAL SPECS" in prompt
+    assert "add_gate" in prompt
+    assert prompt.rstrip().endswith("/no_think")
+    assert prompt.index("STRUCTURAL SPECS") < prompt.index("Do NOT use <think>")
+
+
+def test_scout_prompt_has_live_state_rule():
+    # Static rule (always on): stale memories about mutable operational state
+    # (worker limits, cron jobs) produced phantom friction in session
+    # 1e2806e0d2ea — live tools are the source of truth for such state.
+    from core.scout.runner import SCOUT_SYSTEM_PROMPT
+
+    idx = SCOUT_SYSTEM_PROMPT.index("LIVE STATE BEATS MEMORY")
+    assert idx < SCOUT_SYSTEM_PROMPT.index("KNOWN FACTS BEAT EMPTY CONFIG")
+
+
+def test_scout_prompt_stacks_conditional_rules(monkeypatch):
+    from core.scout.runner import _scout_system_prompt
+
+    monkeypatch.setattr(settings, "gates_enabled", True)
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    prompt = _scout_system_prompt()
+    assert "RECURSIVE ANALYSIS" in prompt
+    assert "STRUCTURAL SPECS" in prompt
+    assert prompt.rstrip().endswith("/no_think")
+
+
+# ---------------------------------------------------------------------------
+# scout_max_rounds (2026-10 surface prune): one planning round by default
+# ---------------------------------------------------------------------------
+
+_GOOD_REPORT = {
+    "recommended_tools": [],
+    "approach_guidance": "1. Read the file.\n2. Count the errors.\n3. Report the count to the user.",
+    "task_type": "data_analysis",
+}
+
+
+def _scout_env(monkeypatch, responses, rounds):
+    """Drive the real _run_scout_llm loop against scripted LLM responses."""
+    from unittest.mock import MagicMock
+
+    from tests.conftest import FakeLLMClient
+
+    fake = FakeLLMClient(responses=responses)
+    fake.has_capacity = MagicMock(return_value=True)
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
+    monkeypatch.setattr("core.memory.store.get_memory_store", lambda: None)
+    monkeypatch.setattr("db.models.search_messages_fts", lambda *a, **kw: [])
+    monkeypatch.setattr(settings, "background_model", "")
+    monkeypatch.setattr(settings, "llm_model", "test-model")
+    monkeypatch.setattr(settings, "scout_max_rounds", rounds)
+    return fake
+
+
+def _resp(content="", tool_calls=None):
+    from core.llm.types import ChatResponse, TokenUsage
+
+    return ChatResponse(
+        content=content,
+        tool_calls=tool_calls,
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        model="test-model",
+        provider="fake",
+        finish_reason="tool_calls" if tool_calls else "stop",
+    )
+
+
+def _call(name, args, cid="c1"):
+    import json
+
+    from core.llm.types import ToolCall
+
+    return ToolCall(id=cid, name=name, arguments=json.dumps(args))
+
+
+def _tool_names(tools):
+    return [t["function"]["name"] for t in tools or []]
+
+
+async def test_one_round_offers_only_submit_report_and_returns_a_valid_report(monkeypatch):
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("submit_report", _GOOD_REPORT)])], rounds=1)
+
+    report = await _run_scout_llm("count the errors in log.txt", SessionBrief(session_id="s", is_fresh=True))
+
+    assert len(fake.calls) == 1
+    assert _tool_names(fake.calls[0]["tools"]) == ["submit_report"]
+    system = fake.calls[0]["messages"][0]["content"]
+    assert "call submit_report now" in system
+    assert "PROCEDURE" not in system and "search_post_mortems" not in system
+    assert report.scout_rounds == 1
+    assert report.from_fallback is False
+    assert report.approach_guidance.startswith("1. Read the file.")
+    assert report.task_type == "data_analysis"
+    assert report.viability == "verified"  # the post-loop self-check ran
+
+
+async def test_one_round_parses_a_json_text_answer(monkeypatch):
+    import json
+
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(content=json.dumps(_GOOD_REPORT))], rounds=1)
+    report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert len(fake.calls) == 1
+    assert report.from_fallback is False and report.scout_rounds == 1
+    assert report.approach_guidance.startswith("1. Read the file.")
+
+
+async def test_one_round_that_calls_a_search_tool_degrades_instead_of_looping(monkeypatch):
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("search_memory", {"query": "x"})])], rounds=1)
+    report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert len(fake.calls) == 1
+    assert report.from_fallback is True and report.fallback_reason == "degraded"
+
+
+async def test_six_rounds_keep_the_search_tools_and_the_round_budget(monkeypatch):
+    """scout_max_rounds=6 is the pre-3.2 behaviour: search first, then submit."""
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(
+        monkeypatch,
+        [
+            _resp(tool_calls=[_call("search_skills", {"query": "logs"}, "c1")]),
+            _resp(tool_calls=[_call("submit_report", _GOOD_REPORT, "c2")]),
+        ],
+        rounds=6,
+    )
+    report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+
+    assert len(fake.calls) == 2
+    first = _tool_names(fake.calls[0]["tools"])
+    assert "search_skills" in first and "submit_report" in first
+    system = fake.calls[0]["messages"][0]["content"]
+    assert "PROCEDURE" in system and "maximum of 6 tool rounds" in system
+    assert "by round 5 at the latest" in system
+    assert report.scout_rounds == 2 and report.viability == "verified"
+
+
+async def test_six_rounds_offer_submit_only_on_the_last_round(monkeypatch):
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("search_skills", {"query": "x"})])], rounds=6)
+    report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert len(fake.calls) == 6
+    assert all("search_skills" in _tool_names(c["tools"]) for c in fake.calls[:5])
+    assert _tool_names(fake.calls[5]["tools"]) == ["submit_report"]
+    assert report.from_fallback is True and report.scout_rounds == 6
+
+
+def test_scout_max_rounds_is_clamped_and_bounded(monkeypatch):
+    from api.routers.health import _SETTING_BOUNDS
+    from core.scout.runner import SCOUT_MAX_ROUNDS_CAP, _scout_max_rounds
+
+    assert settings.__class__().scout_max_rounds == 1
+    assert _SETTING_BOUNDS["scout_max_rounds"] == (1, SCOUT_MAX_ROUNDS_CAP)
+    for value, expected in ((0, 1), (1, 1), (3, 3), (6, 6), (99, 6), ("x", 1)):
+        monkeypatch.setattr(settings, "scout_max_rounds", value)
+        assert _scout_max_rounds() == expected, value
+
+
+def test_scout_prompt_states_the_configured_round_budget():
+    from core.scout.runner import SCOUT_SYSTEM_PROMPT, _scout_system_prompt
+
+    assert "call submit_report now" in SCOUT_SYSTEM_PROMPT
+    assert "search_memory" not in SCOUT_SYSTEM_PROMPT.split("REPORT FIELD GUIDANCE")[0]
+    three = _scout_system_prompt(3)
+    assert "maximum of 3 tool rounds" in three and "by round 2 at the latest" in three
+    for prompt in (SCOUT_SYSTEM_PROMPT, three):
+        assert "REPORT FIELD GUIDANCE" in prompt and prompt.rstrip().endswith("/no_think")
+
+
+async def test_scout_done_event_carries_fallback_reason(monkeypatch):
+    import json
+
+    from db import models as db
+    from sessions import state_v2 as sv2
+    from sessions.manager import SessionManager
+
+    async def _runner(session_id, message, session, pre_saved=False, is_retry=False):
+        return None
+
+    reasons = []
+    for report in (
+        ScoutReport(approach_guidance="1. a\n2. b\n3. c"),
+        ScoutReport(approach_guidance="plan", from_fallback=True, fallback_reason="bypass"),
+        ScoutReport(approach_guidance="plan", from_fallback=True),
+    ):
+
+        async def _fake_run_scout(session_id, message, brief=None, emit=None, is_retry=False, _r=report):
+            return _r
+
+        monkeypatch.setattr("core.scout.runner.run_scout", _fake_run_scout)
+        mgr = SessionManager()
+        mgr.set_agent_runner(_runner)
+        sid = mgr.create_session(title="scout event")
+        session = mgr.get(sid)
+        sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+        await mgr._run_scout_and_process(session, "go")
+        rows = [m for m in db.get_messages(sid) if m["role"] == "scout"]
+        reasons.append(json.loads(rows[-1]["content"])["fallback_reason"])
+
+    assert reasons == [None, "bypass", "degraded"]

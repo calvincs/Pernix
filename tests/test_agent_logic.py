@@ -141,8 +141,10 @@ def test_is_meta_commentary_long_stalling():
 
 
 def test_near_dup_call_model_same():
-    a = {"arguments": json.dumps({"model": "gpt-4", "images": ["img.png"], "prompt": "describe"})}
-    b = {"arguments": json.dumps({"model": "gpt-4", "images": ["img.png"], "prompt": "explain"})}
+    """Same question, same model, same image — only the wording of the
+    whitespace and the capitalisation differ."""
+    a = {"arguments": json.dumps({"model": "gpt-4", "image_path": "img.png", "prompt": "Describe   the chart"})}
+    b = {"arguments": json.dumps({"model": "gpt-4", "image_path": "img.png", "prompt": "describe the chart"})}
     assert _is_near_duplicate_call(a, b, "call_model") is True
 
 
@@ -152,10 +154,28 @@ def test_near_dup_call_model_diff_model():
     assert _is_near_duplicate_call(a, b, "call_model") is False
 
 
-def test_near_dup_call_model_diff_images():
-    a = {"arguments": json.dumps({"model": "gpt-4", "images": ["a.png"]})}
-    b = {"arguments": json.dumps({"model": "gpt-4", "images": ["b.png"]})}
+def test_near_dup_call_model_diff_image_path():
+    a = {"arguments": json.dumps({"model": "gpt-4", "prompt": "describe", "image_path": "a.png"})}
+    b = {"arguments": json.dumps({"model": "gpt-4", "prompt": "describe", "image_path": "b.png"})}
     assert _is_near_duplicate_call(a, b, "call_model") is False
+
+
+def test_near_dup_call_model_diff_prompt():
+    """Two questions to one model are two questions."""
+    a = {"arguments": json.dumps({"model": "gpt-4", "prompt": "What colour is the car?"})}
+    b = {"arguments": json.dumps({"model": "gpt-4", "prompt": "Transcribe the sign."})}
+    assert _is_near_duplicate_call(a, b, "call_model") is False
+
+
+def test_near_dup_call_model_diff_system():
+    a = {"arguments": json.dumps({"model": "gpt-4", "prompt": "hi", "system": "be terse"})}
+    b = {"arguments": json.dumps({"model": "gpt-4", "prompt": "hi", "system": "be thorough"})}
+    assert _is_near_duplicate_call(a, b, "call_model") is False
+
+
+def test_near_dup_call_model_identical():
+    args = json.dumps({"model": "gpt-4", "prompt": "describe", "image_path": "a.png"})
+    assert _is_near_duplicate_call({"arguments": args}, {"arguments": args}, "call_model") is True
 
 
 def test_near_dup_generic_same_structural():
@@ -729,116 +749,6 @@ def test_expand_tools_from_discovery_does_not_duplicate_existing(monkeypatch, tm
     active = ["alpha"]
     _expand_tools_from_discovery("- **alpha** [core]: x\n", active)
     assert active == ["alpha"]
-
-
-# ---------------------------------------------------------------------------
-# _inject_created_tool — custom tool promotion after create_tool/update_tool
-# ---------------------------------------------------------------------------
-
-
-def test_inject_created_tool_adds_to_active(monkeypatch, tmp_path):
-    """A newly created custom tool must enter active_tools immediately so the
-    LLM schema is updated on the next round without a separate discover_tools call."""
-    from core.tools.registry import ToolRegistry
-
-    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
-    reg = ToolRegistry()
-    reg.register(
-        name="scan_home_devices",
-        func=lambda: "ok",
-        description="Scan home network",
-        parameters={"type": "object", "properties": {}},
-    )
-    monkeypatch.setattr("core.tools.registry._registry", reg)
-
-    from core.agent import _inject_created_tool
-
-    active: list[str] = []
-    _inject_created_tool("scan_home_devices", active)
-    assert active == ["scan_home_devices"]
-
-
-def test_inject_created_tool_skips_disabled(monkeypatch, tmp_path):
-    """A disabled tool must not be injected even if create_tool succeeded — matches
-    the same guard in _expand_tools_from_discovery."""
-    from core.tools.registry import ToolRegistry
-
-    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
-    reg = ToolRegistry()
-    reg.register(
-        name="my_tool",
-        func=lambda: "ok",
-        description="x",
-        parameters={"type": "object", "properties": {}},
-    )
-    reg.disable("my_tool")
-    monkeypatch.setattr("core.tools.registry._registry", reg)
-
-    from core.agent import _inject_created_tool
-
-    active: list[str] = []
-    _inject_created_tool("my_tool", active)
-    assert active == []
-
-
-def test_inject_created_tool_skips_unknown(monkeypatch, tmp_path):
-    """If create_tool failed silently and the tool isn't in the registry, nothing
-    is injected."""
-    from core.tools.registry import ToolRegistry
-
-    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
-    reg = ToolRegistry()
-    monkeypatch.setattr("core.tools.registry._registry", reg)
-
-    from core.agent import _inject_created_tool
-
-    active: list[str] = []
-    _inject_created_tool("nonexistent_tool", active)
-    assert active == []
-
-
-def test_inject_created_tool_no_duplicate(monkeypatch, tmp_path):
-    """If the tool is somehow already in active_tools, no duplicate is inserted."""
-    from core.tools.registry import ToolRegistry
-
-    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
-    reg = ToolRegistry()
-    reg.register(
-        name="scan_home_devices",
-        func=lambda: "ok",
-        description="x",
-        parameters={"type": "object", "properties": {}},
-    )
-    monkeypatch.setattr("core.tools.registry._registry", reg)
-
-    from core.agent import _inject_created_tool
-
-    active = ["scan_home_devices"]
-    _inject_created_tool("scan_home_devices", active)
-    assert active == ["scan_home_devices"]
-
-
-def test_inject_created_tool_maintains_sort_order(monkeypatch, tmp_path):
-    """Insertion must preserve sorted order so prompt-cache stability is maintained."""
-    from core.tools.registry import ToolRegistry
-
-    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
-    reg = ToolRegistry()
-    for name in ("bash", "scan_home_devices", "recall"):
-        reg.register(
-            name=name,
-            func=lambda: "ok",
-            description="x",
-            parameters={"type": "object", "properties": {}},
-        )
-    monkeypatch.setattr("core.tools.registry._registry", reg)
-
-    from core.agent import _inject_created_tool
-
-    active = ["bash", "recall"]
-    _inject_created_tool("scan_home_devices", active)
-    assert active == sorted(active)
-    assert "scan_home_devices" in active
 
 
 # ---------------------------------------------------------------------------
