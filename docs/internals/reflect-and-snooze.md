@@ -7,7 +7,7 @@ Two non-obvious subsystems that run alongside the agent loop:
 - **Reflect** — a quality-gate pass that runs after every turn, verifies whether the user's intent was actually fulfilled, and can trigger bounded retries if it wasn't.
 - **Snooze** — idle-time housekeeping that runs in the background when no sessions are active, deduplicating memory, consolidating clusters, extracting user-profile facts, archiving old post-mortems — and, when enabled, running the [Dream](dream.md) introspection step.
 
-Both are off the critical path of any single user request, but they shape how Pernix behaves over weeks and months. This page explains what each does and where to tune it.
+Snooze and deferred ordinary-chat review run in the background; in-turn worker and cron review remains on the completion path. Both shape how Pernix behaves over weeks and months. This page explains what each does and where to tune it.
 
 ---
 
@@ -25,6 +25,20 @@ Reflect sees the **current attempt's transcript** with verbatim tool result bodi
 - The agent's final response (echoed at the end for grounding).
 
 This is what lets reflect verify factual claims against what the tools actually returned, instead of grading them against its own training-data priors.
+
+### Factual correction provenance
+
+The evidence also includes paired tool-call IDs, request arguments and result
+excerpts. A factual failure must cite an observed result and a later verification
+for the same subject, with verbatim quotes. An abandoned earlier fetch cannot
+invalidate a corrected later fetch. The guard withholds unsupported corrections:
+verification becomes `unknown`, corrective retry/lesson fields are cleared, and
+no corrective notification is sent. Deterministic gates remain enforced.
+
+This validates attribution, not arbitrary semantic truth. Truncated or absent
+sources cannot support a correction. The nightly grader hold-out counts a
+withheld factual correction as ungradable rather than crediting it as a pass.
+See [canary.md](canary.md#the-trust-tab) for the Trust view.
 
 ### Refusals are not failures
 
@@ -250,16 +264,30 @@ Numbering has gaps because it is historical, not ordinal — an activity that is
 
 Migration v32 converts every legacy `refined:{sid}` value (an ISO timestamp) to "the session's current max message id" — a one-time rewrite so nothing already graded re-refines on deploy; only future growth re-arms a session from then on. Refine's own attribution also widened in v3.1: `_identify_active_skill` used to see only explicit `load_skill` calls, so a scout-planned session that runs a skill's script directly never attributed its proposal to that skill; it now also matches `skills/<name>/` path references across the transcript and skill names named in the scout plan, validated against the registry so a stray path string can't misroute a proposal. Refine's evidence changed too: instead of only the transcript's last 8000 characters, it now extracts failing tool/job results chronologically (`Error` prefix, `state=failed`, tracebacks, non-zero `exit=`, deduplicated) paired with the assistant intent that preceded each, so a long session's failure-then-workaround arc survives even when it happened well before the tail.
 
-A cycle runs until the ladder **completes** — there is no per-task time slice. Two things end it early:
+A cycle walks the ladder with bounded expensive memory work. Consolidation,
+dedup and rerouting each have a 60-second activity limit; splitting has 120
+seconds. Activity failures mark the cycle `partial` and allow later work to run.
+Consolidation scans above 64 files save a filename-pair cursor (at most 2,000
+pairs or 10 seconds per batch); rerouting saves a file/entry cursor (200 settled
+entries or 10 seconds). Candidate discovery is bounded; original entries still
+undergo merge validation. Failed split revisions back off from 30 minutes to
+24 hours, shrink batches and allow other files to progress.
 
-- **User activity.** A new prompt, cron fire, or shutdown sets the cycle's cancel event, which aborts even in-flight LLM awaits. The interrupted activity records a watermark and resumes on the next cycle.
+Two things can end the whole cycle early:
+
+- **User activity.** A new prompt, cron fire, or shutdown sets the cycle's cancel event, which aborts even in-flight LLM awaits. Resumable scans preserve progress for a later cycle; other interrupted activities retry according to their own state.
 - **The hang backstop.** `snooze_max_cycle_seconds` (default 900) is runaway protection, not a budget — it only fires if an activity genuinely hangs. Local (Ollama) background models get 4x headroom, since slow local inference is normal there, not a hang.
+
+Cycle stats expose `active_rung`, `rung_durations_ms`, `rung_failures`,
+`last_outcome`, `degraded` and `last_successful_cycle`. A normal completed cycle
+clears degraded status; a yield does not erase an earlier unresolved failure.
+See [operations.md](../operations.md) for health, logs and verification.
 
 ### Cooperative scheduling
 
 Snooze checks `idle_minutes` against `snooze_cooldown_minutes` (default 5). A session that just went idle won't trigger Snooze immediately — there's a cooldown so you don't get housekeeping running 30 seconds after every chat. Cycles also skip entirely when nothing happened since the last one — no activity, no work to review.
 
-When a new session starts mid-cycle, Snooze yields immediately: the cancel event aborts the in-flight activity (including a pending LLM call), the activity records its watermark, and the next cycle picks up where it left off. Your work always wins.
+When a new session starts mid-cycle, Snooze yields immediately: the cancel event aborts the in-flight activity (including a pending LLM call), workers retain their own cancellation signal permanently, and later cycles resume eligible work without reviving old worker threads. Your work always wins.
 
 For debugging, a localhost-only `POST /api/admin/snooze-cycle` triggers a cycle on demand, skipping the cadence and cooldown checks (but never the real gates — active sessions still refuse it). It also returns an `idle_blockers()` diagnostic explaining why a cycle *wouldn't* run.
 

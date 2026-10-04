@@ -341,8 +341,11 @@ that happened, and how much is the model agreeing with itself. It reads
 
 - **Grader agreement** — how often reflect's verdict matches the user's thumbs
   on the same turn, over the number of turns that carry both; plus the
-  grader's hold-out accuracy against the fixture set when a run has recorded
-  one.
+  grader's hold-out accuracy on graded cases, whole-suite success (correct /
+  total) and grading completion (graded / total). Counts include ungradable
+  cases, including rejected factual corrections. For example, seven correct,
+  one wrong and one ungradable means 87.5% conditional accuracy but 77.8%
+  whole-suite success; the ninth case does not disappear.
 - **Where outcomes come from** — turns whose outcome came from a thumbs, from
   the user's next message, and from reflect alone, in that precedence order,
   plus turns graded against turns sent in the last 7 days.

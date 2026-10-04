@@ -721,6 +721,13 @@ Returns `{"status": "healthy", ...}` with the release version, build id, current
 
 `sessions_active` is always ≤ `sessions_loaded`. Watch the first for load and the second for footprint; a large gap just means recent conversations have not been reaped yet.
 
+`maintenance.snooze` also reports `last_outcome`, `degraded`,
+`last_successful_cycle`, `active_rung`, `rung_durations_ms` and `rung_failures`.
+These fields may be absent before the first recorded cycle. `status: healthy`
+means the service responds; inspect nested maintenance diagnostics to detect a
+partial or timed-out cycle. `maintenance.jobs_reconciled` counts repaired
+detached-job records in this process. See [operations.md](operations.md).
+
 ### Detailed Diagnostics *(localhost-only)*
 ```
 GET /api/health/detailed
@@ -1066,6 +1073,18 @@ The canary suite emits no SSE events: poll the endpoints above. Its only push si
 The adaptive layer's `/api/adaptive/*` endpoints were removed in 3.2 with the layer itself; its tables stay in the database as history.
 
 ---
+
+## Trust and grader hold-outs
+
+`GET /api/trust` returns `grader`, `outcomes` and `canaries` diagnostic sections.
+`grader.holdout` is null before a report exists. New reports preserve `accuracy`
+and `n` (graded cases) and add `total`, `attempted`, `graded`, `correct`, `failed`
+(wrong graded cases), `ungradable`, `success_rate` and `completion_rate`.
+`accuracy = correct / graded`; `success_rate = correct / total`;
+`completion_rate = graded / total`. An empty denominator produces null.
+`by_case` retains each expected answer, actual answer or error. An unsupported
+factual correction is ungradable, not a successful pass. Older saved reports
+remain readable and acquire the extra fields on the next hold-out run.
 
 ## MCP Servers
 

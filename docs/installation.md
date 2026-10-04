@@ -27,8 +27,10 @@ This guide covers everything you need to get Pernix running, from system require
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository-url>
-cd pernix
+git clone https://github.com/calvincs/Pernix.git
+cd Pernix
+# Select the 3.2 preview while promotion to main is pending:
+git switch next-3.2-testing
 ```
 
 ### 2. Create a Virtual Environment
