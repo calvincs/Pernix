@@ -401,3 +401,59 @@ def test_daily_retention_preserves_35_archives_and_legacy_logs(tmp_path):
     (tmp_path / "pernix.log.1").write_text("legacy")
     assert handler.getFilesToDelete() == archives[:1]
     handler.close()
+
+
+def test_reroute_keeps_matching_source_without_scanning_catalogue():
+    from core.memory.sweeps import classify_entry
+
+    class Catalogue(dict):
+        def items(self):
+            raise AssertionError("Correctly placed entries must not scan other files")
+
+    entry = SimpleNamespace(entry_type="note", content="deployment notes", tags=[])
+    assert classify_entry(entry, "ops.notes", Catalogue({"ops.notes": {"deployment"}})) is None
+
+
+def test_reroute_batches_resume_without_skipping_settled_entries(monkeypatch):
+    from core.memory.sweeps import scan_for_reroute_candidates
+
+    entries = [SimpleNamespace(epoch=i, entry_type="profile", content="profile", tags=[]) for i in range(1, 4)]
+    monkeypatch.setattr("core.memory.format.parse_entries_from_markdown", lambda *args: entries)
+    files = [SimpleNamespace(name=name, entry_count=3) for name in ("notes.a", "notes.b")]
+    store = SimpleNamespace(read_file=lambda name: "synthetic")
+    cursor, seen = {}, []
+    for _ in range(4):
+        high, medium = scan_for_reroute_candidates(store, files, {}, 10, lambda: False, cursor, entry_limit=2)
+        assert len(high) <= 2
+        assert medium == []
+        seen.extend((row["src_file"], row["entry"].epoch) for row in high)
+        if cursor.get("finished"):
+            break
+    assert cursor["finished"]
+    assert seen == [(name, epoch) for name in ("notes.a", "notes.b") for epoch in (1, 2, 3)]
+
+
+def test_reroute_cancelled_entry_does_not_advance_cursor(monkeypatch):
+    from core.memory.sweeps import scan_for_reroute_candidates
+
+    entry = SimpleNamespace(epoch=1, entry_type="note", content="unclassified", tags=[])
+    monkeypatch.setattr("core.memory.format.parse_entries_from_markdown", lambda *args: [entry])
+    cancelled = False
+
+    class Catalogue(dict):
+        def items(self):
+            nonlocal cancelled
+            cancelled = True
+            return super().items()
+
+    cursor = {}
+    high, medium = scan_for_reroute_candidates(
+        SimpleNamespace(read_file=lambda _: "synthetic"),
+        [SimpleNamespace(name="notes.a", entry_count=2)],
+        Catalogue({"notes.b": {"unclassified"}}),
+        10,
+        lambda: cancelled,
+        cursor,
+    )
+    assert high == medium == []
+    assert cursor == {}

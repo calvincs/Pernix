@@ -491,7 +491,7 @@ def build_file_keywords(files) -> dict[str, set[str]]:
     return file_keywords
 
 
-def classify_entry(entry, src_file: str, file_keywords: dict[str, set[str]]) -> dict | None:
+def classify_entry(entry, src_file: str, file_keywords: dict[str, set[str]], is_cancelled=lambda: False) -> dict | None:
     """Judge one entry's placement. Returns a candidate dict, or None to keep.
 
     Two checks, in order: type-file consistency (high confidence), then
@@ -511,12 +511,18 @@ def classify_entry(entry, src_file: str, file_keywords: dict[str, set[str]]) -> 
 
     tag_str = " ".join(entry.tags).lower()
     content_lower = entry.content.lower()
+    # A nonzero source score already proves this is not a routing candidate.
+    # Avoid comparing a correctly placed entry against the entire catalogue.
+    if any(kw in tag_str or kw in content_lower for kw in file_keywords.get(src_file, ())):
+        return None
 
     # Space-bucket boundary (v33): reroute targets stay inside the entry's
     # own bucket — a space entry never moves to a global file or another
     # space, and global entries never get pulled into a space.
     scores: dict[str, float] = {}
     for fname, fkws in file_keywords.items():
+        if is_cancelled():
+            return None
         if space_bucket(fname) != src_bucket:
             continue
         tag_hits = sum(2.0 for kw in fkws if kw in tag_str)
@@ -547,6 +553,10 @@ def scan_for_reroute_candidates(
     file_keywords: dict[str, set[str]],
     max_epoch: int,
     is_cancelled: Callable[[], bool],
+    progress: dict | None = None,
+    *,
+    entry_limit: int = 200,
+    seconds: float = 10,
 ) -> tuple[list[dict], list[dict]]:
     """Score every settled entry against every file. Returns (high, medium).
 
@@ -558,9 +568,19 @@ def scan_for_reroute_candidates(
 
     high: list[dict] = []
     medium: list[dict] = []
-    for mem_file in files:
-        if is_cancelled():
-            break
+    deadline = time.monotonic() + seconds
+    checked = 0
+    resume_file = (progress or {}).get("file", "")
+    resume_epoch = (progress or {}).get("epoch", -1)
+
+    def stopped():
+        return is_cancelled() or (progress is not None and time.monotonic() >= deadline)
+
+    for mem_file in sorted(files, key=lambda f: f.name):
+        if progress is not None and mem_file.name < resume_file:
+            continue
+        if stopped():
+            return high, medium
         if mem_file.entry_count < 2:
             continue
 
@@ -568,15 +588,24 @@ def scan_for_reroute_candidates(
         if not md_content:
             continue
 
-        for entry in parse_entries_from_markdown(mem_file.name, md_content):
-            if is_cancelled():
-                break
+        for entry in sorted(parse_entries_from_markdown(mem_file.name, md_content), key=lambda e: e.epoch):
+            if progress is not None and mem_file.name == resume_file and entry.epoch <= resume_epoch:
+                continue
+            if stopped() or (progress is not None and checked >= entry_limit):
+                return high, medium
             if entry.epoch > max_epoch:
                 continue
-            candidate = classify_entry(entry, mem_file.name, file_keywords)
+            candidate = classify_entry(entry, mem_file.name, file_keywords, stopped)
+            if stopped():
+                return high, medium
+            if progress is not None:
+                progress.update(file=mem_file.name, epoch=entry.epoch, finished=False)
+            checked += 1
             if candidate is None:
                 continue
             (high if candidate["confidence"] == "high" else medium).append(candidate)
+    if progress is not None:
+        progress["finished"] = True
     return high, medium
 
 
@@ -626,12 +655,23 @@ async def reroute_misplaced_entries(
     file_keywords = build_file_keywords(files)
     one_day_ago = int(time.time()) - 86400
 
-    high_conf, medium_conf = await asyncio.to_thread(
-        scan_for_reroute_candidates, store, files, file_keywords, one_day_ago, is_cancelled
+    try:
+        progress = json.loads(db.get_snooze_state("reroute_cursor") or "{}")
+    except (ValueError, TypeError):
+        progress = {}
+    progress["finished"] = False
+    high_conf, medium_conf = await run_background(
+        scan_for_reroute_candidates, store, files, file_keywords, one_day_ago, is_cancelled, progress
     )
+    if is_cancelled():
+        return False, 0
+    scanning = not progress["finished"]
+    db.set_snooze_state("reroute_cursor", json.dumps(progress) if scanning else "{}")
+    logger.info("Snooze reroute batch: %d candidates, remaining=%s", len(high_conf) + len(medium_conf), scanning)
 
     if not high_conf and not medium_conf:
-        db.set_snooze_state("last_reroute_scan", datetime.now(timezone.utc).isoformat())
+        if not scanning:
+            db.set_snooze_state("last_reroute_scan", datetime.now(timezone.utc).isoformat())
         return False, 0
 
     used_llm = False
@@ -770,7 +810,8 @@ async def reroute_misplaced_entries(
     if rerouted:
         logger.info("Snooze: rerouted %d misplaced entries", rerouted)
 
-    db.set_snooze_state("last_reroute_scan", datetime.now(timezone.utc).isoformat())
+    if not scanning and not is_cancelled():
+        db.set_snooze_state("last_reroute_scan", datetime.now(timezone.utc).isoformat())
     return used_llm, rerouted
 
 

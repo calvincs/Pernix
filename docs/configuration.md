@@ -565,6 +565,9 @@ and rerouting each have a 60-second activity limit; splitting has 120 seconds.
 A timed-out activity marks the cycle partial and allows later activities to run.
 Snooze health exposes activity durations, failures and the last successful cycle.
 Workers retain their cancellation signal even after a later cycle starts.
+Rerouting scans at most 200 settled entries or 10 seconds per batch, saves its
+file/entry cursor, and skips catalogue scoring for entries that already match
+their current file.
 
 Failed splits use smaller batches and persistent per-file backoff (30 minutes
 through 24 hours), reset when the file revision changes. Other files remain
