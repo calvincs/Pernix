@@ -9,13 +9,12 @@ the authoritative order). They fall into a few clusters:
   stale entries, and the distillation coverage audit (the lens's own
   feedback loop).
 - Skill learning — extracting skill requirements, mining skill co-occurrence.
-- Signal synthesis — folding operational signals (and, when Candor is on, the
-  candor gate) into durable memory.
+- Signal synthesis — folding operational signals into durable memory.
 - Retention sweeps — expiring post-mortems, RLM runs, canary
   runs, and old cron runs/sessions.
 - Self-modification — refine (authoring improvements) and applying approved
-  adaptive-policy edits.
-- Introspection add-ons — dream and the telos slow loop.
+  skill proposals.
+- Introspection add-ons — dream.
 
 This module owns lifecycle, the idle gate, and the ladder. The work itself
 lives next to the store it touches: memory-store surgery in
@@ -34,12 +33,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
 from config import settings
+from core import notices
 from core.pools import run_background
 
 logger = logging.getLogger("pernix.snooze")
@@ -48,6 +51,10 @@ logger = logging.getLogger("pernix.snooze")
 # sweep may hold open at once (its own origin only — deliberately NOT the
 # global dream_max_pending, see _sweep_skill_content_changes).
 SKILL_SWEEP_MAX_PENDING = 30
+
+# Captured by child tasks and worker contexts; a new cycle cannot revive old work.
+_CANCEL_SCOPES = contextvars.ContextVar("snooze_cancel_scopes", default=())
+RUNG_TIMEOUTS = {"consolidate_files": 60, "dedup_sweep": 60, "reroute_misplaced_entries": 60, "split_file": 120}
 
 
 # Session types snooze looks straight through (plan §5, pass-3 F3): they
@@ -62,8 +69,8 @@ def snooze_transparent(session) -> bool:
 
     Canary sessions by type, plus any session currently driven by goal
     auto-continuations (audit P5): a multi-hour autonomous goal used to
-    starve the entire self-improvement ladder — adaptive apply, dream,
-    telos — for its whole duration. The LLM semaphore's priority tiers
+    starve the entire self-improvement ladder — refine and dream — for
+    its whole duration. The LLM semaphore's priority tiers
     keep snooze's background calls from contending with the goal's own.
     """
     return getattr(session, "session_type", "") in SNOOZE_TRANSPARENT_TYPES or bool(
@@ -76,9 +83,9 @@ def _mutation_blocked() -> bool:
     turn) is mid-flight. Read-only/LLM review activities run fine alongside
     an autonomous goal — the semaphore's background priority handles
     contention — but activities that MUTATE shared state the live turn
-    depends on (global adaptive applies, memory-store surgery) must wait
-    for genuine idle: a mid-turn prompt or memory mutation changes the very
-    turn the tripwire would then attribute the batch to."""
+    depends on (memory-store surgery, skill-file applies) must wait for
+    genuine idle: a mid-turn memory mutation changes the very turn that is
+    reading it."""
     try:
         from sessions.manager import get_manager
 
@@ -104,6 +111,7 @@ class SnoozeRunner:
         self._cancel_generation: int = 0  # bumped by request_cancel()
         self._cycle_generation: int = -1  # set to _cancel_generation at cycle start
         self._running = False
+        self._thread_cancel = threading.Event()
         self._stats = {
             "cycles": 0,
             "cycles_skipped": 0,
@@ -113,6 +121,15 @@ class SnoozeRunner:
             "entries_enriched": 0,
             "last_cycle": None,
         }
+        try:
+            from db import models as db
+
+            saved = json.loads(db.get_snooze_state("snooze_health") or "{}")
+            for key in ("last_successful_cycle", "last_outcome", "degraded"):
+                if key in saved:
+                    self._stats[key] = saved[key]
+        except Exception:
+            pass
         self._activity_since_last_cycle: bool = True  # first cycle always runs
         self._last_cycle_time: float = 0.0
         # Per-cycle abort signal: fresh Event each cycle (no clear() races),
@@ -130,6 +147,7 @@ class SnoozeRunner:
         """
         if self._running:
             self._cancel_generation += 1
+            self._thread_cancel.set()
             evt = self._cancel_event
             if evt is not None:
                 evt.set()
@@ -271,7 +289,8 @@ class SnoozeRunner:
         return base
 
     def _is_cancelled(self) -> bool:
-        return self._cancel_generation != self._cycle_generation
+        scopes = _CANCEL_SCOPES.get()
+        return any(event.is_set() for event in scopes) if scopes else self._cancel_generation != self._cycle_generation
 
     def _llm_available(self) -> bool:
         """Check if LLM semaphore is fully available (no contention)."""
@@ -341,6 +360,10 @@ class SnoozeRunner:
         # before this point will make _is_cancelled() return True immediately.
         self._cycle_generation = self._cancel_generation
         self._cancel_event = asyncio.Event()
+        self._thread_cancel = threading.Event()
+        scope_token = _CANCEL_SCOPES.set((self._thread_cancel,))
+        self._stats["rung_failures"] = {}
+        self._stats["rung_durations_ms"] = {}
         self._running = True
         logger.info("Snooze cycle starting")
 
@@ -372,9 +395,11 @@ class SnoozeRunner:
                 # re-raise. Swallowing this meant the maintenance tick
                 # carried on into WAL checkpoint/vacuum while shutdown
                 # waited. The finally below still runs, bookkeeping intact.
+                self._thread_cancel.set()
                 cycle_task.cancel()
                 with contextlib.suppress(BaseException):
                     await cycle_task
+                outcome = "cancelled"
                 logger.debug("Snooze cycle cancelled")
                 raise
             if cycle_task in done:
@@ -382,8 +407,11 @@ class SnoozeRunner:
                 if exc is not None:
                     outcome = "error"
                     logger.error("Snooze cycle error: %s", exc, exc_info=exc)
+                elif self._stats["rung_failures"]:
+                    outcome = "partial"
             else:
                 yielded = self._cancel_event.is_set()
+                self._thread_cancel.set()
                 cycle_task.cancel()
                 with contextlib.suppress(BaseException):
                     await cycle_task
@@ -400,11 +428,24 @@ class SnoozeRunner:
                         backstop,
                     )
         finally:
+            self._thread_cancel.set()
+            _CANCEL_SCOPES.reset(scope_token)
             waiter.cancel()
             self._cancel_event = None
             self._running = False
             self._stats["cycles"] += 1
             self._stats["last_cycle"] = datetime.now(timezone.utc).isoformat()
+            self._stats["last_outcome"] = outcome
+            if outcome not in ("yielded", "cancelled"):
+                self._stats["degraded"] = outcome in ("partial", "backstop", "error")
+            if outcome == "ran":
+                self._stats["last_successful_cycle"] = self._stats["last_cycle"]
+            try:
+                from db import models as db
+
+                await asyncio.to_thread(db.set_snooze_state, "snooze_health", json.dumps(self._stats))
+            except Exception:
+                logger.debug("Could not persist snooze health", exc_info=True)
             # Only clear on a cycle that actually ran to an end. A cycle that
             # YIELDED was preempted by a user prompt, and the prompt sets this
             # flag on its way in — clobbering it here made the interrupted
@@ -425,20 +466,38 @@ class SnoozeRunner:
         an exception in an early rung — a permissions error on one RLM run
         dir, a corrupt FTS row, one hand-created memory file with a space in
         its name — ended the whole coroutine. Everything after it (refine,
-        skill auto-apply, dream, telos, adaptive) was then skipped on EVERY
+        the skill rungs, dream) was then skipped on EVERY
         cycle for as long as the fault persisted, and the only sign was a
         single "Snooze cycle error" line.
         """
+        started = time.monotonic()
+        event = threading.Event()
+        token = _CANCEL_SCOPES.set((*_CANCEL_SCOPES.get(), event))
+        self._stats["active_rung"] = label
+        logger.info("Snooze activity %s starting", label)
         try:
+            if label in RUNG_TIMEOUTS:
+                return await asyncio.wait_for(coro, timeout=RUNG_TIMEOUTS[label])
             return await coro
         except asyncio.CancelledError:
-            coro_close = getattr(coro, "close", None)
-            if coro_close:
-                coro_close()
             raise
         except Exception as e:
-            logger.error("Snooze activity %r failed (cycle continues): %s", label, e, exc_info=True)
+            reason = "timeout" if isinstance(e, TimeoutError) else type(e).__name__
+            self._stats.setdefault("rung_failures", {})[label] = reason
+            logger.warning(
+                "Snooze activity %s failed (%s); continuing later activities",
+                label,
+                reason,
+                exc_info=not isinstance(e, TimeoutError),
+            )
             return default
+        finally:
+            event.set()
+            _CANCEL_SCOPES.reset(token)
+            duration = int((time.monotonic() - started) * 1000)
+            self._stats.setdefault("rung_durations_ms", {})[label] = duration
+            self._stats["active_rung"] = None
+            logger.info("Snooze activity %s finished in %dms", label, duration)
 
     async def _do_cycle(self) -> None:
         """Execute activities in priority order."""
@@ -543,20 +602,10 @@ class SnoozeRunner:
             _announce(bus, "cleanup_rlm_runs", "Pruning old RLM run directories")
             await self._rung("cleanup_rlm_runs", self._cleanup_rlm_runs())
 
-        # Activity 12b: Candor operational-memory maintenance (no LLM).
-        # Runs the admission gate (the expensive sweep — this is its only
-        # home), drains the pending observation buffer, and checkpoints. All
-        # store work happens on the bridge's dedicated executor thread;
-        # cancellation is polled between phases and drain chunks.
-        if not self._is_cancelled() and settings.candor_enabled:
-            _announce(bus, "candor_gate", "Sweeping Candor operational memory (gate + buffer drain)")
-            await self._rung("candor_maintenance", self._candor_maintenance())
-
         # Activity 12c: Canary retention cleanup (no LLM). Prunes canary_runs
-        # rows and the canary sessions behind them past canary_retention_days.
-        # NEVER dispatches sweeps — post-batch sweeps are enqueued through the
-        # scheduler for the next idle window (plan §5: inline dispatch from a
-        # snooze activity would cancel the cycle that produced the batch).
+        # rows and the canary sessions behind them past canary_retention_days
+        # and drains the .retired/ quarantine past canary_purge_after_days.
+        # NEVER dispatches sweeps.
         if not self._is_cancelled() and settings.canary_enabled:
             _announce(bus, "cleanup_canary_runs", "Pruning old canary runs and sessions")
             await self._rung("cleanup_canary_runs", self._cleanup_canary_runs())
@@ -575,15 +624,6 @@ class SnoozeRunner:
             _announce(bus, "prune_archived_sessions", "Deleting sessions long past archiving")
             await self._rung("prune_archived_sessions", self._prune_archived_sessions())
 
-        # Activity 12d: Canary suite auto-maintenance (no LLM). Promotes
-        # vetted auto-admitted canaries, tags flapping ones flaky, retires
-        # long-green ones to quarantine, purges the quarantine. The Goodhart
-        # lock lives in core/canary/maintain.py: a failing canary is never
-        # auto-mutated.
-        if not self._is_cancelled() and settings.canary_enabled and settings.canary_auto_maintain:
-            _announce(bus, "canary_maintain", "Maintaining the canary suite (promote/flaky/retire/purge)")
-            await self._rung("canary_maintain", self._canary_maintain())
-
         # Activity 13: Refine pass — the single session-improvement rung.
         # Runs independent of did_llm: refine has its own budget, bounded to
         # one session per cycle, watermarked refined:{sid} (max message id —
@@ -592,13 +632,25 @@ class SnoozeRunner:
             _announce(bus, "refine", "Crystallizing skill/memory updates from an idle session")
             await self._rung("refine_one_session", self._refine_one_session())
 
-        # Activity 13b: Skill proposal veto-window auto-apply (no LLM).
-        # Pending SKILL.md proposals older than the veto window are
-        # machine-validated and applied with a timestamped backup — the
-        # skill-file counterpart of adaptive's auto_approve_stale_proposals.
-        if not self._is_cancelled() and settings.skill_proposal_auto_apply_after_hours > 0:
-            _announce(bus, "skill_auto_apply", "Applying skill proposals past the veto window")
+        # Activity 13b: skill proposal auto-apply (no LLM). Pending SKILL.md
+        # proposals older than the window that pass the machine checks are
+        # applied with a timestamped backup. Off: they wait in the Skills tab.
+        if not self._is_cancelled() and settings.skill_proposal_auto_apply:
+            _announce(bus, "skill_auto_apply", "Applying checked skill proposals")
             await self._rung("auto_apply_skill_proposals", self._auto_apply_skill_proposals())
+
+        # Activity 13b'': archive stale skill proposals (no LLM). A pending
+        # proposal nobody decided on in 30 days becomes 'archived' history,
+        # so the review.pending count below can reach zero.
+        if not self._is_cancelled():
+            await self._rung("archive_stale_skill_proposals", self._archive_stale_skill_proposals())
+
+        # Activity 13b': review.pending rollup (no LLM, read-only). The one
+        # bell row counting the skill proposals that wait for a human.
+        # Unconditional: a decision made since the last pass should clear
+        # the bell.
+        if not self._is_cancelled():
+            await self._rung("refresh_review_pending", self._refresh_review_pending())
 
         # Activity 13c: Skill content-change sweep (no LLM). When a skill's
         # SKILL.md/scripts change (proposal apply, agent edit, human edit),
@@ -627,30 +679,12 @@ class SnoozeRunner:
 
         # Activity 14b: Distillation coverage audit — the feedback loop on
         # the memory lens itself (core/memory/audit.py). One sampled session
-        # per run under a daily budget; misses land in Candor and are written
+        # per run under a daily budget; misses are counted and written
         # back to memory. Own budget like refine/dream — independent of
         # did_llm.
         if not self._is_cancelled() and settings.distill_audit_enabled and self._llm_ready():
             _announce(bus, "distill_audit", "Auditing distillation coverage against a raw transcript")
             await self._rung("distill_audit", self._distill_audit())
-
-        # Activity 16 (runs before 15's store work so its LLM call sits in
-        # the same cancellation window as dream's): TELOS fast loop — one
-        # bounded unit per cycle: evaluate a gated hypothesis OR generate
-        # SOUP hypotheses for the next scheduled question (85% goal-linked /
-        # 15% serendipity). Gated on telos_enabled — fully absent when off.
-        if not self._is_cancelled() and settings.telos_enabled and self._llm_ready():
-            _announce(bus, "telos", "TELOS: generating or evaluating hypotheses for open questions")
-            await self._rung("telos_step", self._telos_step())
-
-        # Activity 15: Adaptive layer — drain pending auto-applies, enqueue
-        # post-batch canary sweeps, evaluate the tripwire (plan §6c). Runs
-        # inside the idle window by construction, which is what makes
-        # global-scope applies safe (no session's cached prefix is mid-turn).
-        # No LLM — pure store work.
-        if not self._is_cancelled() and settings.adaptive_enabled:
-            _announce(bus, "adaptive_apply", "Applying pending adaptive edits and evaluating the tripwire")
-            await self._rung("adaptive_step", self._adaptive_step())
 
         # Activity 17: fallback-burn watch — pure store read + at most one
         # notification/day. Encodes the 2026-08-19 silent-reroute incident
@@ -772,7 +806,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                      AND {db.SQL_SESSION_IS_IDLE}
                      AND s.updated_at < ?
                      AND s.archived_at IS NULL
-                     AND s.session_type != 'worker'
+                     AND s.session_type NOT IN ('worker', 'canary')
                      AND (
                          SELECT COUNT(*) FROM messages m
                          WHERE m.session_id = s.id
@@ -967,19 +1001,32 @@ Output valid JSON only. No markdown fences. /no_think"""
             return False
 
     # ------------------------------------------------------------------
-    # Activity 13b: Skill proposal veto-window auto-apply
+    # Activity 13b'': archive stale skill proposals
+    # ------------------------------------------------------------------
+
+    async def _archive_stale_skill_proposals(self) -> None:
+        try:
+            from core.skills.proposals import archive_stale_skill_proposals
+
+            archived = await asyncio.to_thread(archive_stale_skill_proposals)
+        except Exception as e:
+            logger.warning("Snooze: stale skill proposal archive failed: %s", e)
+            return
+        if archived:
+            self._bump("skill_proposals_archived", len(archived))
+
+    # ------------------------------------------------------------------
+    # Activity 13b: Skill proposal auto-apply
     # ------------------------------------------------------------------
 
     async def _auto_apply_skill_proposals(self) -> None:
-        """Apply pending skill proposals whose veto window has elapsed.
+        """Apply pending skill proposals that are past the window and pass
+        the machine checks.
 
         Thin wrapper over core.skills.proposals.auto_apply_ripe_proposals
-        (machine validation, backups, day cap, idle guard all live there).
-        Announces applied changes as a notification so a veto-after-the-fact
-        is one file restore away.
+        (checks, backups, day cap and the idle guard all live there). Logs
+        what changed to the Activity tab, so an undo is one click away.
         """
-        from db import models as db
-
         try:
             from core.skills.proposals import auto_apply_ripe_proposals
 
@@ -994,18 +1041,17 @@ Output valid JSON only. No markdown fences. /no_think"""
         self._bump("skill_proposals_auto_applied", len(applied))
         lines = out.get("summaries") or [str(p) for p in applied]
         try:
-            db.add_notification(
-                title="Skill proposals auto-applied",
-                body=(
-                    f"{len(applied)} skill proposal(s) past the "
-                    f"{settings.skill_proposal_auto_apply_after_hours}h veto window "
-                    "were validated and applied to SKILL.md.\n"
+            notices.notify(
+                "skills.proposals_auto_applied",
+                "Skill proposals auto-applied",
+                (
+                    f"{len(applied)} skill proposal(s) passed the checks and were "
+                    "applied to SKILL.md.\n"
                     + "\n".join(f"• {line}" for line in lines)
-                    + "\nBackups in data/skill_backups/<skill>/ — restore one to roll "
-                    "back; reject a pending proposal in the Skills tab to veto it "
-                    "inside the window."
+                    + "\nEach has a backup: Roll back in the Skills tab undoes it. "
+                    "Turn auto-apply off in Settings → Autonomy to review them yourself."
                 ),
-                urgency="normal",
+                link={"kind": "tab", "tab": "skills"},
             )
         except Exception as e:
             logger.debug("Snooze: skill auto-apply notification failed: %s", e)
@@ -1405,14 +1451,19 @@ Output valid JSON only. No markdown fences. /no_think"""
         self._bump("notifications_pruned", await asyncio.to_thread(retention.prune_notifications))
 
     async def _cleanup_canary_runs(self) -> None:
-        """Activity 12c — canary run/session retention plus the staleness
-        nudge, and the two retention sweeps that had no home: worker sessions
-        and terminal dream hypotheses."""
+        """Activity 12c — canary run/session retention plus the purge of the
+        retired-canary quarantine, and the two retention sweeps that had no
+        home: worker sessions and terminal dream hypotheses."""
         from core import retention
+        from core.canary.maintain import purge_quarantine
 
         await retention.prune_canary_runs()
-        await retention.nudge_stale_canaries()
+        self._bump("canaries_purged", len(await asyncio.to_thread(purge_quarantine)))
         self._bump("worker_sessions_pruned", await retention.prune_worker_sessions())
+        # The result manifests those transcripts leave behind, on their own
+        # much longer window — a worker's transcript is debugging residue, its
+        # result is the work.
+        self._bump("worker_manifests_pruned", await asyncio.to_thread(retention.prune_worker_manifests))
         self._bump("dream_hypotheses_pruned", await asyncio.to_thread(retention.prune_dream_hypotheses))
 
     async def _archive_idle_sessions(self) -> None:
@@ -1430,17 +1481,6 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         result = await asyncio.to_thread(retention.prune_archived_sessions)
         self._bump("archived_sessions_pruned", int(result.get("count") or 0))
-
-    async def _canary_maintain(self) -> None:
-        """Activity 12d — one canary auto-maintenance sweep. Never raises."""
-        try:
-            from core.canary.maintain import run_maintenance
-
-            stats = await run_background(run_maintenance, self._is_cancelled)
-            for key in ("promoted", "settled_flaky", "flaky_tagged", "demoted", "purged"):
-                self._bump(f"canaries_{key}", len(stats.get(key) or []))
-        except Exception as e:
-            logger.warning("Snooze canary maintenance failed: %s", e)
 
     async def _cleanup_rlm_runs(self) -> None:
         """Activity 12a — RLM run dirs past rlm_run_retention_days."""
@@ -1590,300 +1630,14 @@ Output valid JSON only. No markdown fences. /no_think"""
         except Exception as e:
             logger.warning("Snooze synthesis failed: %s", e)
 
-    # ------------------------------------------------------------------
-    # Activity 12b: Candor operational-memory maintenance
-    # ------------------------------------------------------------------
-
-    async def _candor_maintenance(self) -> None:
-        """Gate sweep + pending-buffer drain for the Candor add-on.
-
-        No watermark needed: the bridge's drain cursor is the durable state,
-        and run_gate() is O(1) when no new observations exist.
-        """
+    async def _refresh_review_pending(self) -> None:
+        """Recount the pending skill proposals into review.pending. Never raises."""
         try:
-            from core.extensions.candor.bridge import get_candor_bridge
+            from core.skills.review import refresh_review_pending
 
-            stats = await get_candor_bridge().run_maintenance(self._is_cancelled)
-            if stats and (stats.get("seeded") or stats.get("drained") or stats.get("checkpointed")):
-                logger.info("Snooze candor maintenance: %s", stats)
+            await asyncio.to_thread(refresh_review_pending)
         except Exception as e:
-            logger.warning("Snooze candor maintenance failed: %s", e)
-            return
-
-        # Candor producer (plan 4d): calibrated reliability regressions →
-        # routing_hint edits. Deduped by slug — a live hint for the same tool
-        # is left alone (updates would churn the cooldown; the ledger ref lets
-        # a reviewer pull the full audit chain on demand). The pass is
-        # symmetric: it retires hints as well as minting them, so a recovered
-        # tool releases its slot instead of wedging the per-kind cap.
-        if settings.adaptive_enabled and not self._is_cancelled():
-            try:
-                from core.adaptive.contract import queue_producer_edits
-                from core.extensions.candor.bridge import get_candor_bridge
-                from db import models as db
-
-                degraded = await get_candor_bridge().degraded_tools()
-                # Candor's tool_ok ledger is keyed by whatever the caller
-                # named the operation, so cron jobs and scripts land in it
-                # alongside real tools. A hint reading "tool
-                # ai-tech-daily-brief degraded" advises scout about something
-                # it cannot call, and it holds a slot against the per-kind cap
-                # while doing it — two of eleven live hints were this. The
-                # registry is the authority on what is actually a tool.
-                from core.tools.registry import get_registry
-
-                registry = get_registry()
-                # An empty registry means "not loaded yet", not "no tool is
-                # real". Filtering against it would discard every hint and,
-                # worse, retire every live one — so the check only engages
-                # once the registry actually has tools in it.
-                known = registry.all_tools()
-
-                def _is_tool(name: str) -> bool:
-                    return not known or registry.exists(name)
-
-                skipped = [d["tool"] for d in degraded if not _is_tool(d["tool"])]
-                if skipped:
-                    logger.info("Candor: skipped %d degraded non-tool name(s): %s", len(skipped), ", ".join(skipped))
-                degraded = [d for d in degraded if _is_tool(d["tool"])]
-                degraded_ids = {f"tool-{d['tool']}-degraded" for d in degraded}
-                mints = []
-                for d in degraded:
-                    entry_id = f"tool-{d['tool']}-degraded"
-                    existing = db.adaptive_get_entry(entry_id)
-                    # Only a LIVE hint dedupes: a retired one must be able to
-                    # come back if the tool degrades again.
-                    if existing and existing.get("status") == "active":
-                        continue
-                    mints.append(
-                        {
-                            "action": "create",
-                            "kind": "routing_hint",
-                            "scope": "global",
-                            "entry_id": entry_id,
-                            "title": f"tool {d['tool']} degraded",
-                            "content": (
-                                f"Calibrated reliability for {d['tool']} is {d['p']:.0%} over "
-                                f"{d['n']} observations — prefer an alternative or verify its "
-                                f"output; see why_reliability('tool_ok', '{d['tool']}')."
-                            ),
-                            "evidence": [f"candor:tool_ok({d['tool']})"],
-                        }
-                    )
-                # Retirement: a hint whose tool has RECOVERED (calibrated p
-                # back above threshold, so it fell out of the degraded set) is
-                # stale advice AND holds a slot against the per-kind cap
-                # forever. Candor deleting its own entry is same-producer, so
-                # it stays low-risk (the 4b escalation is cross-producer).
-                retires = []
-                for row in db.adaptive_list_entries(kind="routing_hint"):
-                    eid = row["id"]
-                    if row.get("source") != "candor" or eid in degraded_ids:
-                        continue
-                    if not (eid.startswith("tool-") and eid.endswith("-degraded")):
-                        continue
-                    # Two ways to leave the degraded set, and the audit trail
-                    # should not call them the same thing: the tool recovered,
-                    # or the name was never a tool and should not have minted
-                    # a hint at all.
-                    named = eid[len("tool-") : -len("-degraded")]
-                    why = "recovered" if _is_tool(named) else "not a registered tool"
-                    retires.append(
-                        {
-                            "action": "delete",
-                            "kind": "routing_hint",
-                            "scope": "global",
-                            "entry_id": eid,
-                            "baseline_version": row["version"],
-                            "evidence": [f"candor:tool_ok {why} ({eid})"],
-                        }
-                    )
-                edits = mints[:2] + retires[:2]
-                if edits:
-                    q = queue_producer_edits(edits, "candor", rationale="candor reliability regression")
-                    if q["queued"] or q["gated"]:
-                        logger.info(
-                            "Candor adaptive hints queued: %d (%d retirement), gated: %d",
-                            q["queued"],
-                            len(retires[:2]),
-                            q["gated"],
-                        )
-            except Exception as e:
-                logger.warning("Candor adaptive producer failed: %s", e)
-
-    # ------------------------------------------------------------------
-    # Activity 15: Adaptive layer drain + tripwire (plan §6c)
-    # ------------------------------------------------------------------
-
-    async def _adaptive_step(self) -> None:
-        """Auto-approve ripe proposals → drain pending auto-applies → enqueue
-        post-batch sweeps → evaluate the tripwire. Each stage guarded; a
-        failure never kills the cycle."""
-        if _mutation_blocked():
-            return  # global prompt/policy mutations wait for genuine idle
-        # Veto-window drain first: proposals older than the window apply
-        # themselves (same engine as a human approval; approve_proposal
-        # enqueues its own post-batch sweeps). Runs before drain_pending so a
-        # cycle that has budget for both applies the older, human-visible
-        # decisions first.
-        try:
-            from core.adaptive import auto_approve_stale_proposals
-
-            auto = await asyncio.to_thread(auto_approve_stale_proposals)
-            if auto.get("approved"):
-                ids = auto["approved"]
-                self._bump("adaptive_proposals_auto_approved", len(ids))
-                from db import models as db
-
-                # One line per proposal: what it was, where it landed, how to
-                # undo it. Bare ids sent the reader (and the agent asked to
-                # explain them) hunting — and the old text promised a batch
-                # rollback that memory corrections never have.
-                lines = auto.get("summaries") or [f"#{i}" for i in ids]
-                results = auto.get("results") or []
-                any_batch = any(r.get("batch_id") for r in results)
-                any_correction = any(r.get("corrections_written") is not None for r in results)
-                tail = []
-                if any_batch:
-                    tail.append(
-                        "Tripwire + canary sweeps watch the applied batch(es); roll one back in the Adaptive panel if you disagree."
-                    )
-                if any_correction:
-                    tail.append(
-                        "Memory corrections create no batch — the Adaptive panel has nothing to roll back for them; undo by deleting the tagged memory entry."
-                    )
-                db.add_notification(
-                    title="Adaptive layer: proposals auto-approved",
-                    body=(
-                        f"{len(ids)} proposal(s) past the "
-                        f"{settings.adaptive_auto_approve_after_hours}h veto window applied at idle "
-                        f"({', '.join(f'#{i}' for i in ids)}).\n"
-                        + "\n".join(f"• {line}" for line in lines)
-                        + ("\n" + " ".join(tail) if tail else "")
-                    ),
-                    urgency="normal",
-                )
-        except Exception as e:
-            logger.warning("Adaptive auto-approve failed: %s", e)
-
-        if self._is_cancelled():
-            return
-        try:
-            from core.adaptive import drain_pending
-
-            out = await asyncio.to_thread(drain_pending)
-            # A batch whose edits were ALL refused lands terminal-'rejected'
-            # and changed nothing: nothing to announce, and no state change
-            # for a post-batch sweep to measure against.
-            landed = [r for r in (out.get("results") or []) if r.get("applied")]
-            if landed:
-                edits_n = sum(len(r["applied"]) for r in landed)
-                self._bump("adaptive_batches_applied", len(landed))
-                from db import models as db
-
-                db.add_notification(
-                    title="Adaptive layer: edits auto-applied",
-                    body=f"{edits_n} edit(s) across {len(landed)} batch(es) applied at idle — review in the Adaptive panel.",
-                    urgency="normal",
-                )
-                # Post-batch sweeps: batch-tagged canary data for the
-                # tripwire join. Enqueued through the scheduler for its own
-                # idle window — NEVER dispatched inline from this activity.
-                if settings.canary_enabled:
-                    from core.extensions.scheduling import enqueue_post_batch_sweep
-
-                    for r in landed:
-                        enqueue_post_batch_sweep(r["batch_id"])
-        except Exception as e:
-            logger.warning("Adaptive drain failed: %s", e)
-
-        if self._is_cancelled():
-            return
-        # Lapse pending proposals nobody got to. A proposal is a snapshot of
-        # evidence; weeks later approving it blind is worse than letting the
-        # producer re-raise it from current evidence. Without this the queue
-        # only ever grows, because producers write and only a human drains.
-        try:
-            from db import models as db
-
-            expired = await asyncio.to_thread(db.adaptive_expire_stale_proposals, settings.adaptive_proposal_ttl_days)
-            if expired:
-                logger.info("Adaptive: expired %d stale pending proposal(s)", expired)
-        except Exception as e:
-            logger.warning("Adaptive proposal expiry failed: %s", e)
-
-        if self._is_cancelled():
-            return
-        # The usage sweep (v3.1): entries that rendered into prompts for the
-        # whole retire window without one recorded use go. Soft-deletes,
-        # journaled, one aggregated once-a-day notification with the undo.
-        try:
-            from core.adaptive.retire import retire_unused_entries
-            from db import models as db
-
-            swept = await asyncio.to_thread(retire_unused_entries)
-            if swept["retired"]:
-                self._bump("adaptive_unused_retired", len(swept["retired"]))
-                lines = [f"• {eid} — {swept['reasons'].get(eid, '')}" for eid in swept["retired"][:12]]
-                await asyncio.to_thread(
-                    db.add_notification,
-                    "",
-                    "Adaptive: value sweep retired entries",
-                    (
-                        "Retired by the value sweep — unused for the whole retire window, "
-                        "past a prompt_note TTL, or failure-dominated in attributed "
-                        "outcomes (the per-entry reason is listed). Each deletion is "
-                        "journaled — roll any back from the Adaptive tab.\n"
-                        + "\n".join(lines)
-                        + (f"\n(+{len(swept['retired']) - 12} more)" if len(swept["retired"]) > 12 else "")
-                    ),
-                    "normal",
-                    "adaptive_usage_sweep",
-                )
-        except Exception as e:
-            logger.warning("Adaptive usage sweep failed: %s", e)
-
-        if self._is_cancelled():
-            return
-        # The retro-lint sweep: re-examine the standing population whenever
-        # the content lint changes (watermarked on LINT_VERSION — a no-op on
-        # every cycle in between). The v3.1 lint only gated new mints, so
-        # narrative entries minted before it sat in the rendered slots
-        # indefinitely.
-        try:
-            from core.adaptive.retire import retire_lint_failures
-            from db import models as db
-
-            linted = await asyncio.to_thread(retire_lint_failures)
-            if linted["retired"]:
-                self._bump("adaptive_lint_retired", len(linted["retired"]))
-                lines = [f"• {eid} — {linted['reasons'].get(eid, '')}" for eid in linted["retired"][:12]]
-                await asyncio.to_thread(
-                    db.add_notification,
-                    "",
-                    "Adaptive: lint sweep retired entries",
-                    (
-                        "Retired by the retro content-lint sweep — machine-authored "
-                        "entries whose content fails the current actionability floor "
-                        "(narrative findings, bare negative claims). Each deletion is "
-                        "journaled — roll any back from the Adaptive tab.\n"
-                        + "\n".join(lines)
-                        + (f"\n(+{len(linted['retired']) - 12} more)" if len(linted["retired"]) > 12 else "")
-                    ),
-                    "normal",
-                    "adaptive_lint_sweep",
-                )
-        except Exception as e:
-            logger.warning("Adaptive lint sweep failed: %s", e)
-
-        try:
-            from core.adaptive.tripwire import evaluate_tripwire
-
-            actions = await asyncio.to_thread(evaluate_tripwire)
-            for a in actions:
-                logger.info("Adaptive tripwire: %s %s (%s)", a["action"], a["batch_id"], a.get("detail", ""))
-        except Exception as e:
-            logger.warning("Adaptive tripwire failed: %s", e)
+            logger.warning("Review-pending rollup failed: %s", e)
 
     # ------------------------------------------------------------------
     # Activity 17: fallback-burn watch
@@ -1894,15 +1648,14 @@ Output valid JSON only. No markdown fences. /no_think"""
         carrying a threshold share of the trailing 24h's tokens. Never raises."""
         try:
             from core.llm.burnwatch import check_fallback_burn
-            from db import models as db
 
             finding = await asyncio.to_thread(check_fallback_burn)
             if not finding:
                 return
-            self._bump("fallback_burn_alerts")
+            self._bump("fallback_burn_alerts", 1)
             await asyncio.to_thread(
-                db.add_notification,
-                "",
+                notices.notify,
+                "system.fallback_burn",
                 "Fallback model is carrying the load",
                 (
                     f"{finding['model']} served {finding['share']:.0%} of all tokens in the last "
@@ -1912,32 +1665,14 @@ Output valid JSON only. No markdown fences. /no_think"""
                     "provider key/endpoint (the 2026-08-19 signature: container-local env keys die "
                     "on rebuild; the durable copy belongs in the compose-level .env)."
                 ),
-                "high",
-                "fallback_burn",
+                dedup_key="fallback_burn",
             )
         except Exception as e:
             logger.warning("Fallback-burn watch failed: %s", e)
 
     # ------------------------------------------------------------------
-    # Activities 14/16: Dream + TELOS steps
+    # Activities 14/14b: distillation audit + Dream step
     # ------------------------------------------------------------------
-
-    async def _telos_step(self) -> None:
-        """One bounded TELOS fast-loop unit (core/telos). Never raises."""
-        try:
-            from core.telos import run_step
-
-            result = await run_step(self._is_cancelled)
-            for key in (
-                "telos_hypotheses",
-                "telos_gated",
-                "telos_souped",
-                "telos_evaluated",
-                "telos_claims",
-            ):
-                self._bump(key, result.get(key, 0))
-        except Exception as e:
-            logger.warning("Snooze TELOS step failed: %s", e)
 
     async def _distill_audit(self) -> None:
         """Activity 14b — one distillation-coverage audit unit. Never raises."""

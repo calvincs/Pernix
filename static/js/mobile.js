@@ -273,84 +273,127 @@ function _setupSidebarDrawer() {
 // Swipe gestures — sidebar (left edge)
 // ---------------------------------------------------------------------------
 
-function _insideScrollableCode(el) {
-    // Returns true if el or any ancestor is a horizontally scrollable code block.
-    // Used to avoid eating touchmove events that the user intends for code scrolling.
+// Does this element scroll horizontally under the finger? Both halves matter.
+// The overflow test alone is not enough: a container that only sets
+// `overflow-y: auto` — #messages, .fp-tree — computes an `auto` overflow-x
+// too, per CSS's rule that a non-visible value on one axis promotes the other,
+// so the content has to actually be wider than the box. And the width test
+// alone is not enough either: plenty of elements are wider than their box
+// while clipping rather than scrolling.
+//
+// The tag/class fallback is for the case where there is no computed style to
+// consult. It is deliberately the same shortlist the original guard was built
+// from, plus TABLE, which touch.css makes `display: block; overflow-x: auto`
+// and the original did not recognise at all.
+const HSCROLL_SLOP = 4;   // sub-pixel layout noise, not a scrollable block
+
+function _scrollsHorizontally(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if ((el.scrollWidth || 0) - (el.clientWidth || 0) <= HSCROLL_SLOP) return false;
+    const overflowX = window.getComputedStyle?.(el)?.overflowX;
+    if (overflowX) return overflowX === 'auto' || overflowX === 'scroll';
+    return el.tagName === 'PRE' || el.tagName === 'TABLE'
+        || !!el.classList?.contains('code-block-wrap');
+}
+
+// Walk up from whatever the finger actually landed on — a <span> of syntax
+// highlighting, a <code>, a <td> — so a nested target counts as much as the
+// scroller itself. Stops at <body>: the page's own scrollers are not what a
+// panel gesture competes with.
+function _insideHorizontalScroller(node) {
+    let el = node && node.nodeType === 3 ? node.parentElement : node;
     while (el && el !== document.body) {
-        if (el.classList?.contains('code-block-wrap') || el.tagName === 'PRE') {
-            if (el.scrollWidth > el.clientWidth) return true;
-        }
+        if (_scrollsHorizontally(el)) return true;
         el = el.parentElement;
     }
     return false;
 }
 
-function _setupSwipeGesture() {
-    let startX = 0;
-    let startY = 0;
-    let tracking = false;
-    let direction = null; // 'horizontal' | 'vertical'
-    const EDGE_ZONE = 25;
-    const THRESHOLD = 60;
+/**
+ * The one swipe implementation, shared by the drawer and the Explorer. They
+ * were the same forty lines twice, which is why they had the same bug twice:
+ * the native-scroll guard sat on `preventDefault()` alone, so a sideways swipe
+ * over a code block was allowed to scroll AND still arrived at touchend as a
+ * panel gesture, toggling the panel on top of the code being read. Over a wide
+ * table it was worse — the guard did not recognise the table, so the scroll was
+ * blocked and the panel toggled anyway.
+ *
+ * The decision is now made once, at touchstart, and it disarms the whole
+ * gesture rather than one call inside it. A scroller stays exempt even when it
+ * is already at the end of its travel: a finger that came down on code is not
+ * asking for the panel, and "sometimes it closes, sometimes it doesn't"
+ * is a worse gesture than one that never fires there.
+ *
+ *   enabled()          is this tier armed at all
+ *   arm(x, y)          should a touch here begin a panel gesture
+ *   complete(dx, x)    a horizontal swipe finished; act on it
+ */
+function _installSwipeGesture({ enabled, arm, complete }) {
+    const g = { startX: 0, startY: 0, tracking: false, direction: null };
+
+    // Also the touchcancel handler. Without one, an OS-interrupted gesture — a
+    // call, a notification, the app switcher — left `tracking` true and the
+    // next touch inherited it.
+    const cancel = () => { g.tracking = false; g.direction = null; };
 
     document.addEventListener('touchstart', (e) => {
-        if (!isCompact()) return;
+        // A second finger is a pinch or a zoom, never a panel swipe.
+        if (e.touches.length > 1) { cancel(); return; }
+        if (!enabled()) { cancel(); return; }
         const touch = e.touches[0];
-        startX = touch.clientX;
-        startY = touch.clientY;
-        direction = null;
-
-        const sidebar = document.getElementById('sidebar');
-        const isOpen = sidebar?.classList.contains('mobile-open');
-
-        // Don't track if file panel is open (let file panel swipe handle it)
-        const fp = document.getElementById('file-panel');
-        if (fp?.classList.contains('open') && !isOpen) return;
-
-        // Start tracking if touch is near left edge (to open) or sidebar is open (to close)
-        if (startX < EDGE_ZONE || isOpen) {
-            tracking = true;
-        }
+        g.startX = touch.clientX;
+        g.startY = touch.clientY;
+        g.direction = null;
+        g.tracking = !_insideHorizontalScroller(e.target) && !!arm(g.startX, g.startY);
     }, { passive: true });
 
     document.addEventListener('touchmove', (e) => {
-        if (!tracking || !isCompact()) return;
+        if (!g.tracking || !enabled()) return;
+        if (e.touches.length > 1) { cancel(); return; }
         const touch = e.touches[0];
-        const dx = touch.clientX - startX;
-        const dy = touch.clientY - startY;
+        const dx = touch.clientX - g.startX;
+        const dy = touch.clientY - g.startY;
 
         // Lock direction on first significant movement
-        if (!direction) {
-            if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
-                direction = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
-            }
+        if (!g.direction && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
+            g.direction = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
         }
 
-        // Only handle horizontal swipes — but let code blocks scroll natively
-        if (direction === 'horizontal' && !_insideScrollableCode(e.target)) {
-            e.preventDefault();
-        }
+        // Only horizontal swipes are ours; a vertical one is the page scrolling.
+        if (g.direction === 'horizontal') e.preventDefault();
     }, { passive: false });
 
     document.addEventListener('touchend', (e) => {
-        if (!tracking || !isCompact()) { tracking = false; return; }
-        const touch = e.changedTouches[0];
-        const dx = touch.clientX - startX;
-        tracking = false;
-
-        if (direction !== 'horizontal') return;
-
-        const sidebar = document.getElementById('sidebar');
-        const isOpen = sidebar?.classList.contains('mobile-open');
-
-        if (!isOpen && dx > THRESHOLD && startX < EDGE_ZONE) {
-            // Swipe right from edge -> open
-            openSidebar();
-        } else if (isOpen && dx < -THRESHOLD) {
-            // Swipe left -> close
-            closeSidebar({ restoreFocus: true });
-        }
+        const fired = g.tracking && enabled() && g.direction === 'horizontal';
+        const startX = g.startX;
+        const dx = fired ? e.changedTouches[0].clientX - startX : 0;
+        cancel();
+        if (fired) complete(dx, startX);
     }, { passive: true });
+
+    document.addEventListener('touchcancel', cancel, { passive: true });
+}
+
+function _setupSwipeGesture() {
+    const EDGE_ZONE = 25;
+    const THRESHOLD = 60;
+    const isOpen = () => !!document.getElementById('sidebar')?.classList.contains('mobile-open');
+
+    _installSwipeGesture({
+        enabled: isCompact,
+        arm: (startX) => {
+            // Don't track if file panel is open (let file panel swipe handle it)
+            const fp = document.getElementById('file-panel');
+            if (fp?.classList.contains('open') && !isOpen()) return false;
+            // Near the left edge (to open), or anywhere while the drawer is
+            // over the content (to close).
+            return startX < EDGE_ZONE || isOpen();
+        },
+        complete: (dx, startX) => {
+            if (!isOpen() && dx > THRESHOLD && startX < EDGE_ZONE) openSidebar();
+            else if (isOpen() && dx < -THRESHOLD) closeSidebar({ restoreFocus: true });
+        },
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -362,74 +405,47 @@ function _setupSwipeGesture() {
 // ---------------------------------------------------------------------------
 
 function _setupFilePanelSwipe() {
-    let startX = 0;
-    let startY = 0;
-    let tracking = false;
-    let direction = null;
     const EDGE_ZONE = 25;
     const THRESHOLD = 60;
+    const panel = () => document.getElementById('file-panel');
+    const isOpen = () => !!panel()?.classList.contains('open');
 
-    document.addEventListener('touchstart', (e) => {
-        if (!isTouch()) return;
-        const touch = e.touches[0];
-        startX = touch.clientX;
-        startY = touch.clientY;
-        direction = null;
-
-        const fp = document.getElementById('file-panel');
-        const isOpen = fp?.classList.contains('open');
-        const rightEdge = window.innerWidth - EDGE_ZONE;
-
-        // Track if near right edge (to open) or panel is open (to close)
-        if (startX > rightEdge || isOpen) {
+    _installSwipeGesture({
+        enabled: isTouch,
+        arm: (startX, startY) => {
+            const rightEdge = window.innerWidth - EDGE_ZONE;
+            if (!(startX > rightEdge || isOpen())) return false;
             // Don't conflict with sidebar swipe
-            const sidebar = document.getElementById('sidebar');
-            if (sidebar?.classList.contains('mobile-open')) return;
-            tracking = true;
-        }
-    }, { passive: true });
-
-    document.addEventListener('touchmove', (e) => {
-        if (!tracking || !isTouch()) return;
-        const touch = e.touches[0];
-        const dx = touch.clientX - startX;
-        const dy = touch.clientY - startY;
-
-        if (!direction) {
-            if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
-                direction = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
+            if (document.getElementById('sidebar')?.classList.contains('mobile-open')) return false;
+            // Below 900px the open panel covers the screen, so a swipe anywhere
+            // is a swipe on the panel. Above it the panel is a column BESIDE a
+            // live transcript, and a swipe over that transcript is aimed at the
+            // transcript — closing the Explorer from a tablet's chat column was
+            // never an intentional gesture, it was this handler's reach.
+            if (isOpen() && !isCompact() && startX <= rightEdge) {
+                return _within(panel(), startX, startY);
             }
-        }
+            return true;
+        },
+        complete: (dx, startX) => {
+            const rightEdge = window.innerWidth - EDGE_ZONE;
+            if (!isOpen() && dx < -THRESHOLD && startX > rightEdge) {
+                // Swipe left from right edge -> open file panel
+                document.getElementById('files-btn')?.click();
+            } else if (isOpen() && dx > THRESHOLD) {
+                // Swipe right -> close file panel
+                document.getElementById('files-btn')?.click();
+            }
+        },
+    });
+}
 
-        // With the panel open this handler tracks a swipe that started
-        // anywhere, so on a tablet — where the transcript is still on screen
-        // beside it — the same guard the drawer swipe uses has to apply, or a
-        // wide code block could no longer be scrolled sideways.
-        if (direction === 'horizontal' && !_insideScrollableCode(e.target)) {
-            e.preventDefault();
-        }
-    }, { passive: false });
-
-    document.addEventListener('touchend', (e) => {
-        if (!tracking || !isTouch()) { tracking = false; return; }
-        const touch = e.changedTouches[0];
-        const dx = touch.clientX - startX;
-        tracking = false;
-
-        if (direction !== 'horizontal') return;
-
-        const fp = document.getElementById('file-panel');
-        const isOpen = fp?.classList.contains('open');
-        const rightEdge = window.innerWidth - EDGE_ZONE;
-
-        if (!isOpen && dx < -THRESHOLD && startX > rightEdge) {
-            // Swipe left from right edge -> open file panel
-            document.getElementById('files-btn')?.click();
-        } else if (isOpen && dx > THRESHOLD) {
-            // Swipe right anywhere -> close file panel
-            document.getElementById('files-btn')?.click();
-        }
-    }, { passive: true });
+// Is this point inside the element's box? getBoundingClientRect is in the same
+// viewport coordinates a Touch reports.
+function _within(el, x, y) {
+    const r = el?.getBoundingClientRect?.();
+    if (!r) return false;
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
 }
 
 // ---------------------------------------------------------------------------

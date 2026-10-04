@@ -14,7 +14,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-COPY vendor/ vendor/
 RUN pip install --no-cache-dir -r requirements.txt yt-dlp \
     && playwright install chromium
 

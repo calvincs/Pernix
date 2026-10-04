@@ -118,6 +118,31 @@ const PATHS = {
     check: ['M4.5 12.5l5 5 10-11'],
     x: ['M6 6l12 12', 'M18 6L6 18'],
 
+    // Was this answer any good? Two icons, each with a filled twin, on the
+    // pin/pin-filled pattern: the outline is the offer, the fill is the
+    // rating you have actually given. The hand is one path and the forearm
+    // one rect, so the down pair is the up pair reflected through y=12 —
+    // they read as the same control pointing two ways rather than as two
+    // drawings that happen to be about thumbs.
+    'thumb-up': [
+        { t: 'rect', x: 3, y: 10.5, width: 4, height: 8.3, rx: 1.3 },
+        'M7 10.5l4-7.1a1.7 1.7 0 0 1 3.1 1L13.3 9h4.9a2 2 0 0 1 2 2.3l-.9 5.8a2 2 0 0 1-2 1.7H7',
+    ],
+    'thumb-up-filled': [
+        { t: 'rect', x: 3, y: 10.5, width: 4, height: 8.3, rx: 1.3, fill: 'currentColor' },
+        { t: 'path', fill: 'currentColor',
+          d: 'M7 10.5l4-7.1a1.7 1.7 0 0 1 3.1 1L13.3 9h4.9a2 2 0 0 1 2 2.3l-.9 5.8a2 2 0 0 1-2 1.7H7z' },
+    ],
+    'thumb-down': [
+        { t: 'rect', x: 3, y: 5.2, width: 4, height: 8.3, rx: 1.3 },
+        'M7 13.5l4 7.1a1.7 1.7 0 0 0 3.1-1L13.3 15h4.9a2 2 0 0 0 2-2.3l-.9-5.8a2 2 0 0 0-2-1.7H7',
+    ],
+    'thumb-down-filled': [
+        { t: 'rect', x: 3, y: 5.2, width: 4, height: 8.3, rx: 1.3, fill: 'currentColor' },
+        { t: 'path', fill: 'currentColor',
+          d: 'M7 13.5l4 7.1a1.7 1.7 0 0 0 3.1-1L13.3 15h4.9a2 2 0 0 0 2-2.3l-.9-5.8a2 2 0 0 0-2-1.7H7z' },
+    ],
+
     'chevron-down': ['M6.5 9.5L12 15l5.5-5.5'],
     'chevron-right': ['M9.5 6.5L15 12l-5.5 5.5'],
 

@@ -25,6 +25,7 @@ import re
 from typing import Any
 
 from config import settings
+from core.llm.types import is_rejected_call
 from db import models as db
 
 logger = logging.getLogger("pernix.refine")
@@ -94,7 +95,7 @@ Output a JSON object:
       "skill_name": "the active skill",
       "section": "section of SKILL.md (e.g. 'Common Failures', 'Pre-flight', 'Usage')",
       "problem": "1-2 sentences describing what was off",
-      "proposed_change": "actionable prose to insert into SKILL.md",
+      "proposed_change": "the exact Markdown to insert under that section, written as SKILL.md text",
       "confidence": 0.0-1.0
     }
   ],
@@ -112,8 +113,13 @@ RULES:
 - If nothing in the session is worth saving, set "nothing_actionable": true
   and return empty proposals/lessons arrays. This is a real and valid
   outcome — don't fabricate signal.
-- proposed_change must be concrete, paste-ready prose. Reference real
-  section names from the SKILL.md content shown below.
+- proposed_change is the literal text that will be inserted into SKILL.md
+  under `section` — write it as the skill itself speaks to the agent ("On
+  GPU OOM, rerun with --device cpu."). Never an instruction to an editor
+  ("Add a note to Usage that…", "Update the section to…"). A human reviews
+  it in the skill editor and applies it verbatim. Keep it short: a few
+  lines, no repeated headings, nothing the SKILL.md already says.
+  Reference real section names from the SKILL.md content shown below.
 - Proposals only meaningful when an active skill is identified.
 - Skip a proposal whose confidence < 0.6.
 - Lessons must be self-contained (understandable without the session).
@@ -244,6 +250,8 @@ def _build_tool_summary(messages: list[dict]) -> dict[str, dict[str, Any]]:
             if not isinstance(calls, list):
                 continue
             for call in calls:
+                if is_rejected_call(call):
+                    continue  # refused at admission, so it never ran
                 fn = (call or {}).get("function") or {}
                 tname = fn.get("name")
                 tid = (call or {}).get("id")
@@ -328,11 +336,10 @@ def _latest_reflect_verdict(messages: list[dict]) -> dict | None:
     return None
 
 
-def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], list[dict], bool]:
-    """Parse the LLM JSON into (proposals, lessons, adaptive_edits,
-    canary_proposals, nothing_actionable). Tolerates fences. adaptive_edits
-    (plan 4d) and canary_proposals (§12.2) ride the same call and the same
-    parse — empty arrays while their features are off or nothing qualifies."""
+def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], bool]:
+    """Parse the LLM JSON into (proposals, lessons, nothing_actionable).
+    Tolerates fences. Stray `adaptive_edits` and `canary_proposals` keys
+    (contracts retired in 3.2) are ignored."""
     text = (raw or "").strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -341,39 +348,17 @@ def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], 
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning("refine: could not parse LLM output as JSON: %s\n%s", e, text[:500])
-        return [], [], [], [], False
+        return [], [], False
     if not isinstance(data, dict):
-        return [], [], [], [], False
+        return [], [], False
     proposals = data.get("proposals", []) or []
     lessons = data.get("lessons", []) or []
-    adaptive_edits = data.get("adaptive_edits", []) or []
-    canary_proposals = data.get("canary_proposals", []) or []
     if not isinstance(proposals, list):
         proposals = []
     if not isinstance(lessons, list):
         lessons = []
-    if not isinstance(adaptive_edits, list):
-        adaptive_edits = []
-    if not isinstance(canary_proposals, list):
-        canary_proposals = []
-    # The contract's confidence floor and 2-edit cap, enforced mechanically —
-    # prompt prose alone held neither. Edits without a confidence field
-    # (older outputs) pass; an explicit low confidence does not.
-    kept = []
-    for e in adaptive_edits:
-        if not isinstance(e, dict):
-            continue
-        try:
-            conf = float(e["confidence"]) if "confidence" in e else None
-        except (TypeError, ValueError):
-            conf = None
-        if conf is not None and conf < PROPOSAL_CONFIDENCE_FLOOR:
-            logger.info("refine: adaptive edit below confidence floor (%.2f) dropped", conf)
-            continue
-        kept.append(e)
-    adaptive_edits = kept[:2]
     nothing_actionable = bool(data.get("nothing_actionable"))
-    return proposals, lessons, adaptive_edits, canary_proposals, nothing_actionable
+    return proposals, lessons, nothing_actionable
 
 
 def _build_user_content(
@@ -479,8 +464,13 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
         stats["skipped_reason"] = "session_not_found"
         return stats
 
-    if session.get("session_type") == "worker":
-        stats["skipped_reason"] = "worker_session"
+    # Canary isolation (trust-loop hardening W5): a canary transcript is eval
+    # data, so refine neither learns lessons nor proposes skill edits or new
+    # canaries from one. db.get_unrefined_sessions already excludes the type;
+    # this guard covers direct callers, which the selector cannot.
+    session_type = session.get("session_type") or "normal"
+    if session_type in ("worker", "canary"):
+        stats["skipped_reason"] = f"{session_type}_session"
         return stats
 
     messages = db.get_messages(session_id)
@@ -529,14 +519,6 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
     client = get_llm_client()
 
     system_prompt = REFINE_PROMPT
-    if settings.adaptive_enabled:
-        from core.adaptive.contract import ADAPTIVE_EDITS_PROMPT
-
-        system_prompt = system_prompt + ADAPTIVE_EDITS_PROMPT
-    if settings.canary_enabled:
-        from core.canary.propose import CANARY_PROPOSALS_PROMPT
-
-        system_prompt = system_prompt + CANARY_PROPOSALS_PROMPT
 
     try:
         response = await client.chat(
@@ -553,28 +535,8 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
         stats["skipped_reason"] = f"llm_error:{type(e).__name__}"
         return stats
 
-    proposals, lessons, adaptive_edits, canary_proposals, nothing_actionable = _parse_refine_output(raw)
+    proposals, lessons, nothing_actionable = _parse_refine_output(raw)
     stats["nothing_actionable"] = nothing_actionable
-
-    if adaptive_edits:
-        from core.adaptive.contract import queue_producer_edits
-
-        q = queue_producer_edits(
-            adaptive_edits,
-            "refine",
-            session_id=session_id,
-            rationale=f"refine pass on session {session_id[:12]} ({session.get('title', '?')[:40]})",
-        )
-        stats["adaptive_queued"] = q["queued"]
-        stats["adaptive_gated"] = q["gated"]
-
-    if canary_proposals and settings.canary_enabled:
-        try:
-            from core.canary.propose import queue_canary_proposals
-
-            stats["canary_proposed"] = queue_canary_proposals(canary_proposals, "refine", session_id=session_id)
-        except Exception as e:
-            logger.warning("refine: canary proposal queueing failed: %s", e)
 
     # Persist proposals only when an active skill is identified. Since the
     # watermark re-arms (a session can be refined again after it grows),

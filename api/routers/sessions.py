@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 
 from api.streaming import event_stream, sse_response
@@ -9,6 +11,7 @@ from db import models as db
 from sessions.manager import get_manager
 
 router = APIRouter(tags=["sessions"])
+logger = logging.getLogger("pernix.api.sessions")
 
 # Matches HISTORY_PAGE in static/js/app.js — the transcript window the client
 # asks for, and the fallback when a caller passes a cursor with no size.
@@ -70,6 +73,12 @@ async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False
     the filter is now server-side: the hidden type's rows are no longer in
     the page to be counted, and a legend entry that reads 0 is a control the
     user can no longer reason about.
+
+    `space_counts` is how many live sessions each space holds. The union that
+    pulls space sessions back past the recency window is bounded now
+    (`SPACE_UNION_FLOOR`), and a bound without a count would let a group
+    silently under-report itself — the one thing a "never rolls off" contract
+    cannot do. Absent from the archived answer, which has no union.
     """
     import asyncio as _asyncio
 
@@ -82,6 +91,7 @@ async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False
     sessions = [annotate_read_only(s) for s in rows]
     spaces = await _asyncio.to_thread(db.list_spaces)
     type_counts = await _asyncio.to_thread(db.count_sessions_by_type)
+    space_counts = {} if archived else await _asyncio.to_thread(db.count_live_sessions_by_space)
     if archived:
         total = await _asyncio.to_thread(db.count_sessions, archived=True, exclude_types=excluded)
         archived_count = total if not excluded else await _asyncio.to_thread(db.count_sessions, archived=True)
@@ -101,6 +111,7 @@ async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False
         "archived_count": archived_count,
         "excluded_types": excluded,
         "type_counts": type_counts,
+        "space_counts": space_counts,
     }
 
 
@@ -285,12 +296,19 @@ async def session_events(session_id: str, request: Request):
     # Query-param fallback exists because JS-instantiated EventSource (used by
     # the client's stale-stream watchdog) cannot set request headers; without
     # this fallback every watchdog reconnect would skip replay and lose events.
-    last_id = 0
-    raw = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id", "0")
-    try:
-        last_id = int(raw)
-    except (ValueError, TypeError):
-        pass
+    #
+    # Absent and "0" are DIFFERENT requests (api/streaming.event_stream): no
+    # cursor means "just join me to the live stream", while an explicit 0 means
+    # "replay everything you still retain". Defaulting the missing case to "0"
+    # made them indistinguishable and left the initial connection unable to
+    # ask for replay at all.
+    raw = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id")
+    last_id: int | None = None
+    if raw is not None:
+        try:
+            last_id = max(0, int(raw))
+        except (ValueError, TypeError):
+            last_id = None
 
     return sse_response(event_stream(session, last_event_id=last_id))
 
@@ -310,16 +328,17 @@ async def cancel_session(session_id: str):
         worker = manager.get(wid)
         if worker:
             worker.cancel_requested = True
-            worker.pending_messages.clear()
+            await manager.drop_pending_for_cancel_async(worker)
             if worker.task and not worker.task.done():
                 worker.task.cancel()
 
-    # 3. Clear pending message queue (prevent re-processing after cancel).
+    # 3. Clear pending message queue (prevent re-processing after cancel) and
+    # stamp the dropped rows so the next prompt's orphan sweep doesn't put the
+    # cancelled work back — the manager's own cancel path shares that helper.
     # Record the dropped count as a transcript-visible notice so readers can
     # tell the queue was abandoned (not silently lost). The "notice" role is
     # filtered from LLM context by core/context/compiler.py.
-    dropped = len(session.pending_messages)
-    session.pending_messages.clear()
+    dropped = await manager.drop_pending_for_cancel_async(session)
     if dropped > 0:
         try:
             db.add_message(
@@ -352,12 +371,21 @@ async def cancel_session(session_id: str):
         session.task.cancel()
     else:
         # No running task (e.g. session parked in AWAITING_USER after
-        # ask_user). The CancelledError path won't fire, so transition
-        # explicitly so the state log + SSE event go out.
+        # ask_user, or in AWAITING_WORKERS after await_workers). The
+        # CancelledError path won't fire, so transition explicitly so the
+        # state log + SSE event go out.
         from sessions import state_v2 as sv2
 
         current = sv2._current_state(session)
-        if current == sv2.SessionStateV2.AWAITING_USER:
+        if current == sv2.SessionStateV2.AWAITING_WORKERS:
+            # Detached: the release needs the session lock, which an in-flight
+            # worker resume holds across a transcript read. Cancelling is a
+            # request — the endpoint must not block behind that read.
+            manager._spawn_detached(
+                manager._settle_cancelled_awaiting_workers(session),
+                "settle-cancelled-parent",
+            )
+        elif current == sv2.SessionStateV2.AWAITING_USER:
             try:
                 sv2.transition(
                     session,
@@ -365,11 +393,8 @@ async def cancel_session(session_id: str):
                     "cancel-requested",
                     termination_reason=sv2.TerminationReason.CANCELLED,
                 )
-                sv2.transition(
-                    session,
-                    sv2.SessionStateV2.IDLE_READY,
-                    "cancel-complete",
-                )
+                session.cancel_requested = False
+                sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "cancel-complete")
             except Exception:
                 pass
 
@@ -640,6 +665,87 @@ async def get_session_turns(session_id: str, before_turn: int = 0, limit: int = 
     return await _asyncio.to_thread(db.get_turns, session_id, before_turn=before_turn, limit=limit)
 
 
+# ---------------------------------------------------------------------------
+# Message feedback — the user's own verdict on a turn
+#
+# The one outcome in the loop nothing in the system authored, so it outranks
+# both the next-message reading and the reflect verdict. Writing it also
+# corrects the per-entry credit that verdict handed out (core/feedback.py).
+# ---------------------------------------------------------------------------
+
+_FEEDBACK_SIGNALS = ("up", "down")
+_FEEDBACK_NOTE_MAX = 2000
+
+
+def _feedback_message(session_id: str, message_id: str) -> dict:
+    """The assistant message a reaction may attach to, or the right HTTP error.
+
+    A thumb is a verdict on what the agent said, so it only lands on assistant
+    rows: a reaction on a tool result or on the user's own message would have
+    no turn outcome to argue with.
+    """
+    try:
+        mid = int(message_id)
+    except (TypeError, ValueError):
+        raise HTTPException(404, detail=f"Message {message_id} not found")
+    msg = db.get_message(mid)
+    if not msg or msg.get("session_id") != session_id:
+        raise HTTPException(404, detail=f"Message {message_id} not found in session {session_id}")
+    if msg.get("role") != "assistant":
+        raise HTTPException(400, detail="Feedback applies to assistant messages only")
+    return msg
+
+
+@router.post("/api/sessions/{session_id}/messages/{message_id}/feedback")
+async def set_message_feedback(session_id: str, message_id: str, body: dict = {}):
+    """Record, replace or withdraw the user's reaction to one assistant message.
+
+    `signal` is "up", "down", or null to withdraw. A reaction is a state, not
+    an event: pressing the other thumb replaces the row rather than appending
+    to it. The optional `note` rides along on a thumbs-down so "wrong" can say
+    what was wrong.
+    """
+    import asyncio as _asyncio
+
+    signal = body.get("signal")
+    if signal is not None and signal not in _FEEDBACK_SIGNALS:
+        raise HTTPException(400, detail="signal must be 'up', 'down', or null")
+    note = body.get("note") or ""
+    if not isinstance(note, str):
+        raise HTTPException(400, detail="note must be a string")
+    note = note.strip()[:_FEEDBACK_NOTE_MAX]
+
+    await _asyncio.to_thread(_feedback_message, session_id, message_id)
+
+    if signal is None:
+        await _asyncio.to_thread(db.delete_message_feedback, session_id, message_id)
+        stored = {"message_id": str(message_id), "signal": None, "note": ""}
+    else:
+        stored = await _asyncio.to_thread(db.upsert_message_feedback, session_id, message_id, signal, note)
+
+    # Ground truth beats self-grading: stamp the turn's post-mortem so
+    # synthesis reads the thumb over the verdict. Never fatal — the click is
+    # stored either way.
+    from core.feedback import apply_user_signal
+
+    await _asyncio.to_thread(apply_user_signal, session_id, message_id, signal)
+
+    return {"message_id": stored["message_id"], "signal": stored["signal"], "note": stored.get("note") or ""}
+
+
+@router.get("/api/sessions/{session_id}/feedback")
+async def list_session_feedback(session_id: str):
+    """Every reaction in this session — one call, so the transcript can render
+    its thumbs without a request per message."""
+    import asyncio as _asyncio
+
+    session = await _asyncio.to_thread(db.get_session, session_id)
+    if not session:
+        raise HTTPException(404, detail=f"Session {session_id} not found")
+    items = await _asyncio.to_thread(db.list_message_feedback, session_id)
+    return {"items": items}
+
+
 @router.post("/api/sessions/{session_id}/pause")
 async def http_pause_session(session_id: str):
     """Pause ANY session (not just workers) at its next pre-round checkpoint.
@@ -648,10 +754,10 @@ async def http_pause_session(session_id: str):
     manager = get_manager()
     if not manager.get(session_id):
         raise HTTPException(404, detail=f"Session {session_id} not found in memory")
-    from core.extensions.orchestration import pause_worker as _pause
-
-    msg = _pause(session_id)
-    return {"status": "pause_requested", "session_id": session_id, "detail": msg}
+    result = manager.control_session(session_id, "pause")
+    if result["status"] == "rejected":
+        raise HTTPException(409, detail=result["detail"])
+    return {**result, "session_id": session_id}
 
 
 @router.post("/api/sessions/{session_id}/resume")
@@ -660,10 +766,10 @@ async def http_resume_session(session_id: str):
     manager = get_manager()
     if not manager.get(session_id):
         raise HTTPException(404, detail=f"Session {session_id} not found in memory")
-    from core.extensions.orchestration import resume_worker as _resume
-
-    msg = _resume(session_id)
-    return {"status": "resumed", "session_id": session_id, "detail": msg}
+    result = manager.control_session(session_id, "resume")
+    if result["status"] == "rejected":
+        raise HTTPException(409, detail=result["detail"])
+    return {**result, "session_id": session_id}
 
 
 @router.post("/api/sessions/{session_id}/workers/{worker_id}/pause")
@@ -678,10 +784,10 @@ async def http_pause_worker(session_id: str, worker_id: str):
         raise HTTPException(404, detail=f"Worker {worker_id} not a child of {session_id}")
     if not manager.get(worker_id):
         raise HTTPException(404, detail=f"Worker {worker_id} not in memory")
-    from core.extensions.orchestration import pause_worker as _pw
-
-    msg = _pw(worker_id)
-    return {"status": "pause_requested", "worker_id": worker_id, "detail": msg}
+    result = manager.control_session(worker_id, "pause")
+    if result["status"] == "rejected":
+        raise HTTPException(409, detail=result["detail"])
+    return {**result, "worker_id": worker_id}
 
 
 @router.post("/api/sessions/{session_id}/workers/{worker_id}/resume")
@@ -775,6 +881,37 @@ async def purge_sessions(body: dict = {}):
 
     Both modes compute the same set from the same query, so a dry run is a
     promise the real run keeps.
+
+    Deletion goes through `delete_session_async`, one candidate at a time.
+    The synchronous `manager.delete_session` ran filesystem cleanup, a
+    recursive DB cascade, FTS deletion and a commit per session with no
+    yield anywhere: purging 995 sessions out of a 538 MB database held the
+    event loop for 8.98 seconds — three heartbeat ticks delivered where
+    1,798 were due, every stream on the box frozen for the batch. The async
+    form keeps phase 1 (which cancels the turn, and must stay loop-affine)
+    on the loop and phase 2 on a worker thread, and made the same 995
+    deletions with a worst gap of 7.6 ms — 1,252 of the 1,347 ticks due.
+
+    The candidate list is a snapshot taken in a thread, and the deletions
+    happen one at a time after it, so each id is re-checked against the same
+    rules immediately before it is deleted: a session that got pinned, moved
+    into a space, was touched, or started a turn in between is spared and
+    counted under `skipped_at_delete` rather than deleted anyway.
+
+    Partial completion is a reported outcome, not an exception. A failure
+    partway through used to discard the count of everything that HAD been
+    deleted — the route raised, the client got no body, and the user was told
+    the purge failed after 10 sessions were already gone. Now:
+
+      `would_delete`  the deletions this run set out to make
+      `purged`        the ones that actually happened, always reported
+      `skipped_at_delete`  spared by the re-check, by rule
+      `failed` / `failures`  how many could not be deleted, and why
+      `complete`      True when every intended deletion was made
+
+    and `purged + failed + sum(skipped_at_delete) == would_delete` always.
+    Cancellation (the client disconnecting mid-batch) still propagates —
+    there is no response to return it in — but logs what had been done.
     """
     body = body or {}
     keep_days = _non_negative_int(body.get("keep_days", 7), "keep_days")
@@ -792,10 +929,30 @@ async def purge_sessions(body: dict = {}):
     to_delete = candidates[keep_min:]
 
     purged = 0
+    failures: list[dict] = []
+    skipped_at_delete = {"gone": 0, "other_types": 0, "pinned": 0, "in_space": 0, "touched": 0, "busy": 0}
     if not dry_run:
         manager = get_manager()
         for s in to_delete:
-            manager.delete_session(s["id"])
+            sid = s["id"]
+            spared = await _asyncio.to_thread(db.purge_candidate_spared_by, sid, cutoff)
+            if spared:
+                skipped_at_delete[spared] += 1
+                continue
+            try:
+                await manager.delete_session_async(sid)
+            except _asyncio.CancelledError:
+                logger.warning(
+                    "Bulk purge cancelled after %d of %d deletions; %d already removed",
+                    purged + len(failures),
+                    len(to_delete),
+                    purged,
+                )
+                raise
+            except Exception as e:
+                logger.warning("Bulk purge: %s could not be deleted (%s: %s)", sid[:12], type(e).__name__, e)
+                failures.append({"id": sid, "error": f"{type(e).__name__}: {e}"})
+                continue
             purged += 1
 
     return {
@@ -806,6 +963,10 @@ async def purge_sessions(body: dict = {}):
         "candidates": len(candidates),
         "would_delete": len(to_delete),
         "purged": purged,
+        "failed": len(failures),
+        "failures": failures[:10],
+        "skipped_at_delete": skipped_at_delete,
+        "complete": dry_run or (purged == len(to_delete)),
         "sample": [{k: s[k] for k in ("id", "title", "updated_at", "message_count")} for s in to_delete[:10]],
         "skipped": found["skipped"],
     }

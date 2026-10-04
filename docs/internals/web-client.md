@@ -177,8 +177,11 @@ relayouting the shell for that is free of any visible benefit.
   and never zooms back out.
 - Safe-area insets, momentum scrolling, and the status bar moved to the *top*
   of the screen (`order: -1`).
-- One **`⋯` overflow control per row** — sessions, spaces, Explorer files —
-  opening an action sheet, replacing three or four hover-revealed icon buttons.
+- One **`⋯` overflow control per row** — sessions, spaces, Explorer files, and
+  an assistant reply — opening an action sheet, replacing three or four
+  hover-revealed icon buttons. An answer's mouse toolbar is *Copy message* plus
+  the two rating thumbs; on a finger those are 36px each and permanently
+  visible, so all three become sheet rows behind one target.
 - The **editor is a plain textarea**, never Monaco: `createEditor()` returns
   the `.ce-fallback` textarea when `isTouch()`. Monaco's own touch handling
   fights iOS text selection, and native selection handles are what a finger
@@ -254,6 +257,57 @@ stack — the first is superseded and resolves `null`.
 
 `sidebar.js` exports `openSessionSheet(sessionId)` for the one session menu
 that the drawer row, the header title and anything else can share.
+
+---
+
+## The expand editor
+
+`static/js/components/compose-editor.js`, opened by the composer's
+`#expand-btn`. The composer rests at two lines and grows to 40dvh; this is
+where a multi-paragraph brief actually gets written.
+
+```js
+window.PernixComposeEditor.open({
+    value: textarea.value,          // what to show — the editor never reads
+                                    // the composer itself
+    onChange: (v) => { ... },       // every keystroke, throttled to 80ms
+    onSend:   (v) => { ... },       // the user asked to send; closes after
+    onClose:  ()  => { ... },       // gone; put focus back in the composer
+});
+window.PernixComposeEditor.close();     // keeps the draft, fires onClose
+window.PernixComposeEditor.isOpen();    // -> boolean
+```
+
+**One copy of the text, not two.** `onChange` is the only channel out, and it
+is flushed before `onSend` and before `onClose` run — so a send fired 20ms
+after the last keystroke posts what is on screen, not what was there 20ms ago.
+Nothing is written back on close, which is why "Escape keeps the draft" needs
+no special case: the composer's textarea and its localStorage draft were never
+not the source of truth. A caller whose `onClose` writes text back will see a
+sent message reappear in the composer; that is the one thing it must not do.
+
+**Two shapes, one component**, chosen by the same verdict `mobile.js` reaches
+(`body[data-touch]`, ORed with `<html data-touch-ui>` and the touch media
+query, so it is right even before `initMobile()` has run). A fine pointer gets
+a centred dialog — 70vw x 70vh, floors of 560x360, a 1100px ceiling, bindings
+spelled out along the footer. A finger gets a full-screen sheet with a top bar
+of Cancel · Compose · Send at 44px, 16px text, safe-area insets, and the height
+pinned to `--vvh` / `--vv-top` so the keyboard cannot cover the line being
+typed. A window dragged across 768px while the editor is open rebuilds it in
+the other shape, carrying the text, the selection and the scroll across.
+
+It is deliberately **not** a `.modal-card`: `compact.css` rewrites that class
+into a bottom sheet and `touch.css` into a 44px-target sheet, and this dialog
+already has its own answer for a finger. It keeps `.modal-overlay` — a scrim
+and a centring context — and overrides it from an ID so the bottom-sheet
+alignment cannot reach it. `openOverlay()` supplies the dialog role, the name,
+the focus trap, Escape and focus restoration, exactly as it does for the action
+sheet.
+
+It publishes a **global** rather than being imported by `app.js` because the
+arrow only points one way: the composer calls the editor, the editor never
+calls the composer. `index.html` loads it as its own module `<script>`, so it
+shares one module registry — and one `a11y.js` overlay stack — with `app.js`.
 
 ---
 
@@ -357,6 +411,64 @@ and `was_error` each mean.
 
 ---
 
+## The composer
+
+One card, two layouts, and a handful of state classes. The DOM is a contract:
+`app.js` drives it, `layout.css` and `touch.css` lay it out, and the expand
+editor is a separate module that may not be loaded at all.
+
+```
+#input-wrapper[role=group][aria-label="Message composer"]
+  #queued-chip                (hidden unless an injected message is pending)
+  #file-chips
+  #composer                   the card
+    textarea#msg-input        rows=2; enterkeyhint set by JS
+    #composer-banner          hidden; the long-paste offer, with
+                              #banner-text, #banner-attach, #banner-keep
+    #composer-row
+      #stop-btn  #attach-btn  #expand-btn  #voice-btn
+      .grow
+      #composer-count  #composer-hint  #send-btn
+```
+
+`#composer` carries four state classes, all set by `_syncComposerState()`:
+
+| Class | When | What it does |
+|---|---|---|
+| `.is-focused` | the textarea has focus | available to both stylesheets |
+| `.is-multiline` | the text wraps or holds a newline | available to both stylesheets |
+| `.is-streaming` | a turn is running | accent border, and the placeholder that says the text joins the running turn |
+| `.is-rest-inline` | **touch only**, empty and unfocused | folds the control row back onto the text line |
+
+`.is-rest-inline` is the one structural difference between the tiers. On a
+finger the controls sit under the text as soon as the composer is touched, but
+an untouched one is a single 56px row: `touch.css` puts `display: contents` on
+`#composer-row` so its buttons become flex items of the card itself and can be
+ordered around the textarea, and hides everything the folded row has no width
+for. `app.js` only ever sets the class when `isTouch()`.
+
+**The size numbers all live in CSS.** `#composer` carries `--composer-size`,
+`--composer-lh`, `--composer-pad-y`, `--composer-lines` and `--composer-target`;
+the textarea's `min-height` is computed from the first four, and `touch.css`
+re-tunes the same layout by overriding three of them. `_growComposer()` reads
+the *computed* `max-height` back rather than keeping its own copy of the cap —
+40dvh on a desktop, `min(200px, 30dvh)` on touch — so the ceiling is written
+down once.
+
+Measuring the text is the one subtle part. `height: auto` on a `textarea`
+reports the `rows` attribute (2), and `height: 0` alone reports whatever
+`min-height` is holding the box to, so `_growComposer()` collapses **both** for
+a single `scrollHeight` read and then restores the floor, which wins over the
+height it sets. That is also where the multi-line verdict comes from.
+
+**The expand editor is optional.** `#expand-btn` is hidden unless
+`window.PernixComposeEditor` is present, re-checked on every composer event and
+again on the click, and the module is called through
+`open({ value, onChange, onSend, onClose })` — nothing else in `app.js` knows
+about it.
+
+---
+
 ## Sending a message from a keyboard
 
 `shouldSendOnKey(e, { enterSends, touch })` in `app.js` is the whole decision,
@@ -377,12 +489,80 @@ payload or of Save — like Appearance, it belongs to the device.
 Its default differs by device, which is the point: on a desktop Enter has
 always sent and Shift+Enter is the newline everyone knows, but on a phone Enter
 *is* the on-screen keyboard's newline key with a send button an inch away. So
-the default is `!isTouch()`. The composer's visible hint follows the resolved
-state — "Enter to send · Shift+Enter for a new line", "Ctrl+Enter to send", or
-"Tap send" — because a phone that claims "Enter to send" while its Enter makes
-a new line is worse than a phone that says nothing.
+the default is `!isTouch()`. `#composer-hint` follows the resolved state —
+"Enter to send · Shift+Enter new line" or "Ctrl+Enter to send · Enter new line"
+— because a composer that claims "Enter to send" while its Enter makes a new
+line is worse than one that says nothing. On touch, where the hint is hidden,
+the same three sentences (including "Tap send") still reach `title` and
+`aria-description`, and `enterkeyhint` labels the soft keyboard's return key.
+
+The hint is also the switch: clicking it writes the same localStorage key and
+fires the same `pernix:enter-sends` event the Settings row does, so the two
+places that state this preference cannot drift apart.
 
 ---
+
+## Three streams per tab, and the six-connection budget
+
+Every open tab holds **three** `EventSource` connections: the session stream
+(`sse.js`), `/api/notifications/events` (`notifications.js`) and
+`/api/jobs/events` (`components/jobs-indicator.js`). Uvicorn speaks HTTP/1.1
+only, and Chrome allows six connections per host on HTTP/1.1 — so two windows
+(a second tab, or the installed app alongside a tab) spend the whole budget on
+streams, and every further `fetch` queues in the browser indefinitely: it
+never reaches uvicorn, so it appears in no access log and shows as "pending"
+in devtools. A dismiss, or a send, simply hangs.
+
+So a hidden tab gives two of its three back. `document.hidden` starts a 5 s
+grace (`STREAM_HIDDEN_GRACE_MS`, exported from `notifications.js` and imported
+by the jobs indicator, so there is one number); if the tab is still hidden
+when it expires, the notifications and jobs streams close. On return they
+reopen and catch up — the jobs indicator re-`GET`s `/api/jobs/status`, and
+`notifications.js` fires `pernix:bell-update`, which is this app's existing
+"refetch `/api/notifications` now" signal. A hide and show inside the grace
+closes nothing, so alt-tabbing costs nothing.
+
+The session stream is deliberately exempt: it is what lets a background tab
+show a finished turn.
+
+---
+
+## The notification bell
+
+`components/notification-bell.js` owns the bell in the status bar and its
+panel. The badge is a **number** for what needs the user — open questions
+(`/api/questions`) plus `needs_you` from `/api/notifications/counts` (open
+`interrupt` rows) — and a **dot** when the number is zero but `bell` (open
+quiet rows) is not. `log` rows never touch it. The badge polls only the two
+cheap endpoints: every 15 s with the panel closed, every 5 s with it open, and
+at once on `pernix:bell-update`.
+
+The panel has two tabs (`role="tablist"`, arrow keys move between them):
+
+- **Needs you** — questions, then open interrupt rows, then open bell rows,
+  each newest first. Every row has Dismiss; **Clear** calls
+  `POST /api/notifications/dismiss-all` (questions stay). Dismiss is soft.
+- **Activity** — `view=log`, a day at a time under sticky day headers, with
+  area filter chips built from the areas seen, `×N` on a row that folded
+  repeats, dismissed/resolved rows in a quiet style, and **Load more** paging
+  with `before`. Opening the tab calls `read-all`, but the header keeps
+  saying "N new since your last visit" (and the rows keep their New tag) for
+  the rest of that visit; **Mark all read** clears it.
+
+A row's `link` becomes an Open button: a session opens through the same
+`selectSession` the session chip uses; a tab opens its owner —
+`openFilePanel({tab})` for `learning` (→ the Self-tuning group; rows from before 3.2), `canary`, `skills`,
+`jobs`, `mcp` and `dream` (→ `memory`), `openSettings()` for `settings`.
+
+`notifications.js` raises an OS notification for a `dialog.notification`
+event only when `shouldAlert()` says so: `tier === "interrupt"`, or no tier at
+all (a pre-v42 server). Bell and log rows and `resolved` refreshes only
+dispatch `pernix:bell-update`.
+
+The UI gate's `bell_tiers` pass (last in m2, because it dismisses a row and
+marks the log read) asserts the badge, the dot, both tabs, soft dismiss, Mark
+all read, the area filter, and that the panel fits 375px with 44px targets on
+touch; `seed.py` writes one row of each tier, a ×3 repeat and a dismissed row.
 
 ## Gotchas
 

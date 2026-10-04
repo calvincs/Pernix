@@ -35,10 +35,8 @@ class Attribution:
     subject: str
     delta_successes: int = 0
     delta_failures: int = 0
-    # adaptive_entry outcome attributions set this to 0: their usage was
-    # already counted at the source (scout submit-time for hints; this pass
-    # for cited policies), and double-counting the observation inflates the
-    # denominator retirement divides by.
+    # 0 when the observation's use was already counted elsewhere and only the
+    # outcome should land.
     delta_reinforcements: int = 1
     # Short, free-form note describing *why* this attribution was made.
     # Stored in signal payload for UI / debugging.
@@ -90,12 +88,24 @@ def attribute(pm_row: dict) -> list[Attribution]:
     verdict = pm_row.get("verdict", "pass")
     failure_cause = pm_row.get("failure_cause", "none")
 
+    # Ground truth outranks the self-grade: a thumb on the turn decides the
+    # outcome the counters see. "up" is a pass. "down" keeps the grade's own
+    # non-pass verdict and cause when it named one, and otherwise reads as
+    # retry/agent — the turn missed and nothing else was blamed. The
+    # confidence floor below guards the model's guess, never the user's.
+    user_signal = pm_row.get("user_signal")
+    if user_signal == "up":
+        verdict, failure_cause = "pass", "none"
+    elif user_signal == "down":
+        if verdict == "pass" or failure_cause in (None, "", "none"):
+            verdict, failure_cause = "retry", "agent"
+
     # Very-low-confidence reflect outputs are too noisy to act on.
     try:
         confidence = float(pm_row.get("confidence") or 0.0)
     except (TypeError, ValueError):
         confidence = 0.0
-    if confidence < 0.5 and verdict != "pass":
+    if user_signal is None and confidence < 0.5 and verdict != "pass":
         return []
 
     attributions: list[Attribution] = []
@@ -133,7 +143,10 @@ def attribute(pm_row: dict) -> list[Attribution]:
         if not isinstance(stats, dict):
             continue
         try:
-            calls = int(stats.get("calls") or 0)
+            # Calls the tool was unavailable for by design never ran, so they
+            # are no evidence either way and leave the denominator (a tool
+            # with nothing but unavailable calls drops out entirely).
+            calls = int(stats.get("calls") or 0) - int(stats.get("unavailable") or 0) - int(stats.get("misses") or 0)
             failures = int(stats.get("failures") or 0)
         except (TypeError, ValueError):
             continue
@@ -199,54 +212,11 @@ def attribute(pm_row: dict) -> list[Attribution]:
                 )
             )
 
-    # --- Adaptive-entry attribution (v3.1 usefulness signal) ---
-    # Hints: usage was counted at scout submit-time; here only the OUTCOME
-    # lands (pass → success; retry blamed on planning → failure), so
-    # delta_reinforcements=0. Policies: reflect's citation is both the usage
-    # and the outcome in one observation — reinforcement + success on pass,
-    # and deliberately NO failure attribution in v1 (a cited policy on a
-    # failed turn is not evidence of fault; retirement only needs the
-    # zero-use signal).
-    for hint_id in scout_summary.get("used_hints") or []:
-        if not isinstance(hint_id, str) or not hint_id:
-            continue
-        if verdict == "pass":
-            attributions.append(
-                Attribution(
-                    "adaptive_entry",
-                    hint_id,
-                    delta_successes=1,
-                    delta_reinforcements=0,
-                    rationale="hint shaped plan; verdict=pass",
-                )
-            )
-        elif verdict == "retry" and failure_cause == "scout":
-            attributions.append(
-                Attribution(
-                    "adaptive_entry",
-                    hint_id,
-                    delta_failures=1,
-                    delta_reinforcements=0,
-                    rationale="hint shaped plan; verdict=retry, cause=scout",
-                )
-            )
-    for pol_id in payload.get("cited_policies") or []:
-        if not isinstance(pol_id, str) or not pol_id:
-            continue
-        attributions.append(
-            Attribution(
-                "adaptive_entry",
-                pol_id,
-                delta_successes=1 if verdict == "pass" else 0,
-                rationale=f"policy cited by reflect; verdict={verdict}",
-            )
-        )
-
     return attributions
 
 
 # --- Model routing brief (H2, plan §12.4) --------------------------------
-# Exception-report shape borrowed from candor/intel.py: only degraded pairs
+# Exception-report shape: only degraded pairs
 # render; a (model, category) absent from the brief has no known problem.
 
 _ROUTE_MIN_OBSERVATIONS = 5

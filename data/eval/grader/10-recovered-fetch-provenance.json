@@ -1,0 +1,9 @@
+{
+  "id": "recovered-fetch-provenance",
+  "user_request": "Identify product 264623 using the issuer response.",
+  "transcript_excerpt": "[TOOL CALL: http_get] call_id=old Arguments: /products/239726/dividend-growth\n[TOOL RESULT] call_id=old iShares Core S&P 500 ETF | IVV\n[ASSISTANT] That was the wrong product ID. I will fetch 264623.\n[TOOL CALL: http_get] call_id=new Arguments: /products/264623/dividend-growth\n[TOOL RESULT] call_id=new iShares Core Dividend Growth ETF | DGRO",
+  "final_response": "The successful issuer lookup for product 264623 identifies DGRO, iShares Core Dividend Growth ETF.",
+  "expected_verdict": "pass",
+  "expected_failure_cause": "none",
+  "note": "Earlier failed requests do not disprove a later corrected fetch. Do not invent issuer facts from model memory."
+}

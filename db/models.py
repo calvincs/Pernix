@@ -125,36 +125,66 @@ def count_sessions(*, archived: bool | None = False, exclude_types: Iterable[str
         return int(row["c"]) if row else 0
 
 
-_ENRICHED_SELECT = """SELECT
+# One page of the sidebar, enriched for exactly the ids on it.
+#
+# This used to be a single statement that LEFT JOINed three derived tables:
+# a GROUP BY over every user/assistant message, a GROUP BY over the whole of
+# token_usage, and a ROW_NUMBER() window over EVERY user message in the
+# database — all of it computed before the outer LIMIT could be applied.
+# EXPLAIN QUERY PLAN showed three MATERIALIZE steps ahead of `SCAN s`, so
+# `LIMIT 25` and `LIMIT 500` cost the same, and the cost tracked total
+# history rather than page size: 17,402 messages -> 56 ms, 107,402 -> 245 ms
+# with the page held at 50. On a 1,622-session / 116,410-message fixture the
+# window alone measured 103.6 ms, and once any space existed the whole thing
+# ran twice.
+#
+# Correlated subqueries against a fixed id list do the same work through
+# `idx_messages_session_role` and `idx_token_usage_session`, per row, for the
+# rows actually being returned. `first_message` reads one row rather than
+# ranking every user message: messages.id is INTEGER PRIMARY KEY, so
+# ORDER BY id inside a (session_id, role) index prefix is index order.
+_ENRICH_SQL = """SELECT
     s.*,
-    COALESCE(mc.message_count, 0) AS message_count,
-    COALESCE(tu.total_tokens, 0) AS total_tokens,
-    COALESCE(tu.total_cost, 0) AS total_cost,
-    fm.first_message
+    (SELECT COUNT(*) FROM messages m
+      WHERE m.session_id = s.id AND m.role IN ('user', 'assistant')) AS message_count,
+    (SELECT COALESCE(SUM(t.total_tokens), 0) FROM token_usage t
+      WHERE t.session_id = s.id) AS total_tokens,
+    (SELECT COALESCE(SUM(COALESCE(t.cost_estimate, 0)), 0) FROM token_usage t
+      WHERE t.session_id = s.id) AS total_cost,
+    (SELECT substr(m.content, 1, 200) FROM messages m
+      WHERE m.session_id = s.id AND m.role = 'user'
+      ORDER BY m.id LIMIT 1) AS first_message
 FROM sessions s
-LEFT JOIN (
-    SELECT session_id, COUNT(*) AS message_count
-    FROM messages
-    WHERE role IN ('user', 'assistant')
-    GROUP BY session_id
-) mc ON mc.session_id = s.id
-LEFT JOIN (
-    SELECT session_id, SUM(total_tokens) AS total_tokens,
-           SUM(COALESCE(cost_estimate, 0)) AS total_cost
-    FROM token_usage
-    GROUP BY session_id
-) tu ON tu.session_id = s.id
-LEFT JOIN (
-    SELECT session_id, substr(content, 1, 200) AS first_message
-    FROM (
-        SELECT session_id, content,
-               ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS rn
-        FROM messages
-        WHERE role = 'user'
-    )
-    WHERE rn = 1
-) fm ON fm.session_id = s.id
-"""
+WHERE s.id IN ({placeholders})"""
+
+# SQLite takes 32,766 bound parameters, but a page that large is a sign of a
+# caller asking for the whole table; chunking keeps the statement small and
+# the plan stable whatever the page size.
+_ENRICH_CHUNK = 400
+
+# How many space sessions one response will carry back past the recency
+# window. The union exists so a space group never loses members to the LIMIT,
+# and it had no LIMIT of its own at all: 900 live space sessions made every
+# ten-second poll 1,302 items and 1.1 MB per visible tab. It follows the
+# caller's page instead — a client asking for more rows gets more space rows
+# with them — with a floor at the web client's own page size so no install
+# that fits in one page sees any change. `space_counts` on the API response
+# carries the true membership either way, so a capped group still knows how
+# big it is.
+SPACE_UNION_FLOOR = 500
+
+
+def _enrich_session_ids(conn, ids: list[str]) -> list[dict]:
+    """Enrich exactly these session ids, returned in the order given."""
+    if not ids:
+        return []
+    found: dict[str, dict] = {}
+    for start in range(0, len(ids), _ENRICH_CHUNK):
+        chunk = ids[start : start + _ENRICH_CHUNK]
+        sql = _ENRICH_SQL.format(placeholders=",".join("?" * len(chunk)))
+        for row in conn.execute(sql, chunk):
+            found[row["id"]] = dict(row)
+    return [found[i] for i in ids if i in found]
 
 
 def list_sessions_enriched(
@@ -166,9 +196,22 @@ def list_sessions_enriched(
 ) -> list[dict]:
     """List sessions with message_count, total_tokens, and first_message.
 
+    Candidate ids first, enrichment second. The page is chosen by one
+    indexed query over `sessions` alone — no aggregate touches a message
+    until the rows are known — and the enrichment then runs against that
+    fixed id list. Unrelated and archived history no longer costs anything:
+    measured at 1,622 sessions / ~116,000 messages, a 25-row page went from
+    150.9 ms to 0.44 ms with no space configured, and from 307.9 ms to
+    9.3 ms with a 900-session space unioned back in.
+
     Space sessions are long-lived by contract: any that fall outside the
     recency window are unioned back in, so the sidebar's space groups never
-    lose members to the LIMIT no matter how stale they get.
+    lose members to the LIMIT no matter how stale they get. That union is now
+    an id query too, and its ids join the page's for a SINGLE enrichment pass
+    — the aggregates used to be computed twice per refresh in full.
+    `SPACE_UNION_FLOOR` bounds how far past the window it will reach; the
+    route reports per-space counts alongside, so a group that is paged is
+    still a group that knows its own size.
 
     ``archived`` picks the population: False (default) the live list, True
     the archived one. Archiving is precisely how a session leaves the
@@ -190,30 +233,45 @@ def list_sessions_enriched(
         conds.append(ex_sql)
     where = "WHERE " + " AND ".join(conds) + " "
     with connect_sessions() as conn:
+        ordered = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT s.id FROM sessions s " + where + "ORDER BY s.updated_at DESC LIMIT ? OFFSET ?",
+                (*ex_params, limit, offset),
+            )
+        ]
+        # With no spaces configured the union can only return ids the page
+        # already has, so it is not asked for at all.
+        if not archived and conn.execute("SELECT 1 FROM spaces LIMIT 1").fetchone():
+            union_where = "WHERE s.space_id IS NOT NULL AND s.archived_at IS NULL "
+            if ex_sql:
+                union_where += "AND " + ex_sql + " "
+            seen = set(ordered)
+            for r in conn.execute(
+                "SELECT s.id FROM sessions s " + union_where + "ORDER BY s.updated_at DESC LIMIT ?",
+                (*ex_params, max(limit, SPACE_UNION_FLOOR)),
+            ):
+                if r["id"] not in seen:
+                    seen.add(r["id"])
+                    ordered.append(r["id"])
+        return _enrich_session_ids(conn, ordered)
+
+
+def count_live_sessions_by_space() -> dict[str, int]:
+    """How many live sessions each space holds — the group's true size.
+
+    The sidebar's space groups are rendered from whatever rows the response
+    carries, and the space union is bounded now, so the count has to travel
+    separately or a paged group would silently under-report itself. One
+    GROUP BY over `sessions` through `idx_sessions_space`; no message is
+    touched.
+    """
+    with connect_sessions() as conn:
         rows = conn.execute(
-            _ENRICHED_SELECT + where + "ORDER BY s.updated_at DESC LIMIT ? OFFSET ?",
-            (*ex_params, limit, offset),
+            "SELECT space_id, COUNT(*) AS c FROM sessions "
+            "WHERE space_id IS NOT NULL AND archived_at IS NULL GROUP BY space_id"
         ).fetchall()
-        result = [dict(r) for r in rows]
-        if archived:
-            return result
-        # _ENRICHED_SELECT GROUP BYs all of messages and token_usage and runs
-        # a ROW_NUMBER() over every user message before the outer LIMIT, so
-        # running it twice doubles the disk and CPU of every sidebar refresh.
-        # With no spaces configured the second pass can only return rows the
-        # first already has.
-        if not conn.execute("SELECT 1 FROM spaces LIMIT 1").fetchone():
-            return result
-        seen = {r["id"] for r in result}
-        union_where = "WHERE s.space_id IS NOT NULL AND s.archived_at IS NULL "
-        if ex_sql:
-            union_where += "AND " + ex_sql + " "
-        extra = conn.execute(
-            _ENRICHED_SELECT + union_where + "ORDER BY s.updated_at DESC",
-            ex_params,
-        ).fetchall()
-        result.extend(dict(r) for r in extra if r["id"] not in seen)
-        return result
+        return {r["space_id"]: int(r["c"]) for r in rows}
 
 
 def count_sessions_by_type() -> dict[str, int]:
@@ -394,6 +452,7 @@ def update_session(session_id: str, **kwargs) -> None:
         "watched_worker_ids",
         "model_override",
         "worker_kind",
+        "worker_run",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
@@ -806,6 +865,45 @@ SQL_SESSION_IS_IDLE = (
 )
 
 
+# The same rules again, for ONE id, at the moment of deletion.
+#
+# `list_purge_candidates` runs in a worker thread and hands back a snapshot;
+# the deletions then happen one at a time on the loop, and the world moves
+# while they do. A session that gets pinned, moved into a space, or starts a
+# turn between selection and deletion used to be deleted anyway, because
+# nothing looked again. `updated_at` is re-checked against the same cutoff
+# for the same reason — a chat the user has just reopened is no longer idle
+# — and `SQL_SESSION_IS_IDLE` is the codebase's existing definition of a
+# session that is not mid-turn.
+_PURGE_RECHECK_SQL = f"""SELECT
+    CASE
+        WHEN COALESCE(s.session_type, 'normal') != 'normal' THEN 'other_types'
+        WHEN COALESCE(s.pinned, 0) != 0 THEN 'pinned'
+        WHEN s.space_id IS NOT NULL THEN 'in_space'
+        WHEN s.updated_at >= ? THEN 'touched'
+        WHEN NOT {SQL_SESSION_IS_IDLE} THEN 'busy'
+        ELSE ''
+    END AS spared_by
+FROM sessions s
+WHERE s.id = ?"""
+
+
+def purge_candidate_spared_by(session_id: str, cutoff_iso: str) -> str | None:
+    """Why this session should NOT be deleted right now, or None to proceed.
+
+    'gone' means it is already deleted — nothing to do and nothing to
+    report as an error. The other buckets are the same names
+    `list_purge_candidates` reports under, so a re-check and a selection can
+    be added up without two vocabularies, plus 'touched' and 'busy', which
+    can only become true after a selection was made.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(_PURGE_RECHECK_SQL, (cutoff_iso, session_id)).fetchone()
+    if row is None:
+        return "gone"
+    return row["spared_by"] or None
+
+
 def get_sessions_in_state_v2(state_v2: str) -> list[dict]:
     """Return all sessions persisted with the given v2 state. Used by the
     boot-time reconcile sweep to find parents that were suspended on
@@ -839,7 +937,7 @@ def get_sessions_in_legacy_processing_only() -> list[dict]:
 
 
 def delete_session(session_id: str) -> None:
-    """Delete session and cascade (messages, artifacts, questions)."""
+    """Delete session and cascade (messages, questions)."""
     # Delete workers first (recursive), then parent — all in one transaction
     with connect_sessions() as conn:
         worker_ids = [
@@ -864,6 +962,10 @@ def delete_session(session_id: str) -> None:
         # this the largest table by row count and slowed the prune sweep
         # (whose own DISTINCT scan grows with it).
         conn.execute("DELETE FROM session_state_log WHERE session_id = ?", (session_id,))
+        try:
+            conn.execute("DELETE FROM message_feedback WHERE session_id = ?", (session_id,))
+        except sqlite3.OperationalError:
+            pass  # pre-v36 database
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
 
@@ -874,6 +976,44 @@ def get_worker_sessions(parent_id: str) -> list[dict]:
             (parent_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def worker_child_ids(parent_id: str) -> list[str]:
+    """The parent's worker children, oldest first — the durable form of
+    `AgentSession.worker_ids`, which is memory-only and dies with the process.
+
+    session_type is part of the filter on purpose: parent_session_id also
+    carries non-worker children (a session forked from another), and attaching
+    those to a parent's worker inventory would put them in its completion
+    listing and its concurrency count.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT id FROM sessions
+               WHERE parent_session_id = ? AND session_type = 'worker'
+               ORDER BY created_at, id""",
+            (parent_id,),
+        ).fetchall()
+        return [r["id"] for r in rows]
+
+
+def inherited_goal_id(session_id: str) -> int | None:
+    """The goal this session's spend was last billed to.
+
+    A worker inherits its parent's active_goal_id at spawn and stamps it on
+    every token_usage row it writes, so those rows ARE the durable record of
+    the attribution — the in-memory field is just a cache of them. Reading it
+    back is what lets a rehydrated worker keep both its billing and the goal
+    budget check.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT goal_id FROM token_usage
+               WHERE session_id = ? AND goal_id IS NOT NULL
+               ORDER BY id DESC LIMIT 1""",
+            (session_id,),
+        ).fetchone()
+        return int(row["goal_id"]) if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -899,6 +1039,7 @@ def add_state_log(
     reflect_count: int = 0,
     eval_count: int = 0,
     elapsed_ms: int | None = None,
+    persist_state: bool = False,
 ) -> int:
     with connect_sessions() as conn:
         cur = conn.execute(
@@ -923,6 +1064,10 @@ def add_state_log(
                 elapsed_ms,
             ),
         )
+        if persist_state:
+            conn.execute(
+                "UPDATE sessions SET state_v2 = ?, updated_at = ? WHERE id = ?", (to_state, _now(), session_id)
+            )
         return int(cur.lastrowid or 0)
 
 
@@ -1601,9 +1746,19 @@ def add_message(
     idempotency_key: str | None = None,
     latency_ms: int | None = None,
     metadata: str | None = None,
+    question_id: str | None = None,
+    question_answer: str | None = None,
 ) -> int:
     """Insert a message. Returns message ID."""
     with connect_sessions() as conn:
+        if question_id is not None:
+            answered = conn.execute(
+                "UPDATE questions SET answer = ?, answered_at = ? "
+                "WHERE id = ? AND session_id = ? AND answered_at IS NULL",
+                (question_answer, _now(), question_id, session_id),
+            )
+            if answered.rowcount != 1:
+                raise ValueError("Question already handled")
         cur = conn.execute(
             """INSERT INTO messages (session_id, role, content, tool_call_id,
                tool_calls, char_count, token_count, partial, idempotency_key,
@@ -1685,6 +1840,31 @@ def count_messages(session_id: str, before_id: int | None = None) -> int:
         return int(row["c"]) if row else 0
 
 
+def count_messages_and_compactions(session_id: str) -> tuple[int, int]:
+    """(messages, compaction markers) for one session, as one aggregate.
+
+    The context-status endpoint used to read the whole transcript a second
+    time — after `compile_context` had already read it once — purely to
+    produce these two integers. On a 1,201-message session that materialized
+    2.4 MB of content to count rows. `idx_messages_session_role` covers both
+    halves of this statement, so it never touches the content column at all:
+    measured 7.00 ms -> 0.18 ms on that transcript.
+
+    An unknown session id answers (0, 0), which is what "no rows" means;
+    callers that need to distinguish it from a real empty session ask
+    `get_session` first.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(role = 'compaction'), 0) AS compactions "
+            "FROM messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if not row:
+            return (0, 0)
+        return (int(row["total"]), int(row["compactions"]))
+
+
 def get_last_message_at(session_id: str, role: str) -> str | None:
     """Return the created_at of the newest message with the given role
     (None if there are none). Cheap indexed lookup — avoids loading the
@@ -1701,6 +1881,37 @@ def get_message(message_id: int) -> dict | None:
     with connect_sessions() as conn:
         row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
         return dict(row) if row else None
+
+
+def user_messages_after(session_id: str, after_id: int, limit: int = 3) -> list[dict]:
+    """The next few user-role messages strictly after `after_id`, oldest first.
+
+    The deferred grader reads this to find the message that followed the turn
+    it is grading — the user's own reaction is the cheapest ground truth the
+    loop has. Bounded by `limit` because the caller only ever wants the first
+    non-synthetic one; harness-authored user rows (worker-resume injections)
+    are filtered by the caller, which owns that vocabulary.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT * FROM messages
+               WHERE session_id = ? AND id > ? AND role = 'user'
+               ORDER BY id LIMIT ?""",
+            (session_id, int(after_id), int(limit)),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def last_message_id(session_id: str) -> int | None:
+    """Highest message id in the session, or None when it has no messages.
+
+    Used as the closing bound of a turn's message-id range: captured when a
+    deferred grade is scheduled so the evidence slice stays fixed even after
+    the next turn has appended to the transcript.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT MAX(id) AS m FROM messages WHERE session_id = ?", (session_id,)).fetchone()
+    return int(row["m"]) if row and row["m"] is not None else None
 
 
 def turn_has_final_answer(session_id: str, user_msg_id: int) -> bool:
@@ -1732,6 +1943,78 @@ def turn_has_final_answer(session_id: str, user_msg_id: int) -> bool:
         return row is not None
 
 
+def turn_has_assistant_row(session_id: str, user_msg_id: int) -> bool:
+    """True if any assistant row was written after `user_msg_id`.
+
+    The exact condition get_orphaned_user_messages walks the sequence for, asked
+    about one message: a user row with an assistant row behind it is answered
+    work, one without is an orphan. Weaker than turn_has_final_answer, which
+    wants a *text* answer tagged to this turn — a mid-round tool_calls row
+    satisfies this and not that, which is the right split for cancellation:
+    once the turn has said anything at all, recovery leaves it alone.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT 1 FROM messages
+               WHERE session_id = ? AND role = 'assistant' AND id > ?
+               LIMIT 1""",
+            (session_id, int(user_msg_id)),
+        ).fetchone()
+        return row is not None
+
+
+def set_message_delivery(session_id: str, message_ids: list[int], status: str) -> None:
+    """Persist delivery independently of transcript adjacency. Only managed rows change."""
+    if not message_ids:
+        return
+    with connect_sessions() as conn:
+        conn.executemany(
+            "UPDATE messages SET metadata = json_set(metadata, '$.delivery_status', ?) "
+            "WHERE session_id = ? AND id = ? AND json_valid(metadata) "
+            "AND json_extract(metadata, '$.delivery_status') IS NOT NULL "
+            "AND (? != 'consumed' OR json_extract(metadata, '$.delivery_status') = 'pending')",
+            [(status, session_id, mid, status) for mid in message_ids],
+        )
+
+
+def requeue_message_delivery(session_id: str, message_id: int) -> None:
+    """An unread correction becomes its own queued request, with a new turn root."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE messages SET metadata = json_set(json_remove(metadata, '$.parent_user_msg_id'), "
+            "'$.injected', json('false'), '$.delivery_status', 'pending') "
+            "WHERE session_id = ? AND id = ? AND json_valid(metadata) "
+            "AND json_extract(metadata, '$.delivery_status') = 'pending'",
+            (session_id, message_id),
+        )
+
+
+def get_pending_user_message_ids(session_id: str) -> list[int]:
+    """Ids of this session's user rows whose delivery is still pending.
+
+    The narrow half of get_orphaned_user_messages, for the cancel path, which
+    only ever wanted ids. The wide call materialised every row of the session
+    — content included — and JSON-parsed each one in Python, on the event
+    loop; a bulk purge of N sessions did N full transcript loads there.
+
+    `id, metadata` is all this reads, and the metadata never leaves SQLite:
+    the same two predicates the Python filter applied (delivery pending, not
+    already stamped cancelled) are expressed as json_extract tests, so a row
+    whose metadata is unparseable is skipped instead of raising out of a
+    generator and costing the whole stamp.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT id FROM messages
+               WHERE session_id = ? AND role = 'user' AND json_valid(metadata)
+                 AND json_extract(metadata, '$.delivery_status') = 'pending'
+                 AND COALESCE(json_extract(metadata, '$.cancelled'), 0) = 0
+               ORDER BY id""",
+            (session_id,),
+        ).fetchall()
+    return [int(r["id"]) for r in rows]
+
+
 def get_orphaned_user_messages(session_id: str) -> list[dict]:
     """Return user messages that have no subsequent assistant response.
 
@@ -1743,6 +2026,10 @@ def get_orphaned_user_messages(session_id: str) -> list[dict]:
 
     Injected user messages (metadata.injected=true) are skipped because they
     were inserted for mid-turn context, not as new conversation turns.
+
+    Cancelled user messages (metadata.cancelled=true, stamped by
+    mark_messages_cancelled) are skipped too: they were dropped on purpose,
+    and recovery exists for work the harness lost, not work the user stopped.
     """
     import json as _json
 
@@ -1759,6 +2046,13 @@ def get_orphaned_user_messages(session_id: str) -> list[dict]:
         if role == "user":
             try:
                 meta = _json.loads(m.get("metadata") or "{}")
+                if meta.get("cancelled") or meta.get("delivery_status") in {"consumed", "settled", "cancelled"}:
+                    continue
+                if meta.get("delivery_status") == "pending":
+                    # Explicit delivery survives even when an unrelated answer
+                    # was appended later. Legacy rows retain adjacency recovery.
+                    orphans.append(m)
+                    continue
                 if meta.get("injected"):
                     continue
             except Exception:
@@ -1771,6 +2065,40 @@ def get_orphaned_user_messages(session_id: str) -> list[dict]:
     if pending_user is not None:
         orphans.append(pending_user)
     return orphans
+
+
+def mark_messages_cancelled(message_ids: list[int]) -> int:
+    """Stamp metadata.cancelled=true on each message. Returns rows changed.
+
+    The stamp is the durable record that a message was dropped by a cancel
+    rather than lost — orphan recovery reads it, and the transcript keeps the
+    text either way. Merges into whatever metadata the row already carries
+    (parent_user_msg_id, injected, model/cost stamps) instead of replacing it;
+    a row whose metadata is NULL or unparseable starts from an empty object,
+    which is the same thing every reader of this column already assumes.
+    """
+    if not message_ids:
+        return 0
+    import json as _json
+
+    changed = 0
+    with connect_sessions() as conn:
+        for mid in message_ids:
+            row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (int(mid),)).fetchone()
+            if row is None:
+                continue
+            try:
+                meta = _json.loads(row["metadata"] or "{}")
+            except Exception:
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            if meta.get("cancelled"):
+                continue
+            meta["cancelled"] = True
+            conn.execute("UPDATE messages SET metadata = ? WHERE id = ?", (_json.dumps(meta), int(mid)))
+            changed += 1
+    return changed
 
 
 def delete_message(message_id: int) -> None:
@@ -1833,14 +2161,27 @@ def get_last_partial(session_id: str) -> dict | None:
         return dict(row) if row else None
 
 
-def add_compaction(session_id: str, summary: str, compacted_up_to: int, original_count: int) -> int:
-    """Add a compaction marker message with metadata in dedicated column."""
+def add_compaction(
+    session_id: str,
+    summary: str,
+    compacted_up_to: int,
+    original_count: int,
+    coverage: dict | None = None,
+) -> int:
+    """Add a compaction marker message with metadata in dedicated column.
+
+    ``coverage`` records what the summarizer was actually shown: the id range
+    it covered, how many calls it took, and every body that reached it
+    clipped. The boundary alone cannot say that — it is one id, and it used
+    to be written for rows no summarizer had ever seen.
+    """
     import json
 
     meta = json.dumps(
         {
             "compacted_up_to": compacted_up_to,
             "original_count": original_count,
+            **({"coverage": coverage} if coverage else {}),
         }
     )
     with connect_sessions() as conn:
@@ -1854,7 +2195,7 @@ def add_compaction(session_id: str, summary: str, compacted_up_to: int, original
 
 
 def clear_messages_only(session_id: str) -> None:
-    """Clear all messages but keep session and artifacts."""
+    """Clear all messages but keep the session."""
     with connect_sessions() as conn:
         try:
             conn.execute(
@@ -2027,8 +2368,6 @@ def ledger_snapshot(session_id: str, anchor_iso: str) -> dict:
         "inflight": {},
         "last_verdict": None,
         "open_questions": [],
-        "agent_proposals": [],
-        "adaptive_changes": [],
         "canary_fails": [],
         "boot": {},
     }
@@ -2102,29 +2441,6 @@ def ledger_snapshot(session_id: str, anchor_iso: str) -> dict:
                        WHERE session_id = ? AND answered_at IS NULL
                        ORDER BY created_at DESC LIMIT 2""",
                     (session_id,),
-                ).fetchall()
-            ]
-        except Exception:
-            pass
-        try:
-            out["agent_proposals"] = [
-                dict(r)
-                for r in conn.execute(
-                    """SELECT id, created_at FROM adaptive_proposals
-                       WHERE status = 'pending' AND producer = 'agent'
-                       ORDER BY created_at DESC LIMIT 2""",
-                ).fetchall()
-            ]
-        except Exception:
-            pass
-        try:
-            out["adaptive_changes"] = [
-                dict(r)
-                for r in conn.execute(
-                    """SELECT entry_id, action, actor FROM adaptive_events
-                       WHERE created_at > ? AND action IN ('create', 'update', 'delete')
-                       ORDER BY id DESC LIMIT 6""",
-                    (anchor_iso,),
                 ).fetchall()
             ]
         except Exception:
@@ -2342,12 +2658,24 @@ def delete_question(question_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+NOTIFICATION_TIERS = ("interrupt", "bell", "log")
+# A row is "open" until the user dismisses it or its cause resolves.
+_NOTIFICATION_OPEN = "dismissed_at IS NULL AND resolved_at IS NULL"
+_NOTIFICATION_MAX_ROWS = 5000
+
+
 def add_notification(
     session_id: str = "",
     title: str = "",
     body: str = "",
     urgency: str = "normal",
     dedup_key: str = "",
+    *,
+    category: str = "legacy",
+    tier: str = "bell",
+    subject: str = "",
+    link: dict | None = None,
+    coalesce: bool = False,
 ) -> str:
     """Insert a notification row.
 
@@ -2357,32 +2685,151 @@ def add_notification(
     notification of a day is byte-identical to the pre-dedup behavior; only
     the repeats are swallowed (returned id is "" then). Empty key = always
     insert (the old behavior).
+
+    `category`/`tier`/`subject`/`link` come from core/notices.py, the one
+    caller that should set them. `coalesce=True` folds a repeat of an OPEN
+    (category, subject) row into that row — new text, `occurrences` + 1, unread
+    again — instead of stacking a second one.
     """
     if dedup_key:
         marker = f"notify_dedup:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}:{dedup_key}"
         if get_snooze_state(marker):
             return ""
         set_snooze_state(marker, "1")
-    nid = _new_id()
+    now = _now()
+    link_json = json.dumps(link) if link else None
     with connect_sessions() as conn:
+        if coalesce and subject:
+            row = conn.execute(
+                f"SELECT id FROM notifications WHERE category = ? AND subject = ? AND {_NOTIFICATION_OPEN} "
+                "ORDER BY created_at DESC LIMIT 1",
+                (category, subject),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE notifications SET title = ?, body = ?, urgency = ?, tier = ?, updated_at = ?, "
+                    "occurrences = occurrences + 1, read_at = NULL, link_json = COALESCE(?, link_json) WHERE id = ?",
+                    (title, body, urgency, tier, now, link_json, row["id"]),
+                )
+                return row["id"]
+        nid = _new_id()
         conn.execute(
-            """INSERT INTO notifications (id, session_id, title, body, urgency, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (nid, session_id, title, body, urgency, _now()),
+            """INSERT INTO notifications
+                   (id, session_id, title, body, urgency, created_at, category, tier, subject, link_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (nid, session_id, title, body, urgency, now, category, tier, subject, link_json),
         )
     return nid
 
 
-def get_notifications(limit: int = 200) -> list[dict]:
-    """Newest first, bounded — the bell renders a list, not an archive."""
+def _notification_row(row) -> dict:
+    d = dict(row)
+    raw = d.pop("link_json", None)
+    try:
+        d["link"] = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        d["link"] = None
+    cat = d.get("category") or "legacy"
+    d["area"] = cat.split(".", 1)[0] if "." in cat else cat
+    return d
+
+
+def list_notifications(
+    view: str = "bell", area: str | None = None, before: str | None = None, limit: int = 50
+) -> list[dict]:
+    """Newest first, bounded. view='bell' = open interrupt/bell rows (what needs
+    a look); view='log' = every row in every state (the activity log)."""
+    where, params = [], []
+    if view == "bell":
+        where.append(f"tier IN ('interrupt', 'bell') AND {_NOTIFICATION_OPEN}")
+    if area:
+        where.append("(category = ? OR category LIKE ?)")
+        params += [area, f"{area}.%"]
+    if before:
+        where.append("created_at < ?")
+        params.append(before)
+    sql = "SELECT * FROM notifications"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
     with connect_sessions() as conn:
-        rows = conn.execute(
-            "SELECT * FROM notifications ORDER BY created_at DESC LIMIT ?", (max(1, int(limit)),)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return [_notification_row(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def get_notifications(limit: int = 200) -> list[dict]:
+    """The bell's contents, newest first, bounded — the bell renders a list, not an archive."""
+    return list_notifications("bell", limit=limit)
+
+
+def notification_counts() -> dict:
+    """needs_you = open interrupt rows (the badge, alongside open questions);
+    bell = open quiet rows (a dot); unread = rows never looked at (Activity)."""
+    with connect_sessions() as conn:
+        row = conn.execute(f"""SELECT
+                   COALESCE(SUM(CASE WHEN tier = 'interrupt' AND {_NOTIFICATION_OPEN} THEN 1 ELSE 0 END), 0) AS needs_you,
+                   COALESCE(SUM(CASE WHEN tier = 'bell' AND {_NOTIFICATION_OPEN} THEN 1 ELSE 0 END), 0) AS bell,
+                   COALESCE(SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END), 0) AS unread
+               FROM notifications""").fetchone()
+        return {"needs_you": row["needs_you"], "bell": row["bell"], "unread": row["unread"]}
+
+
+def dismiss_notification(notification_id: str) -> bool:
+    """Soft dismiss: the row leaves the bell and stays in the activity log."""
+    now = _now()
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "UPDATE notifications SET dismissed_at = ?, read_at = COALESCE(read_at, ?) "
+            "WHERE id = ? AND dismissed_at IS NULL",
+            (now, now, notification_id),
+        )
+        return cur.rowcount > 0
+
+
+def dismiss_all_notifications() -> int:
+    """Clear the bell (every open interrupt/bell row); the log keeps them."""
+    now = _now()
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "UPDATE notifications SET dismissed_at = ?, read_at = COALESCE(read_at, ?) "
+            f"WHERE tier IN ('interrupt', 'bell') AND {_NOTIFICATION_OPEN}",
+            (now, now),
+        )
+        return cur.rowcount
+
+
+def mark_notifications_read(ids: list[str] | None = None) -> int:
+    """Mark rows read (all unread rows when ids is None)."""
+    now = _now()
+    with connect_sessions() as conn:
+        if ids is None:
+            cur = conn.execute("UPDATE notifications SET read_at = ? WHERE read_at IS NULL", (now,))
+        else:
+            ids = [str(i) for i in ids][:500]
+            if not ids:
+                return 0
+            marks = ",".join("?" * len(ids))
+            cur = conn.execute(
+                f"UPDATE notifications SET read_at = ? WHERE read_at IS NULL AND id IN ({marks})", (now, *ids)
+            )
+        return cur.rowcount
+
+
+def resolve_notifications(category: str, subject: str = "") -> int:
+    """The cause went away: close open rows of this category (and subject,
+    when given) so they leave the bell without the user clicking."""
+    now = _now()
+    sql = f"UPDATE notifications SET resolved_at = ? WHERE category = ? AND {_NOTIFICATION_OPEN}"
+    params: list = [now, category]
+    if subject:
+        sql += " AND subject = ?"
+        params.append(subject)
+    with connect_sessions() as conn:
+        return conn.execute(sql, params).rowcount
 
 
 def delete_notification(notification_id: str) -> None:
+    """Hard delete (tests, retention). The API dismisses softly instead."""
     with connect_sessions() as conn:
         conn.execute("DELETE FROM notifications WHERE id = ?", (notification_id,))
 
@@ -2391,12 +2838,21 @@ def prune_notifications(retention_days: int) -> int:
     """Delete notifications older than the retention window. Returns count.
 
     Until v3.1 nothing pruned this table — it only ever shrank by manual
-    dismiss clicks while idle-loop producers refilled it on a cadence.
+    dismiss clicks while idle-loop producers refilled it on a cadence. Since
+    v42 Dismiss keeps the row (it is the activity log), so this is the only
+    thing that bounds it: the age cutoff, plus a hard row cap. An OPEN
+    interrupt row is never pruned — it is still waiting on the user.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))).isoformat()
+    keep = f"NOT (tier = 'interrupt' AND {_NOTIFICATION_OPEN})"
     with connect_sessions() as conn:
-        cur = conn.execute("DELETE FROM notifications WHERE created_at < ?", (cutoff,))
-        return cur.rowcount
+        deleted = conn.execute(f"DELETE FROM notifications WHERE created_at < ? AND {keep}", (cutoff,)).rowcount
+        deleted += conn.execute(
+            f"DELETE FROM notifications WHERE {keep} AND id NOT IN "
+            "(SELECT id FROM notifications ORDER BY created_at DESC, id DESC LIMIT ?)",
+            (_NOTIFICATION_MAX_ROWS,),
+        ).rowcount
+        return deleted
 
 
 # ---------------------------------------------------------------------------
@@ -2576,6 +3032,20 @@ def get_active_goal(session_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def get_goal(goal_id: int) -> dict | None:
+    """One goal by id, whatever session owns it and whatever its status.
+
+    The owner-scoped lookup above answers "what is THIS session working on",
+    which is the right question for creating or mutating a goal. It is the
+    wrong one for enforcement: a worker inherits its parent's goal id and
+    bills the parent's goal, so budget checks must resolve the goal the spend
+    is attributed to, not one the checking session happens to own.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM session_goals WHERE id = ?", (goal_id,)).fetchone()
+        return dict(row) if row else None
+
+
 def update_goal(goal_id: int, **fields) -> None:
     allowed = {"objective", "status", "token_budget", "time_budget_s", "continuation_budget", "continuations_used"}
     sets, params = [], []
@@ -2606,24 +3076,187 @@ def goal_token_usage(goal_id: int) -> int:
         return int(row["t"]) if row else 0
 
 
-def goal_token_usage_since(goal_id: int, since_iso: str) -> int:
-    """Windowed goal spend — the telos binding monitor's real-budget input."""
-    with connect_sessions() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(SUM(total_tokens), 0) AS t FROM token_usage WHERE goal_id = ? AND created_at >= ?",
-            (goal_id, since_iso),
-        ).fetchone()
-        return int(row["t"]) if row else 0
+# ---------------------------------------------------------------------------
+# Goal continuation outbox (harness review 3.2.1 / H12)
+# ---------------------------------------------------------------------------
+#
+# The debit was durable and the dispatch was not: continuations_used was
+# written, then a synthetic PendingMessage was appended to an in-memory deque
+# that nothing persists, and no boot path swept for the difference. A crash in
+# between spent the allowance and ran nothing.
+#
+# These four functions are the whole outbox: enqueue (debit + insert in ONE
+# transaction), claim (take ownership durably), settle (record what happened),
+# recover (find rows a dead process left behind). Recovery is deliberately not
+# a replay: a row left in `claimed` may have executed shell commands or written
+# files, so it comes back marked `recovered` and its dispatcher prepends a
+# verify-before-repeating instruction rather than re-running anything.
+
+CONTINUATION_RECOVERY_LIMIT = 3
 
 
-def total_token_usage_since(since_iso: str) -> int:
-    """Windowed total spend across every session and goal."""
+def enqueue_goal_continuation(
+    session_id: str,
+    goal_id: int,
+    budget: int,
+    prompt_for,
+    checkpoint: str | None = None,
+) -> dict | None:
+    """Debit one continuation and enqueue it, atomically. None if refused.
+
+    Refused when the goal is no longer active or its continuation allowance is
+    spent — checked inside the same BEGIN IMMEDIATE that writes the debit, so
+    two racing finalizers cannot both allocate ordinal N. The UNIQUE index on
+    (goal_id, ordinal) is the backstop if one ever slips past on another
+    connection: the INSERT raises and this returns None rather than
+    double-spending. Same explicit-transaction pattern as create_goal.
+
+    `prompt_for(ordinal, budget)` builds the user-visible text; it is called
+    inside the transaction so the wording can name the ordinal it was actually
+    allocated. `checkpoint` is a bounded reference to where the work stood —
+    what recovery re-reads instead of trusting a bare "continue" instruction.
+    """
     with connect_sessions() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(SUM(total_tokens), 0) AS t FROM token_usage WHERE created_at >= ?",
-            (since_iso,),
-        ).fetchone()
-        return int(row["t"]) if row else 0
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            goal = conn.execute(
+                "SELECT * FROM session_goals WHERE id = ? AND session_id = ?",
+                (goal_id, session_id),
+            ).fetchone()
+            if not goal or goal["status"] != "active":
+                conn.execute("ROLLBACK")
+                return None
+            used = int(goal["continuations_used"] or 0)
+            if budget <= 0 or used >= budget:
+                conn.execute("ROLLBACK")
+                return None
+            ordinal = used + 1
+            prompt = prompt_for(ordinal, budget)
+            conn.execute(
+                "UPDATE session_goals SET continuations_used = ?, updated_at = ? WHERE id = ?",
+                (ordinal, _now(), goal_id),
+            )
+            cur = conn.execute(
+                "INSERT INTO goal_continuations "
+                "(goal_id, session_id, ordinal, status, prompt, checkpoint, created_at) "
+                "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+                (goal_id, session_id, ordinal, prompt, checkpoint, _now()),
+            )
+            row_id = cur.lastrowid
+            conn.execute("COMMIT")
+            return {
+                "id": row_id,
+                "goal_id": goal_id,
+                "session_id": session_id,
+                "ordinal": ordinal,
+                "prompt": prompt,
+                "checkpoint": checkpoint,
+                "recovered": 0,
+            }
+        except sqlite3.IntegrityError:
+            conn.execute("ROLLBACK")
+            logger.warning("Goal #%s: continuation ordinal collision — not double-debiting", goal_id)
+            return None
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def claim_goal_continuation(continuation_id: int) -> dict | None:
+    """Take durable ownership of a pending continuation. None if someone else
+    already has it (or it was settled) — a duplicate dispatch attempt loses
+    here rather than starting a second turn for the same ordinal."""
+    with connect_sessions() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                "UPDATE goal_continuations SET status = 'claimed', claimed_at = ?, "
+                "attempts = attempts + 1 WHERE id = ? AND status = 'pending'",
+                (_now(), continuation_id),
+            )
+            if cur.rowcount != 1:
+                conn.execute("ROLLBACK")
+                return None
+            row = conn.execute("SELECT * FROM goal_continuations WHERE id = ?", (continuation_id,)).fetchone()
+            conn.execute("COMMIT")
+            return dict(row) if row else None
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def settle_goal_continuation(continuation_id: int, status: str, outcome: str | None = None) -> None:
+    """Record how a claimed continuation ended: 'dispatched' or 'abandoned'."""
+    if status not in ("dispatched", "abandoned"):
+        raise ValueError(f"not a settlement status: {status}")
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE goal_continuations SET status = ?, outcome = ?, settled_at = ? "
+            "WHERE id = ? AND status IN ('pending', 'claimed')",
+            (status, outcome, _now(), continuation_id),
+        )
+
+
+def get_goal_continuation(continuation_id: int) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM goal_continuations WHERE id = ?", (continuation_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def recover_abandoned_continuations() -> list[dict]:
+    """Rows a dead process left mid-flight, ready to be re-offered. Startup only.
+
+    Two shapes, and the difference matters:
+
+    `pending` — debited, never claimed. The turn cannot have started, so
+    nothing was executed and the row goes back out unchanged.
+
+    `claimed` — a dispatcher owned it when the process died. Whether it ran a
+    shell command, wrote a file or called out is UNKNOWN, so it is returned
+    to `pending` with `recovered = 1`. Its dispatcher prepends an instruction
+    to re-read receipts and artifacts and continue from observed state; the
+    harness replays nothing by itself. Same posture as
+    reconcile_uncertain_cron_runs: report it, don't guess, don't re-send.
+
+    A row that has been recovered CONTINUATION_RECOVERY_LIMIT times is
+    abandoned instead — a crash loop must not replay forever.
+    """
+    with connect_sessions() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM goal_continuations WHERE status IN ('pending', 'claimed') ORDER BY id"
+                ).fetchall()
+            ]
+            live: list[dict] = []
+            for row in rows:
+                if int(row["attempts"] or 0) >= CONTINUATION_RECOVERY_LIMIT:
+                    conn.execute(
+                        "UPDATE goal_continuations SET status = 'abandoned', outcome = ?, settled_at = ? "
+                        "WHERE id = ?",
+                        (
+                            f"abandoned after {row['attempts']} recovery attempts — "
+                            "the process died on this continuation every time",
+                            _now(),
+                            row["id"],
+                        ),
+                    )
+                    continue
+                if row["status"] == "claimed":
+                    conn.execute(
+                        "UPDATE goal_continuations SET status = 'pending', recovered = 1 WHERE id = ?",
+                        (row["id"],),
+                    )
+                    row["recovered"] = 1
+                    row["status"] = "pending"
+                live.append(row)
+            conn.execute("COMMIT")
+            return live
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
 
 def reconcile_orphan_goals() -> int:
@@ -2709,8 +3342,8 @@ def add_canary_run(
     outcome: str = "",
     error: str = "",
 ) -> int:
-    """Record a completed canary run. batch_id links post-batch sweeps to the
-    Phase 4 adaptive batch that triggered them (the tripwire joins on it).
+    """Record a completed canary run. batch_id tagged post-batch sweeps of the
+    adaptive layer (retired in 3.2); nothing passes one now.
     outcome separates timeout/error/noop from honest gate failures; rows
     written before v30 keep it NULL."""
     with connect_sessions() as conn:
@@ -2769,389 +3402,6 @@ def prune_canary_runs(retention_days: int) -> int:
     with connect_sessions() as conn:
         cur = conn.execute("DELETE FROM canary_runs WHERE created_at < ?", (cutoff,))
         return cur.rowcount
-
-
-# ---------------------------------------------------------------------------
-# Adaptive layer (adaptation plan 4a): entries, events, batches, proposals
-# ---------------------------------------------------------------------------
-
-
-def adaptive_get_entry(entry_id: str) -> dict | None:
-    with connect_sessions() as conn:
-        row = conn.execute("SELECT * FROM adaptive_entries WHERE id = ?", (entry_id,)).fetchone()
-        return dict(row) if row else None
-
-
-def adaptive_list_entries(
-    kind: str | None = None,
-    scope: str | None = None,
-    status: str | None = "active",
-    limit: int = 200,
-) -> list[dict]:
-    clauses = []
-    params: list = []
-    if kind:
-        clauses.append("kind = ?")
-        params.append(kind)
-    if scope:
-        clauses.append("scope = ?")
-        params.append(scope)
-    if status:
-        clauses.append("status = ?")
-        params.append(status)
-    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-    params.append(int(limit))
-    with connect_sessions() as conn:
-        rows = conn.execute(
-            f"SELECT * FROM adaptive_entries {where} ORDER BY kind, id LIMIT ?",
-            params,
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def adaptive_put_entry(row: dict) -> None:
-    """Write a full entry row (insert or replace). The apply/rollback engine
-    owns version arithmetic — this is a dumb store."""
-    with connect_sessions() as conn:
-        conn.execute(
-            """INSERT OR REPLACE INTO adaptive_entries
-               (id, kind, scope, title, content, risk, version, status, source, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                row["id"],
-                row["kind"],
-                row.get("scope", "global"),
-                row.get("title", ""),
-                row.get("content", ""),
-                row.get("risk", "low"),
-                int(row.get("version", 1)),
-                row.get("status", "active"),
-                row.get("source", "user"),
-                row.get("created_at") or _now(),
-                row.get("updated_at") or _now(),
-            ),
-        )
-
-
-def adaptive_remove_entry(entry_id: str) -> None:
-    """Hard delete — used only by rollback of a create (before_json absent)."""
-    with connect_sessions() as conn:
-        conn.execute("DELETE FROM adaptive_entries WHERE id = ?", (entry_id,))
-
-
-def adaptive_entry_count(kind: str) -> int:
-    with connect_sessions() as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM adaptive_entries WHERE kind = ? AND status = 'active'",
-            (kind,),
-        ).fetchone()
-        return int(row["n"])
-
-
-def adaptive_add_event(
-    entry_id: str,
-    action: str,
-    before_json: str | None,
-    after_json: str | None,
-    evidence_json: str,
-    actor: str,
-    batch_id: str | None = None,
-    proposal_id: int | None = None,
-) -> int:
-    with connect_sessions() as conn:
-        cur = conn.execute(
-            """INSERT INTO adaptive_events
-               (entry_id, action, before_json, after_json, evidence_json,
-                actor, proposal_id, batch_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (entry_id, action, before_json, after_json, evidence_json, actor, proposal_id, batch_id, _now()),
-        )
-        return cur.lastrowid
-
-
-def adaptive_list_events(
-    batch_id: str | None = None,
-    entry_id: str | None = None,
-    limit: int = 200,
-) -> list[dict]:
-    """Events newest-first (UI order). Rollback uses events_for_batch."""
-    clauses = []
-    params: list = []
-    if batch_id:
-        clauses.append("batch_id = ?")
-        params.append(batch_id)
-    if entry_id:
-        clauses.append("entry_id = ?")
-        params.append(entry_id)
-    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-    params.append(int(limit))
-    with connect_sessions() as conn:
-        rows = conn.execute(
-            f"SELECT * FROM adaptive_events {where} ORDER BY id DESC LIMIT ?",
-            params,
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def adaptive_events_for_batch(batch_id: str) -> list[dict]:
-    """Ascending autoincrement order — reverse it to roll back."""
-    with connect_sessions() as conn:
-        rows = conn.execute(
-            "SELECT * FROM adaptive_events WHERE batch_id = ? ORDER BY id ASC",
-            (batch_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def adaptive_get_event(event_id: int) -> dict | None:
-    with connect_sessions() as conn:
-        row = conn.execute("SELECT * FROM adaptive_events WHERE id = ?", (int(event_id),)).fetchone()
-        return dict(row) if row else None
-
-
-def adaptive_auto_apply_batches_since(since_iso: str) -> int:
-    """Distinct batches auto-applied since the cutoff (daily-cap accounting)."""
-    with connect_sessions() as conn:
-        row = conn.execute(
-            """SELECT COUNT(DISTINCT batch_id) AS n FROM adaptive_events
-               WHERE actor = 'auto' AND action != 'rollback' AND created_at >= ?""",
-            (since_iso,),
-        ).fetchone()
-        return int(row["n"])
-
-
-def adaptive_create_batch(batch_id: str, producer: str, payload_json: str, status: str = "pending") -> None:
-    with connect_sessions() as conn:
-        conn.execute(
-            """INSERT OR REPLACE INTO adaptive_batches
-               (batch_id, producer, status, payload_json, flagged_reason, cleared_at, created_at)
-               VALUES (?, ?, ?, ?, NULL, NULL, ?)""",
-            (batch_id, producer, status, payload_json, _now()),
-        )
-
-
-def adaptive_get_batch(batch_id: str) -> dict | None:
-    with connect_sessions() as conn:
-        row = conn.execute("SELECT * FROM adaptive_batches WHERE batch_id = ?", (batch_id,)).fetchone()
-        return dict(row) if row else None
-
-
-def adaptive_list_batches(status: str | None = None, limit: int = 100) -> list[dict]:
-    with connect_sessions() as conn:
-        if status:
-            rows = conn.execute(
-                "SELECT * FROM adaptive_batches WHERE status = ? ORDER BY created_at ASC LIMIT ?",
-                (status, int(limit)),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM adaptive_batches ORDER BY created_at DESC LIMIT ?",
-                (int(limit),),
-            ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def adaptive_update_batch(
-    batch_id: str,
-    status: str | None = None,
-    flagged_reason: str | None = None,
-    cleared_at: str | None = None,
-    payload_json: str | None = None,
-) -> None:
-    updates: dict = {}
-    if status is not None:
-        updates["status"] = status
-    if flagged_reason is not None:
-        updates["flagged_reason"] = flagged_reason
-    if cleared_at is not None:
-        updates["cleared_at"] = cleared_at
-    if payload_json is not None:
-        updates["payload_json"] = payload_json
-    if not updates:
-        return
-    cols = ", ".join(f"{k} = ?" for k in updates)
-    with connect_sessions() as conn:
-        conn.execute(f"UPDATE adaptive_batches SET {cols} WHERE batch_id = ?", [*updates.values(), batch_id])
-
-
-# Producers re-derive and re-offer the same findings every cycle while the
-# review queue stays full, so an unconditional WARNING per refusal compounds
-# into thousands of identical lines (~32% of a day's log on the live box while
-# dream's share sat at cap). Warn once per producer per fill episode; a
-# successful insert re-arms the warning. Process-lifetime state is fine here —
-# the point is log volume, not exact bookkeeping across restarts.
-_refusal_warned: set[str] = set()
-
-
-def _log_refusal(producer: str, message: str, *args) -> None:
-    if producer in _refusal_warned:
-        logger.debug(message, *args)
-    else:
-        _refusal_warned.add(producer)
-        logger.warning(message + " (further refusals for this producer log at DEBUG)", *args)
-
-
-def adaptive_add_proposal(
-    producer: str,
-    payload_json: str,
-    evidence_json: str,
-    rationale: str,
-    max_pending: int = 0,
-    max_pending_per_producer: int = 0,
-) -> int | None:
-    """Queue a proposal for human review. Returns the id, or None if suppressed.
-
-    Two bounds, because this queue is written by machines and drained by a
-    person. Producers emit continuously and approval is a scarce human act,
-    so without them the backlog only ever grows — 126 pending on the live
-    box, untouched for five days, which is a queue nobody finishes reading.
-
-    * **Dedupe** — an identical pending payload from the same producer
-      returns the existing id rather than stacking a copy. Re-deriving the
-      same finding from the same evidence is normal producer behaviour, not
-      new information.
-    * **Cap** — at `max_pending` the insert is refused. Refusing is the
-      honest response: another row on a queue this long would not be
-      reviewed either, and a caller that hears "no" can say so.
-    * **Per-producer share** — `max_pending_per_producer` stops one
-      chatty producer from owning the whole queue. On the live box every
-      one of the 126 backed-up proposals came from `dream`, so once it
-      filled the queue Candor, Refine and Telos were refused too: the
-      loudest producer silenced the quieter ones, which is the opposite of
-      how a review queue should triage.
-    """
-    with connect_sessions() as conn:
-        # BEGIN IMMEDIATE: the dedupe probe and both cap counts below are
-        # read-then-write. In autocommit they ran outside the INSERT's own
-        # transaction, so a producer on an executor thread and the snooze
-        # drain on the loop could both pass the same check and land a
-        # duplicate proposal (or overshoot the cap). Same fix v26 applied to
-        # create_goal.
-        conn.execute("BEGIN IMMEDIATE")
-        dup = conn.execute(
-            "SELECT id FROM adaptive_proposals WHERE status = 'pending' AND producer = ? AND payload_json = ? "
-            "ORDER BY id LIMIT 1",
-            (producer, payload_json),
-        ).fetchone()
-        if dup:
-            return int(dup[0])
-        if max_pending > 0:
-            pending = conn.execute("SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending'").fetchone()[0]
-            if int(pending) >= max_pending:
-                _log_refusal(
-                    producer,
-                    "adaptive: proposal from %s refused — %d pending at cap %d",
-                    producer,
-                    pending,
-                    max_pending,
-                )
-                return None
-        if max_pending_per_producer > 0:
-            mine = conn.execute(
-                "SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending' AND producer = ?", (producer,)
-            ).fetchone()[0]
-            if int(mine) >= max_pending_per_producer:
-                _log_refusal(
-                    producer,
-                    "adaptive: proposal from %s refused — %d of its own pending at per-producer cap %d",
-                    producer,
-                    mine,
-                    max_pending_per_producer,
-                )
-                return None
-        cur = conn.execute(
-            """INSERT INTO adaptive_proposals
-               (producer, payload_json, evidence_json, rationale, status, resolved_at, created_at)
-               VALUES (?, ?, ?, ?, 'pending', NULL, ?)""",
-            (producer, payload_json, evidence_json, rationale, _now()),
-        )
-        _refusal_warned.discard(producer)  # queue has room again — re-arm the refusal warning
-        return cur.lastrowid
-
-
-def adaptive_count_pending_proposals(producer: str | None = None) -> int:
-    """Pending proposals overall, or just one producer's (the per-producer
-    share in adaptive_add_proposal is checked against the latter)."""
-    with connect_sessions() as conn:
-        if producer:
-            return int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending' AND producer = ?",
-                    (producer,),
-                ).fetchone()[0]
-            )
-        return int(conn.execute("SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending'").fetchone()[0])
-
-
-def adaptive_count_auto_approved_since(since_iso: str) -> int:
-    """Auto-approvals in a window — the daily budget check for the veto-window
-    drain. Counts by the distinct 'auto_approved' status, which is exactly why
-    that status exists instead of reusing 'approved'."""
-    with connect_sessions() as conn:
-        return int(
-            conn.execute(
-                "SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'auto_approved' AND resolved_at >= ?",
-                (since_iso,),
-            ).fetchone()[0]
-        )
-
-
-def adaptive_expire_stale_proposals(max_age_days: int) -> int:
-    """Expire pending proposals past the TTL. Returns the number expired.
-
-    A proposal is a snapshot of evidence at a moment. Weeks later the entries
-    it cites may have moved, the tool it complains about may have recovered,
-    and approving it blind is worse than letting it lapse — the producer will
-    re-raise it from current evidence if it still holds.
-    """
-    if max_age_days <= 0:
-        return 0
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
-    with connect_sessions() as conn:
-        cur = conn.execute(
-            "UPDATE adaptive_proposals SET status = 'expired', resolved_at = ? "
-            "WHERE status = 'pending' AND created_at < ?",
-            (_now(), cutoff),
-        )
-        return cur.rowcount
-
-
-def adaptive_get_proposal(proposal_id: int) -> dict | None:
-    with connect_sessions() as conn:
-        row = conn.execute("SELECT * FROM adaptive_proposals WHERE id = ?", (int(proposal_id),)).fetchone()
-        return dict(row) if row else None
-
-
-def adaptive_list_proposals(status: str | None = None, limit: int = 100) -> list[dict]:
-    with connect_sessions() as conn:
-        if status:
-            rows = conn.execute(
-                "SELECT * FROM adaptive_proposals WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                (status, int(limit)),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM adaptive_proposals ORDER BY created_at DESC LIMIT ?",
-                (int(limit),),
-            ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def adaptive_resolve_proposal(proposal_id: int, status: str) -> None:
-    with connect_sessions() as conn:
-        conn.execute(
-            "UPDATE adaptive_proposals SET status = ?, resolved_at = ? WHERE id = ?",
-            (status, _now(), int(proposal_id)),
-        )
-
-
-def adaptive_annotate_proposal(proposal_id: int, suffix: str) -> None:
-    """Append an audit note to a proposal's rationale (idempotent per text)."""
-    with connect_sessions() as conn:
-        conn.execute(
-            "UPDATE adaptive_proposals SET rationale = rationale || ? WHERE id = ? AND rationale NOT LIKE ?",
-            (suffix, int(proposal_id), f"%{suffix}"),
-        )
 
 
 def list_cron_runs(job_name: str | None = None, limit: int = 50) -> list[dict]:
@@ -3259,6 +3509,150 @@ def watched_worker_ids() -> set[str]:
         except (TypeError, ValueError):
             continue
     return out
+
+
+def referenced_worker_ids() -> set[str]:
+    """Every worker id a live session still holds a reference to.
+
+    The narrower `watched_worker_ids()` reads only from parents currently in
+    `awaiting_workers`, which made protection a function of what the parent
+    happened to be doing at that second: a parent that had moved on to another
+    step stopped protecting work it was still going to use. A reference is a
+    reference whatever state the referrer is in.
+    """
+    out: set[str] = set()
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT watched_worker_ids FROM sessions WHERE watched_worker_ids IS NOT NULL "
+            "AND watched_worker_ids NOT IN ('', '[]')"
+        ).fetchall()
+    for r in rows:
+        try:
+            out.update(str(x) for x in json.loads(r["watched_worker_ids"] or "[]"))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+# A worker session at rest. Anything else — paused, awaiting_user, processing,
+# cancelling, finalizing, and whatever a later migration adds — is work in
+# progress, and work in progress is not retention residue. Enumerating the
+# RESTING states rather than the busy ones is deliberate: a state added to the
+# enum later should default to protected, not to deletable.
+_WORKER_STATES_AT_REST = ("idle_ready",)
+
+
+def mark_worker_result_consumed(worker_id: str) -> None:
+    """Record that a parent has actually read this worker's result.
+
+    Consumption is what starts the transcript's retention clock. Written once —
+    the first read is the one that matters, and re-reading a report months
+    later should not push its deletion further out.
+    """
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE sessions SET result_consumed_at = ? WHERE id = ? AND result_consumed_at IS NULL",
+            (_now(), worker_id),
+        )
+
+
+def mark_worker_abandoned(worker_id: str) -> None:
+    """Record that the task this worker was doing was explicitly given up on."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE sessions SET abandoned_at = ? WHERE id = ? AND abandoned_at IS NULL",
+            (_now(), worker_id),
+        )
+
+
+def list_prunable_worker_ids(cutoff_iso: str, horizon_iso: str) -> list[str]:
+    """Worker ids whose transcript may be deleted, oldest first.
+
+    Age was the whole test before this: `session_type = 'worker' AND
+    updated_at < cutoff`, with one exemption. A 90-day-old paused worker, one
+    waiting on an answer, and a finished report nobody had collected were all
+    equally deletable.
+
+    A worker is prunable when it is past ``cutoff_iso``, nothing references it,
+    and either
+
+      * it is at rest and its result was consumed or its task abandoned — the
+        work reached a resting place and the transcript is now residue, or
+      * it is past ``horizon_iso``, the abandonment horizon, which is what
+        keeps "protect the unread" from meaning "retain everything forever".
+
+    A referenced worker is exempt from both: a live reference is a statement
+    that the work is still wanted.
+    """
+    referenced = referenced_worker_ids()
+    placeholders = ",".join("?" * len(_WORKER_STATES_AT_REST))
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"""SELECT id FROM sessions
+                 WHERE session_type = 'worker' AND updated_at < ?
+                   AND (
+                        updated_at < ?
+                        OR (COALESCE(state_v2, '') IN ({placeholders}, '')
+                            AND (result_consumed_at IS NOT NULL OR abandoned_at IS NOT NULL))
+                   )
+                 ORDER BY updated_at""",
+            (cutoff_iso, horizon_iso, *_WORKER_STATES_AT_REST),
+        ).fetchall()
+    return [r["id"] for r in rows if r["id"] not in referenced]
+
+
+def upsert_worker_manifest(manifest: dict) -> None:
+    """Write a worker's result manifest. Raises on failure — by design.
+
+    The caller deletes a transcript only once this has returned, so a storage
+    error here has to be loud. The digest it replaces was wrapped in
+    try/except, ran AFTER the delete loop, and fed on a per-row fetch that
+    swallowed its own errors: it could not have blocked a deletion even if
+    someone had wanted it to.
+    """
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO worker_result_manifests
+                 (worker_id, parent_session_id, title, worker_kind, created_at,
+                  last_active_at, termination_reason, result, result_source, archived_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(worker_id) DO UPDATE SET
+                 parent_session_id = excluded.parent_session_id,
+                 title = excluded.title,
+                 worker_kind = excluded.worker_kind,
+                 created_at = excluded.created_at,
+                 last_active_at = excluded.last_active_at,
+                 termination_reason = excluded.termination_reason,
+                 result = excluded.result,
+                 result_source = excluded.result_source,
+                 archived_at = excluded.archived_at""",
+            (
+                manifest["worker_id"],
+                manifest.get("parent_session_id"),
+                manifest.get("title") or "",
+                manifest.get("worker_kind"),
+                manifest.get("created_at"),
+                manifest.get("last_active_at"),
+                manifest.get("termination_reason"),
+                manifest.get("result") or "",
+                manifest.get("result_source") or "",
+                manifest.get("archived_at") or _now(),
+            ),
+        )
+
+
+def get_worker_manifest(worker_id: str) -> dict | None:
+    """The archived result of a worker whose transcript retention removed."""
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM worker_result_manifests WHERE worker_id = ?", (worker_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def delete_worker_manifests_before(cutoff_iso: str) -> int:
+    """Expire result manifests archived before the cutoff. Returns the count."""
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM worker_result_manifests WHERE archived_at < ?", (cutoff_iso,))
+        return cur.rowcount
 
 
 def delete_old_dream_hypotheses(cutoff_iso: str, statuses: tuple[str, ...]) -> int:
@@ -3437,6 +3831,32 @@ def mark_session_reviewed(session_id: str) -> None:
         )
 
 
+def get_distill_watermark(session_id: str) -> int:
+    """Newest message id distillation has both extracted AND stored (v38).
+
+    0 for a session that has never been distilled, and for a session id with
+    no row — a distiller handed a synthetic transcript still has to run.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT distilled_up_to FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    return int(row["distilled_up_to"] or 0) if row else 0
+
+
+def set_distill_watermark(session_id: str, msg_id: int) -> None:
+    """Advance the distillation watermark. Never rewinds.
+
+    Called only after a chunk's entries have been through the memory store,
+    so a failed extraction or a failed write leaves the material uncovered
+    and the next run picks it up again. Deliberately does not touch
+    updated_at: distilling a session is not activity in it.
+    """
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE sessions SET distilled_up_to = ? WHERE id = ? AND distilled_up_to < ?",
+            (int(msg_id), session_id, int(msg_id)),
+        )
+
+
 def get_unrefined_sessions(min_idle_minutes: int = 10, limit: int = 1) -> list[dict]:
     """Sessions eligible for the snooze tail-end refine pass.
 
@@ -3533,11 +3953,17 @@ def add_post_mortem(
     scout_viability: str | None,
     execution_mode: str | None,
     payload_json: str,
+    outcome_source: str = "llm",
 ) -> str:
     """Insert a post-mortem row and return its id.
 
     payload_json carries the full ReflectResult + scout-report summary so
     snooze can re-derive anything the indexed columns don't expose.
+
+    outcome_source is an indexed column as well as a payload key: the whole
+    point of it is to be countable ("what share of our outcomes is anything
+    better than the grader's own opinion?"), and that question should not
+    require parsing every payload in the table.
     """
     pm_id = _new_id()
     with connect_sessions() as conn:
@@ -3545,8 +3971,8 @@ def add_post_mortem(
             """INSERT INTO post_mortems (
                 id, session_id, created_at, attempt, verdict, failure_cause,
                 confidence, reflect_model, reflect_latency_ms,
-                scout_viability, execution_mode, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                scout_viability, execution_mode, payload_json, outcome_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pm_id,
                 session_id,
@@ -3560,6 +3986,7 @@ def add_post_mortem(
                 scout_viability,
                 execution_mode,
                 payload_json,
+                outcome_source or "llm",
             ),
         )
     return pm_id
@@ -3598,6 +4025,315 @@ def get_post_mortem(pm_id: str) -> dict | None:
             (pm_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Ground truth (2026-09-04): the user's own verdict on a turn
+# ---------------------------------------------------------------------------
+
+
+def _mid(message_id) -> str:
+    """Canonical string form of a message id.
+
+    message_feedback.message_id is TEXT (the API addresses messages by path
+    segment) while messages.id is an INTEGER, so "7" and 7 must not become two
+    different rows.
+    """
+    try:
+        return str(int(message_id))
+    except (TypeError, ValueError):
+        return str(message_id)
+
+
+def upsert_message_feedback(session_id: str, message_id, signal: str, note: str = "") -> dict:
+    """Record (or replace) the user's reaction to one assistant message."""
+    now = _now()
+    mid = _mid(message_id)
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO message_feedback (session_id, message_id, signal, note, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(message_id) DO UPDATE SET
+                   session_id = excluded.session_id,
+                   signal = excluded.signal,
+                   note = excluded.note,
+                   created_at = excluded.created_at""",
+            (session_id, mid, signal, note or "", now),
+        )
+    return {"message_id": mid, "signal": signal, "note": note or "", "created_at": now}
+
+
+def delete_message_feedback(session_id: str, message_id) -> bool:
+    """Remove a reaction. True when a row was actually there."""
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "DELETE FROM message_feedback WHERE session_id = ? AND message_id = ?",
+            (session_id, _mid(message_id)),
+        )
+    return cur.rowcount > 0
+
+
+def get_message_feedback(session_id: str, message_id) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT * FROM message_feedback WHERE session_id = ? AND message_id = ?",
+            (session_id, _mid(message_id)),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_message_feedback(session_id: str) -> list[dict]:
+    """Every reaction in the session, oldest first — one page for the client."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT message_id, signal, note, created_at FROM message_feedback
+               WHERE session_id = ? ORDER BY id""",
+            (session_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def turn_user_msg_id_for_message(session_id: str, message_id) -> int | None:
+    """The id of the user message that opened the turn this message belongs to.
+
+    Assistant and tool rows carry `metadata.parent_user_msg_id`, stamped by
+    run_agent's _save_turn_msg; a user row is its own turn anchor.
+    """
+    row = get_message(int(message_id)) if str(message_id).lstrip("-").isdigit() else None
+    if not row or row.get("session_id") != session_id:
+        return None
+    if row.get("role") == "user":
+        return int(row["id"])
+    try:
+        meta = json.loads(row.get("metadata") or "{}")
+        parent = meta.get("parent_user_msg_id")
+        return int(parent) if parent is not None else None
+    except (ValueError, TypeError):
+        return None
+
+
+def latest_post_mortem_for_turn(session_id: str, turn_user_msg_id: int) -> dict | None:
+    """The post-mortem for one turn — its last attempt, if it was graded.
+
+    New rows carry the turn anchor in their payload. Rows written before
+    2026-09-04 don't, so they fall back to the window between this turn's user
+    message and the next one; that is exact for synchronous grades and for
+    deferred grades of turns nobody replied to, which is every pre-existing
+    row worth matching.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT * FROM post_mortems
+               WHERE session_id = ? AND json_extract(payload_json, '$.turn_user_msg_id') = ?
+               ORDER BY attempt DESC, created_at DESC LIMIT 1""",
+            (session_id, int(turn_user_msg_id)),
+        ).fetchone()
+        if row:
+            return dict(row)
+        anchor = conn.execute(
+            "SELECT created_at FROM messages WHERE id = ? AND session_id = ?",
+            (int(turn_user_msg_id), session_id),
+        ).fetchone()
+        if not anchor:
+            return None
+        nxt = conn.execute(
+            """SELECT created_at FROM messages
+               WHERE session_id = ? AND role = 'user' AND id > ?
+               ORDER BY id LIMIT 1""",
+            (session_id, int(turn_user_msg_id)),
+        ).fetchone()
+        if nxt:
+            row = conn.execute(
+                """SELECT * FROM post_mortems
+                   WHERE session_id = ? AND created_at >= ? AND created_at < ?
+                     AND json_extract(payload_json, '$.turn_user_msg_id') IS NULL
+                   ORDER BY attempt DESC, created_at DESC LIMIT 1""",
+                (session_id, anchor["created_at"], nxt["created_at"]),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT * FROM post_mortems
+                   WHERE session_id = ? AND created_at >= ?
+                     AND json_extract(payload_json, '$.turn_user_msg_id') IS NULL
+                   ORDER BY attempt DESC, created_at DESC LIMIT 1""",
+                (session_id, anchor["created_at"]),
+            ).fetchone()
+    return dict(row) if row else None
+
+
+def feedback_for_turn(session_id: str, turn_user_msg_id) -> dict | None:
+    """The latest thumb on any assistant message of one turn, or None.
+
+    A thumb usually lands before the grade does — the grade waits for the
+    user's next message or a five-minute idle — so the grade has to look
+    for feedback that is already there, not the other way round.
+    """
+    if turn_user_msg_id is None:
+        return None
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT f.message_id, f.signal, f.note, f.created_at
+               FROM message_feedback f
+               JOIN messages m ON m.id = CAST(f.message_id AS INTEGER)
+               WHERE f.session_id = ? AND m.session_id = ?
+                 AND CAST(json_extract(m.metadata, '$.parent_user_msg_id') AS INTEGER) = ?
+               ORDER BY f.created_at DESC LIMIT 1""",
+            (session_id, session_id, int(turn_user_msg_id)),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def stamp_post_mortem_user_signal(pm_id, signal: str) -> None:
+    """Carry a thumb that arrived before the grade onto the grade itself."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE post_mortems SET user_signal = ?, outcome_source = 'user' WHERE id = ?",
+            (signal, pm_id),
+        )
+
+
+def set_post_mortem_user_signal(session_id: str, message_id, signal: str | None) -> dict | None:
+    """Stamp a thumb onto the post-mortem of the turn `message_id` belongs to.
+
+    Returns the post-mortem row as it stood BEFORE the write (the caller needs
+    its payload to know which entries the turn cited, and what it had already
+    applied), or None when the turn was never graded — a thumb on an ungraded
+    turn is still recorded as feedback, it just has no verdict to contradict.
+
+    Clearing the signal restores the outcome_source the grade itself produced,
+    so removing a thumb is a real undo rather than a permanent 'user' stamp.
+    """
+    turn_id = turn_user_msg_id_for_message(session_id, message_id)
+    if turn_id is None:
+        return None
+    pm = latest_post_mortem_for_turn(session_id, turn_id)
+    if not pm:
+        return None
+    if signal:
+        source = "user"
+    else:
+        try:
+            source = (json.loads(pm.get("payload_json") or "{}") or {}).get("outcome_source") or "llm"
+        except (ValueError, TypeError):
+            source = "llm"
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE post_mortems SET user_signal = ?, outcome_source = ? WHERE id = ?",
+            (signal, source, pm["id"]),
+        )
+    return pm
+
+
+def update_post_mortem_payload(pm_id: str, payload: dict) -> None:
+    """Replace a post-mortem's payload. Used to record what a thumb applied."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE post_mortems SET payload_json = ? WHERE id = ?",
+            (json.dumps(payload, ensure_ascii=False), pm_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Trust surface counters (/api/trust)
+#
+# Every one of these answers with zeros rather than raising: the endpoint is a
+# dashboard, and a table another workstream has not created yet must read as
+# "nothing recorded", never as a 500.
+# ---------------------------------------------------------------------------
+
+
+def post_mortem_outcome_counts(since_iso: str) -> dict:
+    """Graded turns in the window, split by what their outcome rests on."""
+    counts = {"llm": 0, "next_turn": 0, "user": 0}
+    total = 0
+    try:
+        with connect_sessions() as conn:
+            rows = conn.execute(
+                """SELECT COALESCE(outcome_source, 'llm') AS src, COUNT(*) AS n
+                   FROM post_mortems WHERE created_at >= ? GROUP BY src""",
+                (since_iso,),
+            ).fetchall()
+    except sqlite3.Error as e:
+        logger.debug("outcome-source counts unavailable: %s", e)
+        return {"by_source": counts, "graded": 0}
+    for r in rows:
+        total += int(r["n"])
+        if r["src"] in counts:
+            counts[r["src"]] = int(r["n"])
+    return {"by_source": counts, "graded": total}
+
+
+def count_user_turns_since(since_iso: str) -> int:
+    """User messages in the window — the denominator "how many turns were there".
+
+    Harness-authored user rows (the worker-resume injection) are excluded: they
+    are the system talking to itself, and counting them would understate the
+    share of real turns that got graded.
+    """
+    try:
+        with connect_sessions() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS n FROM messages
+                   WHERE role = 'user' AND created_at >= ?
+                     AND COALESCE(content, '') NOT LIKE '[Watched workers have completed%'""",
+                (since_iso,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+    except sqlite3.Error as e:
+        logger.debug("user-turn count unavailable: %s", e)
+        return 0
+
+
+def post_mortems_with_user_signal(since_iso: str | None = None, limit: int = 1000) -> list[dict]:
+    """Graded turns the user reacted to — the grader's own report card."""
+    try:
+        with connect_sessions() as conn:
+            if since_iso:
+                rows = conn.execute(
+                    """SELECT verdict, user_signal FROM post_mortems
+                       WHERE user_signal IS NOT NULL AND created_at >= ?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (since_iso, int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT verdict, user_signal FROM post_mortems
+                       WHERE user_signal IS NOT NULL
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (int(limit),),
+                ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.Error as e:
+        logger.debug("user-signal post-mortems unavailable: %s", e)
+        return []
+
+
+def canary_outcome_counts(since_iso: str) -> dict:
+    """Canary runs in the window: how many ran, failed, and were contaminated.
+
+    `contaminated` is written by the post-run contamination scan; until that
+    ships the count is honestly zero rather than absent.
+    """
+    zero = {"runs": 0, "fails": 0, "contaminated": 0}
+    try:
+        with connect_sessions() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS runs,
+                          SUM(CASE WHEN COALESCE(passed, 0) = 0 THEN 1 ELSE 0 END) AS fails,
+                          SUM(CASE WHEN outcome = 'contaminated' THEN 1 ELSE 0 END) AS contaminated
+                   FROM canary_runs WHERE created_at >= ?""",
+                (since_iso,),
+            ).fetchone()
+    except sqlite3.Error as e:
+        logger.debug("canary outcome counts unavailable: %s", e)
+        return zero
+    if not row:
+        return zero
+    return {
+        "runs": int(row["runs"] or 0),
+        "fails": int(row["fails"] or 0),
+        "contaminated": int(row["contaminated"] or 0),
+    }
 
 
 def list_unsynthesized_post_mortems(limit: int = 500) -> list[dict]:
@@ -3688,6 +4424,34 @@ def mark_post_mortems_synthesized(pm_ids: list[str]) -> int:
 # "execution_mode" rows may exist from prior runs — ignored going forward.
 
 
+def recent_tool_outcomes(tool: str, days: int = 14) -> dict:
+    """{calls, failures} for one tool over the last `days` of tool results.
+
+    Reads the per-result metadata the agent stamps on tool rows (tool name,
+    was_error, miss, unavailable, command_failed). Misses and by-design
+    unavailability are not calls the tool could have got right, so they leave
+    both counts. A shell command that ran and exited non-zero is a call the
+    tool got right — it counts, but never as a failure of the tool.
+    Rows written before the tool name was stamped are invisible, which is
+    the point: this is the recent window, not the ledger.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS calls,
+                      COALESCE(SUM(CASE WHEN json_extract(metadata, '$.was_error') IN (1, 'true', 'True')
+                                          AND COALESCE(json_extract(metadata, '$.command_failed'), 0) NOT IN (1, 'true', 'True')
+                                         THEN 1 ELSE 0 END), 0) AS failures
+               FROM messages
+               WHERE role = 'tool'
+                 AND created_at > datetime('now', ?)
+                 AND json_extract(metadata, '$.tool') = ?
+                 AND COALESCE(json_extract(metadata, '$.miss'), 0) NOT IN (1, 'true', 'True')
+                 AND COALESCE(json_extract(metadata, '$.unavailable'), 0) NOT IN (1, 'true', 'True')""",
+            (f"-{int(days)} days", tool),
+        ).fetchone()
+    return {"calls": int(row["calls"] or 0), "failures": int(row["failures"] or 0)}
+
+
 def upsert_signal(
     signal_type: str,
     subject: str,
@@ -3700,10 +4464,8 @@ def upsert_signal(
 
     Call once per observation (e.g. once per post-mortem that touches this
     subject). Pass delta_reinforcements=0 when adding outcome deltas to a
-    subject whose usage was already counted elsewhere — adaptive_entry
-    usage counts at scout submit-time, outcomes at synthesis time, and
-    double-counting the observation would inflate the denominator every
-    retirement decision divides by. Does not touch user_approved.
+    subject whose usage was already counted elsewhere — double-counting the
+    observation would inflate the denominator every ratio divides by. Does not touch user_approved.
     """
     now = _now()
     with connect_sessions() as conn:
@@ -4090,101 +4852,90 @@ def get_pending_proposal_counts_by_skill() -> dict[str, int]:
         return {r["skill_name"]: int(r["n"]) for r in rows}
 
 
-def get_pending_proposals_for_skill(
-    skill_name: str,
-    min_confidence: float = 0.6,
-    limit: int = 3,
-) -> list[dict]:
-    """Pending proposals for a skill, sorted by confidence desc then recency.
-
-    Used by the stuck-mode peek in sessions/hooks.py — returns proposals the
-    agent can try as trial hints. Caller MUST treat these as unapproved and
-    call record_proposal_trial_use(...) for each one injected.
-    """
-    with connect_sessions() as conn:
-        rows = conn.execute(
-            """SELECT * FROM skill_improvement_proposals
-               WHERE skill_name = ?
-                 AND status = 'pending'
-                 AND confidence >= ?
-               ORDER BY confidence DESC, created_at DESC
-               LIMIT ?""",
-            (skill_name, float(min_confidence), limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def record_proposal_trial_use(proposal_id: str) -> None:
-    """Increment trial_uses counter and bump last_trial_at."""
-    with connect_sessions() as conn:
-        conn.execute(
-            """UPDATE skill_improvement_proposals
-               SET trial_uses = trial_uses + 1, last_trial_at = ?
-               WHERE id = ?""",
-            (_now(), proposal_id),
-        )
-
-
-def record_proposal_trial_success(proposal_id: str) -> None:
-    """Increment trial_successes counter."""
-    with connect_sessions() as conn:
-        conn.execute(
-            """UPDATE skill_improvement_proposals
-               SET trial_successes = trial_successes + 1
-               WHERE id = ?""",
-            (proposal_id,),
-        )
-
-
 def get_skill_proposal(proposal_id: str) -> dict | None:
     with connect_sessions() as conn:
         row = conn.execute("SELECT * FROM skill_improvement_proposals WHERE id = ?", (proposal_id,)).fetchone()
         return dict(row) if row else None
 
 
-def resolve_skill_proposal(proposal_id: str, status: str) -> bool:
-    """Mark a proposal as approved, rejected, applied, auto_applied, or
-    archived. Returns True if row existed.
+def resolve_skill_proposal(proposal_id: str, status: str, *, expected: tuple[str, ...] | None = None) -> bool:
+    """Transition a proposal without overwriting a concurrent decision.
 
-    'applied' = a human clicked Apply; 'auto_applied' = the veto-window
-    sweep applied it (core/skills/proposals.py:auto_apply_ripe_proposals).
-    Distinct statuses so the daily auto-apply cap can count its own work.
+    Human decisions and archival only act on pending/approved suggestions.
+    Application completion and rollback supply their exact predecessor state.
     """
-    if status not in ("approved", "rejected", "applied", "auto_applied", "archived"):
+    if status not in ("pending", "approved", "rejected", "applied", "auto_applied", "archived", "rolled_back"):
         raise ValueError(f"Invalid proposal status: {status!r}")
+    expected = expected or (("pending",) if status == "archived" else ("pending", "approved"))
+    placeholders = ",".join("?" for _ in expected)
     with connect_sessions() as conn:
         cur = conn.execute(
-            "UPDATE skill_improvement_proposals SET status = ?, resolved_at = ? WHERE id = ?",
-            (status, _now(), proposal_id),
+            f"UPDATE skill_improvement_proposals SET status = ?, resolved_at = ? WHERE id = ? AND status IN ({placeholders})",
+            (status, _now(), proposal_id, *expected),
         )
         return cur.rowcount > 0
 
 
-def count_auto_applied_skill_proposals_since(cutoff_iso: str) -> int:
-    """How many proposals the veto-window sweep applied since `cutoff_iso`.
-
-    Backs the ``skill_proposal_max_auto_applies_per_day`` budget — same
-    counting pattern as adaptive_count_auto_approved_since.
-    """
-    with connect_sessions() as conn:
-        row = conn.execute(
-            """SELECT COUNT(*) FROM skill_improvement_proposals
-               WHERE status = 'auto_applied' AND resolved_at >= ?""",
-            (cutoff_iso,),
-        ).fetchone()
-        return int(row[0]) if row else 0
-
-
-def archive_proposals_for_run(run_id: str) -> int:
-    """Archive all pending proposals associated with a deleted run."""
+def claim_skill_proposal(
+    proposal_id: str, expected: str, backup_name: str, before_revision: str, after_revision: str
+) -> bool:
+    """Durable intent before file replacement; an interrupted apply can be rolled back."""
     with connect_sessions() as conn:
         cur = conn.execute(
-            """UPDATE skill_improvement_proposals
-               SET status = 'archived', resolved_at = ?
-               WHERE run_id = ? AND status = 'pending'""",
-            (_now(), run_id),
+            "UPDATE skill_improvement_proposals SET status='applying', backup_name=?, before_revision=?, after_revision=? "
+            "WHERE id=? AND status=?",
+            (backup_name, before_revision, after_revision, proposal_id, expected),
         )
-        return cur.rowcount
+        return cur.rowcount == 1
+
+
+def iter_pending_skill_proposals(before: str | None = None):
+    """Page oldest-first by immutable keys, so mutations cannot skip older suggestions."""
+    cursor = None
+    while True:
+        clauses = ["status='pending'"]
+        params = []
+        if before is not None:
+            clauses.append("created_at < ?")
+            params.append(before)
+        if cursor is not None:
+            clauses.append("(created_at, id) > (?, ?)")
+            params.extend(cursor)
+        with connect_sessions() as conn:
+            rows = conn.execute(
+                "SELECT * FROM skill_improvement_proposals WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY created_at, id LIMIT 200",
+                params,
+            ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            yield dict(row)
+        cursor = (rows[-1]["created_at"], rows[-1]["id"])
+
+
+def count_pending_skill_proposals() -> int:
+    with connect_sessions() as conn:
+        return conn.execute("SELECT COUNT(*) FROM skill_improvement_proposals WHERE status='pending'").fetchone()[0]
+
+
+def count_auto_applied_skill_proposals_since(cutoff_iso: str, skill_name: str | None = None) -> int:
+    """How many proposals the auto-apply sweep applied since `cutoff_iso`,
+    optionally for one skill.
+
+    Backs the ``skill_proposal_max_auto_applies_per_day`` budget and the
+    per-skill monthly cap.
+    """
+    sql = """SELECT COUNT(*) FROM skill_improvement_proposals
+             WHERE status = 'auto_applied' AND resolved_at >= ?"""
+    args: list = [cutoff_iso]
+    if skill_name is not None:
+        sql += " AND skill_name = ?"
+        args.append(skill_name)
+    with connect_sessions() as conn:
+        row = conn.execute(sql, args).fetchone()
+        return int(row[0]) if row else 0
 
 
 def get_db_stats() -> dict:
@@ -4193,7 +4944,6 @@ def get_db_stats() -> dict:
         for table in [
             "sessions",
             "messages",
-            "artifacts",
             "token_usage",
             "questions",
             "notifications",
@@ -4413,14 +5163,16 @@ def create_job(
         )
 
 
-def update_job(job_id: str, **kwargs) -> None:
+def update_job(job_id: str, *, expected_state: str | None = None, **kwargs) -> None:
     allowed = {"state", "exit_code", "finished_at", "pid"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return
     sets = ", ".join(f"{k} = ?" for k in updates)
     with connect_sessions() as conn:
-        conn.execute(f"UPDATE jobs SET {sets} WHERE id = ?", (*updates.values(), job_id))
+        where = "id = ?" + (" AND state = ?" if expected_state else "")
+        params = (*updates.values(), job_id, *((expected_state,) if expected_state else ()))
+        conn.execute(f"UPDATE jobs SET {sets} WHERE {where}", params)
 
 
 def get_job(job_id: str) -> dict | None:
@@ -4439,3 +5191,13 @@ def list_jobs(session_id: str | None = None, limit: int = 20) -> list[dict]:
         else:
             rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+
+def list_running_jobs(limit: int = 100, after_id: str = "") -> list[dict]:
+    with connect_sessions() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM jobs WHERE state='running' AND id > ? ORDER BY id LIMIT ?", (after_id, limit)
+            ).fetchall()
+        ]

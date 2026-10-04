@@ -17,7 +17,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from config import settings
-from core.context.compaction import compact_with_llm
+from core.context.compaction import NOTHING_TO_SUMMARIZE, CompactionOutcome, compact_with_llm
 from core.context.compiler import attach_cache_breakpoints, compile_context, normalize_for_openrouter
 from core.context.tokens import get_estimator
 from core.llm.budget import derive_max_output, derive_model_budget, ensure_model_known
@@ -26,10 +26,11 @@ from core.llm.providers.salvage import salvage_tool_calls
 from core.llm.router import OPENAI_FORMAT_PROVIDERS
 from core.llm.semaphore import PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
 from core.llm.stream_ladder import stream_with_failover
-from core.tools.executor import execute_tool_round
+from core.llm.types import REJECTED_CALL_KEY, is_rejected_call
+from core.tools.executor import execute_tool_round, is_command_failure
 from core.tools.registry import get_registry
 from db import models as db
-from sessions.state import AgentSession
+from sessions.state import AgentSession, turn_state
 
 logger = logging.getLogger("pernix.agent")
 
@@ -40,7 +41,11 @@ logger = logging.getLogger("pernix.agent")
 
 _FILE_TOOLS = {"file_edit", "file_write", "file_read", "file_append"}
 # Tools whose success changes what an identical follow-up call would do.
-_MUTATING_TOOLS = frozenset({"file_write", "file_edit", "multiedit", "repl"})
+# bash is in here because it edits too: `sed -i`, `>` redirection and any
+# script it runs mutate the workspace invisibly to the file tools (field
+# case, session 3dc5a307d751 — a sed-based edit between two identical runs
+# read as a tool cycle and drew a false "repeating tool calls" nudge).
+_MUTATING_TOOLS = frozenset({"file_write", "file_edit", "multiedit", "repl", "bash"})
 
 # Empirically-verified tool-name hallucinations with compatible argument schemas.
 # Rewrite silently (logged) instead of burning a round on the difflib hint path.
@@ -74,7 +79,7 @@ def _prior_turn_tool_names(session_id: str, lookback: int = 40) -> set[str]:
         except (json.JSONDecodeError, TypeError):
             continue
         for tc in (tcs if isinstance(tcs, list) else []):
-            if not isinstance(tc, dict):
+            if not isinstance(tc, dict) or is_rejected_call(tc):
                 continue
             name = tc.get("name") or tc.get("function", {}).get("name", "")
             if name:
@@ -151,10 +156,26 @@ class StuckDetector:
     # another candidate fit (>=2 marker matches per result body).
     falsified_fit_streak: int = 0
     pending_hints: list = field(default_factory=list)  # one-time system hints
+    # How many times this turn the stuck handler let a change of approach run
+    # instead of discarding it (see _is_recovery_move). Bounded per turn.
+    recovery_passes: int = 0
 
     def evaluate(self, content: str, tool_calls: list[dict] | None, tool_failures: dict, registry) -> tuple[float, int]:
         """Evaluate stuck signals. Returns (score 0-1, repeat_count)."""
         score = 0.0
+
+        # What THIS response actually touches. Signals 7 and 11 read counters
+        # that stay sticky for the rest of the turn; charging them to a
+        # response that calls neither the failing tool nor the failing file
+        # made every later move score >= 0.4 — a distinct ask_user, a switch
+        # to another tool, a worker's file_write deliverable — so a compliant
+        # recovery round arrived at the handler already over the threshold.
+        # The counters stay sticky (real repetition still accumulates across
+        # interleaved work); only the scoring is scoped to the current move.
+        # A round with no tool calls has nothing to compare against and keeps
+        # the whole-turn reading; it leaves the loop as a completion anyway.
+        called_tools = {tc.get("name", "") for tc in (tool_calls or [])}
+        called_file_targets = {t for t in map(_call_file_target, tool_calls or []) if t}
 
         # Signal 1: Exact content repeat
         if content and content in self.content_history:
@@ -205,7 +226,7 @@ class StuckDetector:
         # Catches loops where each attempt uses a different old_string/args
         # (bypassing Signal 3's exact-args check) but targets the same file.
         for key, count in self.file_failure_counts.items():
-            if count >= 3:
+            if count >= 3 and (not tool_calls or key in called_file_targets):
                 score += 0.4
                 self.behavioral_flags.add("file_edit_loop")
                 break
@@ -225,6 +246,13 @@ class StuckDetector:
                 try:
                     args = _json.loads(tc.get("arguments") or "{}")
                 except (ValueError, TypeError):
+                    continue
+                # JSON roots may be scalars, lists or null. This signal runs
+                # BEFORE admission, so it is the first code to touch whatever
+                # the model sent — and `.get()` on `null`/`42`/`[]` killed the
+                # turn with a raw AttributeError. Leave the bad call to the
+                # gate, which knows how to refuse it.
+                if not isinstance(args, dict):
                     continue
                 if name == "bash":
                     # Agents read big files through bash (cat/sed/grep/head),
@@ -285,7 +313,7 @@ class StuckDetector:
         # args hash (evading Signal 3), the tool is real (evading Signal 5), and
         # a fresh failure each round keeps resetting Signal 6's drift counter.
         for tool_name, count in self.tool_failure_counts.items():
-            if tool_name not in _FILE_TOOLS and count >= 3:
+            if tool_name not in _FILE_TOOLS and count >= 3 and (not tool_calls or tool_name in called_tools):
                 score += 0.4
                 self.behavioral_flags.add("tool_failure_loop")
                 break
@@ -403,13 +431,29 @@ class StuckDetector:
                 self.file_failure_counts.pop(key, None)
 
 
-def _goal_budget_exceeded(session_id: str, goal_id: int) -> str | None:
+# The goal states a budget check still governs. A completed or errored goal
+# is settled, so its budgets no longer stop anything; the same three states
+# db.get_active_goal() treats as live.
+_LIVE_GOAL_STATUSES = ("active", "paused", "budget_limited")
+
+
+def _goal_budget_exceeded(goal_id: int) -> str | None:
     """Synchronous mid-turn budget check (runs in a thread). Returns a short
-    reason string when the active goal's token or time budget is spent."""
+    reason string when the goal's token or time budget is spent.
+
+    Resolved by goal id, not by owning session. A worker inherits its parent's
+    active_goal_id at spawn and stamps it on every token_usage row it writes,
+    so goal_token_usage() already counts the worker's spend — but the check
+    used to look the goal up by the RUNNING session, and a worker owns no
+    goal. Every worker in a fan-out therefore read "no goal, nothing to
+    enforce" and kept spending against a budget the parent would have been
+    stopped by. Enforcement now resolves the same goal identity the spend is
+    attributed to.
+    """
     from datetime import datetime, timezone
 
-    goal = db.get_active_goal(session_id)
-    if not goal or int(goal.get("id", 0)) != int(goal_id):
+    goal = db.get_goal(goal_id)
+    if not goal or goal.get("status") not in _LIVE_GOAL_STATUSES:
         return None
     if goal.get("token_budget"):
         used = db.goal_token_usage(goal["id"])
@@ -428,6 +472,27 @@ def _hash_args(args) -> str:
     return hashlib.sha256(str(args).encode()).hexdigest()[:12]
 
 
+def _call_file_target(tc: dict) -> tuple[str, str] | None:
+    """The (tool, path) key a file-tool call targets, or None.
+
+    Same shape as the key `StuckDetector.mark_failure` files under, so a
+    response can be compared against the per-file failure counters.
+    """
+    name = tc.get("name", "")
+    if name not in _FILE_TOOLS:
+        return None
+    args = tc.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args or "{}")
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(args, dict):
+        return None
+    path = args.get("path") or args.get("file_path") or args.get("file", "")
+    return (name, str(path)) if path else None
+
+
 def _summarize_args(args: dict, max_value_len: int = 200) -> dict:
     """Summarize tool arguments for event emission, truncating long values."""
     summary = {}
@@ -437,15 +502,48 @@ def _summarize_args(args: dict, max_value_len: int = 200) -> dict:
     return summary
 
 
+# A refused call's raw argument text is echoed back to the model verbatim up to
+# this many characters — long enough to recognise the mistake, short enough that
+# a megabyte of malformed JSON can't ride into every later request.
+_REJECTED_ARGS_CAP = 1000
+
+
+def _rejected_call_args(raw) -> str:
+    """A refused call's arguments as a JSON *object* string.
+
+    The refused call is persisted on the assistant row so its rejection has a
+    parent (see `_ToolCallGate`), and every provider adapter expects an object
+    there — Ollama json.loads() it and OpenAI-format backends render it into
+    the chat template. `42`, `[]` and `{not json` all have to become one, so
+    anything that isn't already an object travels as `_raw_arguments`.
+    """
+    if isinstance(raw, dict):
+        return json.dumps(raw)
+    if isinstance(raw, str):
+        if not raw.strip():
+            return "{}"
+        try:
+            if isinstance(json.loads(raw), dict):
+                return raw
+        except (json.JSONDecodeError, ValueError):
+            pass
+        text = raw
+    else:
+        text = "" if raw is None else str(raw)
+    return json.dumps({"_raw_arguments": text[:_REJECTED_ARGS_CAP]})
+
+
 # Tools where semantic dedup is applied (expensive/LLM-wrapping tools)
 _SEMANTIC_DEDUP_TOOLS = {"call_model"}
 
 # Tools excluded from cross-round hard dedup — cheap reads where fresh state matters.
-# bash is intentionally absent: repeated bash calls (e.g. re-running transcription) are the primary target.
-# Caveat: bash output also depends on workspace file contents, so a cached bash
-# result goes stale the moment the agent edits a file. _STATE_MUTATING_TOOLS +
-# _invalidate_bash_dedup below clear those stale entries so an "edit → re-run the
-# same command" cycle re-executes instead of short-circuiting to the pre-edit result.
+# bash is absent from this set but registers idempotent=False, which _dedup
+# honors ahead of it: command text equality never proved the environment was
+# unchanged, and the invalidators below could only ever catch the changes that
+# arrived through a file tool in an EARLIER round. They stay because they are
+# still correct for any caller that does cache a shell result, and because the
+# mutation-epoch bump they pair with is what keeps edit-then-rerun from
+# reading as a tool cycle.
 _CROSS_ROUND_DEDUP_EXCLUDED = {"file_read", "glob"}
 
 # Tools that mutate workspace files. When one of these succeeds, any cached bash
@@ -486,20 +584,40 @@ def _parse_args_dict(tc: dict) -> dict:
     return {}
 
 
+_PROMPT_WS_RE = re.compile(r"\s+")
+
+
+def _normalized_prompt(args: dict) -> str:
+    """Prompt text reduced to what actually distinguishes two questions.
+
+    Capitalisation and the run-length of whitespace do not; anything else does.
+    """
+    return _PROMPT_WS_RE.sub(" ", str(args.get("prompt") or "")).strip().casefold()
+
+
 def _is_near_duplicate_call(a: dict, b: dict, tool_name: str) -> bool:
     """Check if two tool calls are near-duplicates based on structural args.
 
-    For call_model: same model + same images/attachments = near-duplicate,
-    regardless of prompt wording differences.
+    For call_model: the same question, to the same model, about the same
+    image. A different prompt or a different image is different work.
     """
     a_args = _parse_args_dict(a)
     b_args = _parse_args_dict(b)
 
     if tool_name == "call_model":
-        # Same model and same images → near-duplicate
-        same_model = a_args.get("model", "") == b_args.get("model", "")
-        same_images = a_args.get("images", []) == b_args.get("images", [])
-        return same_model and same_images
+        # The live schema is model/prompt/system/image_path/fallback_model
+        # (core/extensions/model_mgmt). This used to compare an `images` key
+        # that the tool has never had, so every pair matched on the default
+        # empty list, and the prompt was ignored "regardless of wording" — two
+        # descriptions of two different screenshots, or two unrelated questions
+        # to one model, were one call and only the first was answered. Dedup
+        # here suppresses work the user asked for, so it has to be sure.
+        return (
+            a_args.get("model", "") == b_args.get("model", "")
+            and a_args.get("image_path", "") == b_args.get("image_path", "")
+            and a_args.get("system", "") == b_args.get("system", "")
+            and _normalized_prompt(a_args) == _normalized_prompt(b_args)
+        )
 
     # Generic fallback: compare all args except the largest string value
     # (assumed to be the "prompt" or main content)
@@ -524,9 +642,15 @@ _FUTURE_INTENT_RE = re.compile(
     r"|proceed(?:ing)? to|going to (?:start|run|write|create|implement|check|fix|update))\b",
     re.IGNORECASE,
 )
-# A reply that ends by offering help is a finished answer, not abandoned work.
+# A reply that ends by offering help — or by asking permission — is a finished
+# answer, not abandoned work. The consent phrasings ("say the word", "want me
+# to", "your call") come from session 3dc5a307d751: the agent offered the next
+# move and waited, and the forced follow-up answered for the user.
 _COURTESY_CLOSER_RE = re.compile(
-    r"let me know|feel free|if you (?:need|want|have|would like)|happy to help" r"|any (?:other )?questions",
+    r"let me know|feel free|if you (?:need|want|have|would like)|happy to help"
+    r"|any (?:other )?questions|say the word|just say|want me to|shall i|should i"
+    r"|your call|give me the (?:go|word|green light)|if you(?:'d| would) (?:like|prefer)"
+    r"|tell me (?:if|when|and)",
     re.IGNORECASE,
 )
 
@@ -540,7 +664,15 @@ def _announces_future_work(text: str) -> bool:
     deliberately.
     """
     stripped = (text or "").strip()
-    if not stripped or stripped.endswith("?"):
+    if not stripped:
+        return False
+    # A question in the closing stretch means the agent handed the turn back
+    # for a decision. Field case (session 3dc5a307d751): "Want me to actually
+    # go do it now — the side-condition solve? … Say the word and I'll start."
+    # ended on a statement, so the old endswith("?") test missed it and the
+    # nudge answered the consent question on the user's behalf.
+    closing = [s for s in re.split(r"(?<=[.!?\n])\s+", stripped) if s.strip()]
+    if any(s.rstrip().endswith("?") for s in closing[-3:]):
         return False
     sentences = re.split(r"(?<=[.!\n])\s+", stripped)
     tail = " ".join(sentences[-2:])[-300:]
@@ -579,8 +711,7 @@ def _record_followup_outcome(session: AgentSession, session_id: str, acted: bool
     scout_signals (signal_type="forced_followup", subject="global") —
     successes = the agent acted, failures = it re-idled anyway. A week of
     live traffic answers "is this feature earning its keep" with one query,
-    and a rising failure share is the adaptive layer's cue to narrow the
-    trigger. Runs in a thread (DB write); never blocks the turn.
+    and a rising failure share is the cue to narrow the trigger. Runs in a thread (DB write); never blocks the turn.
     """
     try:
         db.upsert_signal(
@@ -739,13 +870,20 @@ class _ToolCallGate:
     Dedup precedes validation because a duplicate of a *bad* call should be
     answered by the dedup stub, not produce two identical error messages.
 
-    Every rejection writes a tool-role message (the model's only channel back
-    — a role=system note gets stripped by normalize_for_openrouter and by
-    Ollama's one-system rule), emits the matching tool.call event so the UI
-    shows what the agent was told, records the failure for stuck detection,
-    and drops the call. Nothing reaches the executor unvalidated, and the
-    assistant message the caller persists carries only what survived, so the
-    transcript never gains an orphaned tool_call id.
+    Every rejection answers the model with a tool-role message (its only
+    channel back — a role=system note gets stripped by normalize_for_openrouter
+    and by Ollama's one-system rule), emits the matching tool.call event so the
+    UI shows what the agent was told, records the failure for stuck detection,
+    and drops the call. Nothing reaches the executor unvalidated.
+
+    Those tool-role rows are queued rather than written, because they need a
+    parent. The caller persists the assistant row with EVERY proposed call —
+    admitted and refused alike — and then calls `flush_rejections()`. Listing
+    only the survivors left each rejection an orphan, and `exclude_orphans`
+    duly deleted the model's own corrective feedback from the next request:
+    the agent re-made the same invalid call having never been told why the
+    last one failed. A refused call carries `REJECTED_CALL_KEY` so no reader
+    downstream counts it as work that ran.
     """
 
     def __init__(self, *, registry, session: AgentSession, save_turn_msg, stuck, tool_failures: dict[str, list[str]]):
@@ -759,6 +897,10 @@ class _ToolCallGate:
         # call id → correction notes (alias rewrites, coercions, dropped
         # params). Reset per admit(); read back by _record_round_results.
         self._notes: dict[str, list[str]] = {}
+        # This round's calls in the model's own order, and the refusals waiting
+        # for the assistant row to be written. Both reset per admit().
+        self._proposed: list[dict] = []
+        self._rejected: list[dict] = []
 
     async def admit(self, calls: list[dict], active_tools: list[str]) -> tuple[list[dict], dict[str, list[str]]]:
         """Return (executable calls, correction notes keyed by tool_call id).
@@ -769,12 +911,53 @@ class _ToolCallGate:
         eventual tool result so the model sees its call was corrected — a
         mid-conversation role=system note would be stripped by provider
         normalization, tool-role messages survive.
+
+        Refusals are queued, not written: the caller persists the assistant row
+        (`proposed_calls`) first, then calls `flush_rejections()`.
         """
         self._notes: dict[str, list[str]] = {}
+        self._proposed = list(calls)
+        self._rejected = []
         unique = await self._dedup(calls)
         unique = await self._semantic_dedup(unique)
         valid = await self._correct_names(unique, active_tools)
         return await self._parse_and_validate(valid), self._notes
+
+    @property
+    def proposed_calls(self) -> list[dict]:
+        """Every call this round proposed, in the model's order.
+
+        Admitted and refused alike — the assistant row persists all of them so
+        each refusal's tool-role answer has a parent and reaches the next
+        request instead of being filtered out as an orphan.
+        """
+        return list(self._proposed)
+
+    async def flush_rejections(self) -> None:
+        """Write one tool-role row per refused call. Call AFTER the assistant row.
+
+        Order is the point. These rows used to be written inside admit(), which
+        put them *ahead* of the assistant row that names their call ids, and
+        `normalize_for_openrouter` drops a tool message it has not yet seen an
+        assistant tool_call for — so even a paired rejection would have been
+        stripped on the way out.
+        """
+        for entry in self._rejected:
+            await self._save("tool", entry["message"], tool_call_id=entry["tc"]["id"])
+        self._rejected = []
+
+    def _refuse(self, tc: dict, message: str) -> None:
+        """Queue the model's answer for a call that will not execute.
+
+        Stamps the call so downstream readers can tell it never ran, gives it
+        an id if the provider sent none (an unanswerable tool_call breaks the
+        next request), and normalises its arguments to an object.
+        """
+        if not tc.get("id"):
+            tc["id"] = f"rejected_{len(self._rejected)}_{_hash_args(tc.get('arguments', ''))}"
+        tc[REJECTED_CALL_KEY] = True
+        tc["arguments"] = _rejected_call_args(tc.get("arguments", ""))
+        self._rejected.append({"tc": tc, "message": message})
 
     def _note(self, tc: dict, text: str) -> None:
         self._notes.setdefault(tc.get("id", ""), []).append(text)
@@ -784,7 +967,7 @@ class _ToolCallGate:
 
         action ∈ aliased | coerced | stripped_params | rejected. Rejections
         also emit the usual tool.call error event (via _reject); this event is
-        the gate-level signal the UI/adaptive layer can aggregate."""
+        the gate-level signal the UI can aggregate."""
         self._session.emit_event(
             {
                 "type": "tool.call.intercepted",
@@ -809,6 +992,20 @@ class _ToolCallGate:
             purged = _invalidate_bash_dedup(self._cross_round)
             if purged:
                 logger.info("Cross-round dedup: cleared %d cached bash result(s) after %s", purged, tool_name)
+        elif tool_name == "bash":
+            # bash mutates too — `sed -i`, redirection, any script it runs —
+            # and none of that reaches _STATE_MUTATING_TOOLS. Field case
+            # (session 3dc5a307d751): the agent fixed a script with sed, re-ran
+            # the identical command, and got the pre-edit failure back from the
+            # cache. A successful bash call therefore retires every OTHER
+            # cached bash result; only an exact back-to-back repeat with
+            # nothing in between still short-circuits.
+            self_key = f"bash:{_hash_args(raw_args)}"
+            stale = [k for k in self._cross_round if k.startswith("bash:") and k != self_key]
+            for key in stale:
+                del self._cross_round[key]
+            if stale:
+                logger.info("Cross-round dedup: cleared %d cached bash result(s) after bash", len(stale))
 
     # -- filters ------------------------------------------------------------
 
@@ -818,7 +1015,7 @@ class _ToolCallGate:
         for tc in calls:
             key = f"{tc['name']}:{_hash_args(tc.get('arguments', ''))}"
             if key in seen:
-                await self._save("tool", "(duplicate call — see previous result)", tool_call_id=tc.get("id", ""))
+                self._refuse(tc, "(duplicate call — see previous result)")
                 continue
             seen.add(key)
             # Non-idempotent tools (repl — a repeated `next(pages)` MUST run
@@ -828,23 +1025,21 @@ class _ToolCallGate:
             idempotent = getattr(tool_def, "idempotent", True) if tool_def else True
             if key in self._cross_round and tc["name"] not in _CROSS_ROUND_DEDUP_EXCLUDED and idempotent:
                 prior_round, prior_result = self._cross_round[key]
-                await self._save(
-                    "tool",
+                self._refuse(
+                    tc,
                     (
                         f"(already executed in round {prior_round} with identical arguments — "
                         f"prior result: {prior_result}. "
                         "Use this result and do not call again. "
                         "If you believe the state has changed, verify with file_read or glob instead.)"
                     ),
-                    tool_call_id=tc.get("id", ""),
                 )
                 continue
             kept.append(tc)
         return kept
 
     async def _semantic_dedup(self, calls: list[dict]) -> list[dict]:
-        """Drop near-identical calls to expensive tools (same model + images,
-        different prompt wording)."""
+        """Drop calls to expensive tools that ask the same thing twice."""
         if len(calls) <= 1:
             return calls
         by_name: dict[str, list[dict]] = {}
@@ -859,9 +1054,7 @@ class _ToolCallGate:
             for tc in group[1:]:
                 if any(_is_near_duplicate_call(tc, k, name) for k in kept):
                     logger.info("Semantic dedup: skipping near-duplicate %s call", name)
-                    await self._save(
-                        "tool", "(near-duplicate call — see previous result)", tool_call_id=tc.get("id", "")
-                    )
+                    self._refuse(tc, "(near-duplicate call — see previous result)")
                 else:
                     kept.append(tc)
             out.extend(kept)
@@ -933,6 +1126,27 @@ class _ToolCallGate:
             else:
                 parsed_args = raw_args if raw_args else {}
 
+            # JSON parses `null`, `42`, `true`, `"path"` and `[]` happily; a
+            # tool argument schema accepts none of them. Everything below —
+            # the required-parameter membership test, _summarize_args, the
+            # type coercion pass — assumes a dict, and outside any try, so a
+            # scalar root ended the whole turn with a TypeError instead of a
+            # repairable tool error. Refuse it the ordinary way.
+            if not isinstance(parsed_args, dict):
+                received = json.dumps(parsed_args, default=str)
+                logger.warning("Tool '%s' arguments are not a JSON object: %s", tc["name"], received[:100])
+                await self._reject(
+                    tc,
+                    transcript_msg=(
+                        f"Error: Tool '{tc['name']}' arguments must be a JSON object; "
+                        f"received: {received[:200]}. Retry with an object mapping "
+                        f"parameter names to values."
+                    ),
+                    event_msg=f"Error: Arguments must be a JSON object; received: {received[:200]}",
+                    event_args={},
+                )
+                continue
+
             tool_def = self._registry.get(tc["name"])
             if tool_def and tool_def.parameters:
                 missing = [p for p in tool_def.parameters.get("required", []) if p not in parsed_args]
@@ -985,8 +1199,13 @@ class _ToolCallGate:
         return parsed_calls
 
     async def _reject(self, tc: dict, *, transcript_msg: str, event_msg: str, event_args: dict) -> None:
-        """Refuse one call: tell the model, tell the UI, count it as a failure."""
-        await self._save("tool", transcript_msg, tool_call_id=tc.get("id", ""))
+        """Refuse one call: tell the model, tell the UI, count it as a failure.
+
+        The failure hash is taken before `_refuse` normalises the arguments, so
+        stuck detection still keys on what the model actually sent.
+        """
+        self._tool_failures.setdefault(tc["name"], []).append(_hash_args(tc.get("arguments", "")))
+        self._stuck.mark_failure()
         self._session.emit_event(
             {
                 "type": "tool.call",
@@ -999,8 +1218,7 @@ class _ToolCallGate:
                 "latency_ms": 0,
             }
         )
-        self._tool_failures.setdefault(tc["name"], []).append(_hash_args(tc.get("arguments", "")))
-        self._stuck.mark_failure()
+        self._refuse(tc, transcript_msg)
 
 
 # ---------------------------------------------------------------------------
@@ -1041,6 +1259,8 @@ class _CompactionController:
         self._tokens_before_last: int | None = None
         self._awaiting_measure = False
         self._stalled = False
+        self._refused = False
+        self._floor_announced = False
         # The live turn's root user row, set by run_agent once known, so the
         # compactor clamps to the real ask rather than guessing it.
         self.turn_user_msg_id: int | None = None
@@ -1050,12 +1270,42 @@ class _CompactionController:
         return self.attempts >= self.ATTEMPT_LIMIT
 
     @property
+    def cannot_help(self) -> bool:
+        """True once the compactor has said there is nothing it may summarize.
+
+        A first turn is the whole of this case: the boundary clamps to the
+        turn's root user row, nothing sits before it, and `compact_with_llm`
+        returns without calling a summarizer at all. That is a refusal, not a
+        failure — the compactor did not try and lose, it correctly declined —
+        and the caller must not end the turn over it. Relief for a single
+        long turn comes from the compiler's trim, which works.
+
+        Sticky for the turn because it cannot un-become true: the slice is
+        everything before the root, the transcript is append-only, and rows
+        only ever arrive after it.
+        """
+        return self._refused
+
+    def announce_floor(self) -> bool:
+        """True the first time per turn — so a turn riding the trim floor
+        logs and emits once instead of on every remaining round."""
+        if self._floor_announced:
+            return False
+        self._floor_announced = True
+        return True
+
+    @property
     def can_help_with_overflow(self) -> bool:
         """Whether a provider overflow should come back to the loop for a
-        compact-and-retry, or stay in the ladder as a fatal stream error
-        (where the fallback model's larger window is the last rescue).
+        compact-and-retry, or stay in the ladder as a fatal stream error.
         Once the compactor is spent or provably a no-op, re-sending the same
-        oversized request can only fail the same way."""
+        oversized request can only fail the same way.
+
+        Falling over is not a second rescue: the documented topology is a
+        large cloud primary in front of a local fallback, so the ladder's
+        next model usually has the *smaller* window. Trimming the request to
+        the model that will receive it — which the loop now does from the
+        moment it goes sticky — is the only thing that helps here."""
         return not (self.exhausted or self._stalled)
 
     @property
@@ -1109,17 +1359,29 @@ class _CompactionController:
         # after the fixed prefix and the output reservation. Without it the
         # compactor falls back to a fraction-of-budget heuristic and keeps a
         # different amount than the compiler will accept on the next compile.
+        outcome = CompactionOutcome()
         compacted = await compact_with_llm(
             self._session_id,
             payload.messages,
             history_budget=payload.history_budget,
             turn_user_msg_id=self.turn_user_msg_id,
+            outcome=outcome,
         )
-        self.attempts += 1
+        # A refusal is not an attempt. No summarizer ran, nothing was spent,
+        # and burning the attempt budget on it only walked a long first turn
+        # to compaction_failed three rounds sooner.
+        self._refused = not compacted and outcome.reason == NOTHING_TO_SUMMARIZE
+        if not self._refused:
+            self.attempts += 1
         self._session.touch()  # keep the reaper honest — COMPACTING can take seconds
-        if compacted or restore_state_on_failure:
+        if compacted or self._refused or restore_state_on_failure:
             try:
-                _sv2.transition(self._session, _sv2.SessionStateV2.PROCESSING, "compact-done")
+                pause_pending = not self._session.pause_event.is_set()
+                _sv2.transition(
+                    self._session,
+                    _sv2.SessionStateV2.PAUSE_REQUESTED if pause_pending else _sv2.SessionStateV2.PROCESSING,
+                    "compact-done-paused" if pause_pending else "compact-done",
+                )
             except Exception as _e:
                 logger.error("compact-done (%s) transition failed: %s", transition_reason, _e)
         return compacted
@@ -1221,8 +1483,20 @@ async def run_agent(
     # field on `session`, mutated by the model_mgmt extension).
     _baseline_model = settings.llm_model
 
-    def _resolve_effective_model() -> tuple[str, bool, bool]:
+    def _resolve_effective_model(on_fallback: bool = False) -> tuple[str, bool, bool]:
+        """The model the next request will actually reach, and its modalities.
+
+        `on_fallback` is the turn's sticky failover flag. Once the ladder has
+        fallen over, every remaining request in the turn is dispatched to
+        settings.fallback_model, so the context budget, the output cap, the
+        vision/audio capabilities and the compiler's model_name all have to
+        come from that model and not from the primary we stopped calling.
+        session.model_override is deliberately left alone: a failover is a
+        per-turn detour, not the session-level switch the override means.
+        """
         raw = session.model_override or settings.llm_model
+        if on_fallback and settings.fallback_model:
+            raw = settings.fallback_model
         resolved_id = client.router.registry.resolve_model_id(raw)
         if resolved_id != raw:
             logger.info("Session %s: resolved model '%s' -> '%s'", session_id, raw, resolved_id)
@@ -1293,6 +1567,16 @@ async def run_agent(
     # gets settings.round_cap_auto_continue fresh budgets, mirroring the
     # length-truncation continuation above.
     _round_cap_continues = 0
+    _authorized_renewals = max(0, int(getattr(settings, "round_cap_auto_continue", 0) or 0))
+    # True only for the round the harness itself took the tools away on. The
+    # model answering in prose there is obeying an instruction, not reporting
+    # that the task is finished, so that round's tool-less reply must never be
+    # filed as "complete".
+    _forced_synthesis = False
+    # The current window has executed at least one tool round. A renewal is
+    # payment for observed progress: an empty or tool-less response must not
+    # buy one.
+    _window_did_tool_calls = False
 
     # Forced follow-ups used this turn (spec Feature 9). Bounded by
     # settings.forced_followup_max_per_turn so a genuinely finished task is
@@ -1300,6 +1584,17 @@ async def run_agent(
     # (acted / re-idled) hasn't been recorded yet.
     _forced_followups = 0
     _followup_pending = False
+
+    # One extra pass for a correction that landed after the last compile. The
+    # rapid-fire combiner rewrites the running turn's user row in place and
+    # queues nothing; mid-loop that is free (the next round re-compiles), but a
+    # text-only final answer ends the turn without re-reading, and the combined
+    # row then has an assistant message after it, so the orphan sweep never
+    # flags it either. Bounded to one: the pass exists to let the model address
+    # the amendment, not to chase a user who keeps typing.
+    _final_answer_rereads = 0
+    FINAL_ANSWER_REREAD_LIMIT = 1
+    _compiled_user_row_version = turn_state(session).user_row_version
 
     # Last compiled prompt size (F13, field case 17683100ecf8): the only
     # token number the window actually constrains. One round stale by
@@ -1331,27 +1626,75 @@ async def run_agent(
         except Exception:
             logger.debug("orphaned-RLM surfacing failed", exc_info=True)
 
+    # Two numbers, not one. `tool_round` indexes the CURRENT window
+    # (0..max_tool_rounds-1) and is what decides the tools-disabled terminal
+    # round; `_rounds_spent` counts every round this turn has actually
+    # consumed, across every window, and is what the periodic in-turn checks
+    # key on. They used to be the same variable, so a renewal reset the goal
+    # budget checkpoint cadence along with the window.
     tool_round = 0
+    _rounds_spent = 0
     while tool_round < settings.max_tool_rounds:
         # --- Pre-round checks ---
-        _gate_action = await _pre_round_gate(session, session_id, tool_round)
+        _gate_action = await _pre_round_gate(session, session_id, _rounds_spent)
         if _gate_action == "return":
             return
         if _gate_action == "break":
             break
 
+        # --- Round-budget renewal, decided BEFORE the terminal round ---
+        # The next round is this window's tools-disabled synthesis round. If
+        # an authorized renewal is still available, spend it here. The branch
+        # that used to do this sat AFTER tool execution, so reaching it needed
+        # the round that just executed tools to be the round tools had been
+        # taken away on: a provider that honours tools=None answers in prose
+        # instead, the loop reads "no tool calls" as done, and a 50-round turn
+        # ended at 50 with round_cap_auto_continue untouched (measured: 6 LLM
+        # calls, 0 renewals, termination_reason="complete").
+        if tool_round >= settings.max_tool_rounds - 1 and _window_did_tool_calls:
+            _renewals_left = _authorized_renewals - _round_cap_continues
+            _refusal = None if _renewals_left > 0 else "no renewal authorized"
+            if _refusal is None:
+                _refusal = await _round_renewal_refusal(session, session_id, stuck)
+            if _refusal is None:
+                _round_cap_continues += 1
+                await _grant_round_renewal(
+                    session,
+                    session_id,
+                    granted=_round_cap_continues,
+                    authorized=_authorized_renewals,
+                    rounds_spent=_rounds_spent,
+                )
+                tool_round = 0
+                _window_did_tool_calls = False
+                continue
+            logger.info(
+                "Session %s: round window spent at round %d (%d total) — no renewal: %s",
+                session_id,
+                tool_round,
+                _rounds_spent,
+                _refusal,
+            )
+
         # Re-resolve the effective model each round so an in-turn switch_model
         # call (which writes session.model_override) actually moves the next
-        # round's LLM call to the new provider/model.
-        effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
+        # round's LLM call to the new provider/model — and so a turn that has
+        # already failed over compiles for the fallback it is now talking to.
+        effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model(_tried_fallback)
         if effective_model != _last_effective_model:
             # Same registry-miss guard as at turn start: an in-turn switch to
             # a freshly pulled model must not land on the manual fallback.
             if await ensure_model_known(effective_model):
-                effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
+                effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model(_tried_fallback)
             _model_budget = derive_model_budget(effective_model)
             _max_output = derive_max_output(effective_model)
-            await _announce_model_switch(session, session_id, _last_effective_model, effective_model, _baseline_model)
+            # A failover is not a model switch the user made: the ladder has
+            # already emitted stream.fallback, and a model_divider row reads
+            # from session.model_override, which a failover never touches.
+            if not _tried_fallback:
+                await _announce_model_switch(
+                    session, session_id, _last_effective_model, effective_model, _baseline_model
+                )
             _last_effective_model = effective_model
 
         # Build context (resource status is dynamic — includes remaining tool rounds).
@@ -1366,7 +1709,12 @@ async def run_agent(
             tool_round,
             context_budget=effective_budget,
             context_tokens=_last_context_tokens,
+            renewals_remaining=max(0, _authorized_renewals - _round_cap_continues),
         )
+        # Read before the compile, not after: a combine landing while the
+        # compiler is reading rows may or may not make it into this payload, and
+        # an extra pass is recoverable where a dropped correction is not.
+        _compiled_user_row_version = turn_state(session).user_row_version
         payload = await asyncio.to_thread(
             compile_context,
             session_id=session_id,
@@ -1387,7 +1735,7 @@ async def run_agent(
         # Context health check
         utilization = payload.token_count / max(effective_budget, 1)
         if utilization > settings.context_critical_threshold:
-            if not compaction.exhausted and not compaction.stalled:
+            if not compaction.exhausted and not compaction.stalled and not compaction.cannot_help:
                 logger.warning(
                     "Context critical (%.0f%%), attempting compaction-retry %d/%d",
                     utilization * 100,
@@ -1398,17 +1746,43 @@ async def run_agent(
                     payload, transition_reason="compact-critical", event_reason="critical_threshold"
                 ):
                     continue  # re-compile context, retry same round
-            # Compaction failed, made no progress, or attempts exhausted — break with error
-            logger.warning("Context critical (%.0f%%) after compaction, breaking", utilization * 100)
-            session.emit_event({"type": "context.reset"})
-            session.emit_event(
-                {
-                    "type": "stream.error",
-                    "error": f"Context full ({utilization:.0%}). Compaction insufficient.",
-                }
-            )
-            session.termination_reason = "compaction_failed"
-            break
+            if compaction.cannot_help:
+                # The compactor refused, it did not fail: on a single long
+                # turn there is nothing older than the root ask that it is
+                # allowed to fold. Killing the turn here killed work
+                # compaction was never going to save — and the compiler has
+                # already fitted history into its own budget and pinned an
+                # id-addressable trim notice, so this request is sendable.
+                # Utilization sits above the threshold because the output
+                # reservation is what is left, not because history overflows:
+                # on a 192k window any max_output under ~26.8k trips it, and
+                # a full first turn at 8,192 measured 0.936 with nothing
+                # wrong. Send it.
+                if compaction.announce_floor():
+                    logger.warning(
+                        "Context at %.0f%% on a turn compaction cannot help (nothing older than the "
+                        "live turn to summarize) — continuing on the compiler's trim",
+                        utilization * 100,
+                    )
+                    session.emit_event(
+                        {
+                            "type": "context.trim_floor",
+                            "utilization": round(utilization, 3),
+                            "trimmed": payload.metadata.messages_trimmed,
+                        }
+                    )
+            else:
+                # Compaction failed, made no progress, or attempts exhausted — break with error
+                logger.warning("Context critical (%.0f%%) after compaction, breaking", utilization * 100)
+                session.emit_event({"type": "context.reset"})
+                session.emit_event(
+                    {
+                        "type": "stream.error",
+                        "error": f"Context full ({utilization:.0%}). Compaction insufficient.",
+                    }
+                )
+                session.termination_reason = "compaction_failed"
+                break
 
         # Proactive compaction stays single-shot relative to the critical/
         # overflow paths: once a forced compaction has run this turn, the
@@ -1420,7 +1794,11 @@ async def run_agent(
         # re-fires every tool round for the whole turn; counting it hands any
         # further attempts to the critical path above, which enforces the
         # stalled() guard and the attempt limit.
-        if payload.needs_compaction and compaction.attempts == 0:
+        #
+        # A refusal costs no attempt, so `attempts == 0` alone would re-run
+        # the compactor — a full transcript read — on every round of a turn
+        # it has already said it cannot help with.
+        if payload.needs_compaction and compaction.attempts == 0 and not compaction.cannot_help:
             await compaction.run(payload, transition_reason="compact-proactive", restore_state_on_failure=True)
 
         # Normalize for provider
@@ -1438,8 +1816,14 @@ async def run_agent(
         # "LAST ROUND (tools disabled)" copy in resource_status (tier at
         # remaining==1) already tells the model what to do — no second
         # compile needed.
+        #
+        # Reaching here with the window spent means the renewal check above
+        # declined, so this really is forced synthesis: remember it, because
+        # the prose it produces is an instruction being obeyed, not a report
+        # that the work is done.
         stream_tools = payload.tools
-        if tool_round == settings.max_tool_rounds - 1:
+        _forced_synthesis = tool_round == settings.max_tool_rounds - 1
+        if _forced_synthesis:
             stream_tools = None
 
         # --- Stream with retry/fallback ---
@@ -1486,6 +1870,21 @@ async def run_agent(
             # saw a false ceiling. The next compile measures the attempt
             # (stalled), and once the controller cannot help the ladder
             # keeps the overflow as a fatal stream error instead.
+            #
+            # When the ladder fell over inside THIS round, `payload` was
+            # compiled for the primary and its history_budget is the wrong
+            # target: the model that just rejected the request is the
+            # fallback, usually the smaller window of the two. Re-compile
+            # first — the loop head above now resolves to the fallback and
+            # the compiler trims history to fit it — and spend a compaction
+            # attempt only if that still overflows.
+            if _resolve_effective_model(_tried_fallback)[0] != effective_model:
+                logger.warning(
+                    "API context overflow in session %s right after failover; "
+                    "re-compiling for the fallback model before compacting",
+                    session_id,
+                )
+                continue
             logger.warning(
                 "API context overflow in session %s, attempting compaction-retry %d/%d",
                 session_id,
@@ -1510,6 +1909,10 @@ async def run_agent(
             )
             return
 
+        # Only a successful provider response acknowledges the rows in this
+        # request. A failed/overflowed call leaves delivery pending for recovery.
+        await _acknowledge_delivery(session, payload)
+
         # --- Length-truncation continuation ---
         if (
             _stream_finish_reason == "length"
@@ -1528,6 +1931,7 @@ async def run_agent(
                 save_turn_msg=_save_turn_msg,
             )
             tool_round += 1  # this counts as a round consumed
+            _rounds_spent += 1
             continue  # back to top of tool_round loop
 
         # --- Native-format tool-call salvage ---
@@ -1588,6 +1992,7 @@ async def run_agent(
                 session.touch()
                 collected_content = ""
                 tool_round += 1
+                _rounds_spent += 1
                 continue
 
             # No tool calls — model has responded. Save and finish.
@@ -1613,20 +2018,58 @@ async def run_agent(
                 }
             )
             session.touch()
-            session.termination_reason = "complete"
+
+            # The user amended this turn's message while the answer above was
+            # streaming. Nothing else will ever read that amendment, so take one
+            # more round: the next compile carries the combined row and this
+            # answer, and the model gets to address what it missed.
+            if (
+                turn_state(session).user_row_version != _compiled_user_row_version
+                and _final_answer_rereads < FINAL_ANSWER_REREAD_LIMIT
+                and not session.cancel_requested
+            ):
+                _final_answer_rereads += 1
+                logger.info(
+                    "Session %s: user row %s changed after the last compile — re-reading before ending the turn",
+                    session_id,
+                    _turn_user_msg_id,
+                )
+                await asyncio.to_thread(
+                    db.add_message,
+                    session_id,
+                    "system",
+                    "[the user edited the message you were answering while you were "
+                    "answering it — the current text is in the user turn above. Re-read "
+                    "it and handle anything your answer missed. If the answer already "
+                    "covers it, say so in one line.]",
+                )
+                session.emit_event({"type": "turn.late_correction", "message_id": _turn_user_msg_id})
+                collected_content = ""
+                collected_tool_calls = []
+                # Deliberately not tool_round += 1: the harness asked for this
+                # pass, so it must not spend the turn's round budget.
+                continue
+
+            # A tool-less reply on a round the harness disarmed is not evidence
+            # the task finished — the resource status literally instructed the
+            # model to stop calling tools and summarize. Keep the allowance
+            # exhaustion typed so reflect's ceiling-loop guard and the worker
+            # INCOMPLETE header both see the wall this turn hit.
+            session.termination_reason = "round_ceiling" if _forced_synthesis else "complete"
             return
 
         # --- Tool execution ---
         did_tool_calls = True
+        _window_did_tool_calls = True
 
         # A pending nudge answered with tool calls = the nudge worked.
         if _followup_pending:
             _followup_pending = False
             await asyncio.to_thread(_record_followup_outcome, session, session_id, True)
 
-        # NOTE: We save the assistant message AFTER validation below,
-        # so only validated tool_calls end up in the DB (prevents orphans).
-        # The original collected_tool_calls may include hallucinated/malformed calls.
+        # NOTE: We save the assistant message AFTER admission below, so the
+        # row can list every call the model proposed — the refused ones
+        # included, because each refusal's tool-role answer needs a parent.
 
         # Stuck detection
         score, repeats = stuck.evaluate(collected_content, collected_tool_calls, tool_failures, registry)
@@ -1644,6 +2087,8 @@ async def run_agent(
             active_tools=active_tools,
             nudges_used=_stuck_ask_user_continues,
             nudge_limit=STUCK_ASK_USER_LIMIT,
+            turn_user_msg_id=_turn_user_msg_id,
+            stuck=stuck,
         )
         if _stuck_action == "nudge-and-retry":
             # Don't break — let one more round run so the agent can ask.
@@ -1651,24 +2096,37 @@ async def run_agent(
             collected_tool_calls = []
             continue
         if _stuck_action == "stop":
-            session.termination_reason = "round_ceiling"
+            # Its own wall, not the round budget: the stuck detector fires on
+            # repetition, which happens at any round number. Reporting
+            # round_ceiling here sent reflect chasing max_tool_rounds — one
+            # worker was told to "split the task or raise the limit" after
+            # dying at round 4 of a 500-round budget.
+            session.termination_reason = "stuck_loop"
             break
 
         # Filter, correct and validate before anything executes.
         parsed_calls, notes_by_id = await gate.admit(collected_tool_calls, active_tools)
 
-        # Save assistant message with ONLY validated tool_calls (prevents DB orphans).
+        # Save the assistant message with EVERY proposed call — admitted and
+        # refused. Listing only the admitted ones orphaned each rejection's
+        # tool-role row, and the compiler's `exclude_orphans` then deleted the
+        # gate's corrective feedback from the next request; the model never
+        # learned why its call was thrown away. Refused calls carry
+        # `_rejected` so no reader counts them as executed.
         # Persist round latency so post-hoc diagnosis (which model is slow,
         # which round burned the budget) can read it from the DB without
         # re-deriving from event logs.
         validated_tool_calls = [item["tc"] for item in parsed_calls]
+        proposed_tool_calls = gate.proposed_calls
         _round_latency_ms = int((time.monotonic() - _round_started_at) * 1000)
         await _save_turn_msg(
             "assistant",
             collected_content or "",
-            tool_calls=json.dumps(validated_tool_calls) if validated_tool_calls else None,
+            tool_calls=json.dumps(proposed_tool_calls) if proposed_tool_calls else None,
             latency_ms=_round_latency_ms,
         )
+        # Now that the parent row exists, answer the calls it will never run.
+        await gate.flush_rejections()
         logger.info(
             "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=%d content_chars=%d",
             session_id,
@@ -1721,39 +2179,12 @@ async def run_agent(
         collected_content = ""
         collected_tool_calls = []
         tool_round += 1
-        if (
-            tool_round >= settings.max_tool_rounds
-            and _round_cap_continues < int(getattr(settings, "round_cap_auto_continue", 0) or 0)
-            and did_tool_calls
-            and not session.cancel_requested
-            and session.error is None
-            and stuck.repeat_count < 3
-        ):
-            _round_cap_continues += 1
-            logger.info(
-                "Session %s: round cap reached mid-task — granting continuation %d/%d",
-                session_id,
-                _round_cap_continues,
-                int(settings.round_cap_auto_continue),
-            )
-            try:
-                from core.llm.client import extend_session_budget
-
-                base = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else 0.0
-                if base > 0:
-                    extend_session_budget(session_id, base)
-            except Exception as _ext_err:
-                logger.debug("Round-cap continuation budget extend failed: %s", _ext_err)
-            await asyncio.to_thread(
-                db.add_message,
-                session_id,
-                "system",
-                f"[round cap reached — the harness granted one continuation "
-                f"({settings.max_tool_rounds} more rounds). Use it to FINISH: "
-                "complete the task or wrap up honestly with verified state. "
-                "No further continuations follow this one.]",
-            )
-            tool_round = 0
+        _rounds_spent += 1
+        # No renewal here any more: by the time a round has executed tools and
+        # incremented past the cap, the window's terminal round is behind us —
+        # which is exactly why this branch was unreachable for any provider
+        # that honours tools=None. The decision now happens at the top of the
+        # loop, before the terminal round is entered.
 
     # If we exit the tool loop without returning (max rounds hit, or stuck break),
     # make one final response call with tools=None to get a clean text answer.
@@ -1761,6 +2192,17 @@ async def run_agent(
     # classify it now so downstream hooks can tell "round ceiling" from "complete".
     if session.termination_reason is None:
         session.termination_reason = "round_ceiling"
+    # The loop can exit in the very round the ladder fell over (round ceiling,
+    # stuck break), which leaves effective_model on the primary while the
+    # final answer is dispatched to the fallback. Resolve once more so the
+    # compile below is sized for the model that will receive it.
+    _final_model, model_supports_vision, model_supports_audio = _resolve_effective_model(_tried_fallback)
+    if _final_model != effective_model:
+        if await ensure_model_known(_final_model):
+            _final_model, model_supports_vision, model_supports_audio = _resolve_effective_model(_tried_fallback)
+        _model_budget = derive_model_budget(_final_model)
+        _max_output = derive_max_output(_final_model)
+        effective_model = _final_model
     if did_tool_calls and session.termination_reason != "compaction_failed":
         # A turn that broke on compaction_failed already emitted its error;
         # streaming a final answer against a context that is still over the
@@ -1822,7 +2264,21 @@ async def _resolve_active_goal(session: AgentSession, session_id: str) -> None:
     fan-out's spend lands on the parent's goal; everyone else re-resolves, so a
     goal created or completed between turns is respected.
     """
-    if not settings.goals_enabled or session.session_type == "worker":
+    if not settings.goals_enabled:
+        return
+    if session.session_type == "worker":
+        # A worker owns no goal row, so re-resolving by owner would clear the
+        # inherited id. But a rehydrated worker arrives with nothing to keep:
+        # restore the attribution from the rows its own spend was billed to,
+        # or the budget check in _pre_round_gate has nothing to guard on.
+        if session.active_goal_id is None:
+            try:
+                from sessions.manager import _restore_worker_goal
+
+                row = await asyncio.to_thread(db.get_session, session_id)
+                session.active_goal_id = _restore_worker_goal(session_id, row or {})
+            except Exception:
+                session.active_goal_id = None
         return
     try:
         goal_row = await asyncio.to_thread(db.get_active_goal, session_id)
@@ -1831,11 +2287,111 @@ async def _resolve_active_goal(session: AgentSession, session_id: str) -> None:
         session.active_goal_id = None
 
 
-async def _pre_round_gate(session: AgentSession, session_id: str, tool_round: int) -> str:
+async def _round_renewal_refusal(session: AgentSession, session_id: str, stuck) -> str | None:
+    """None when the round window may be renewed, else why it may not.
+
+    Everything here is a reason a fresh window would be wasted or unwanted,
+    checked in the order that matters: an explicit stop first, then a human
+    with something to say, then the goal's own ceiling. A renewal is authority
+    to keep spending, so it is granted only when nothing objects.
+    """
+    if session.cancel_requested:
+        return "cancel requested"
+    if session.error is not None:
+        return f"turn already errored ({session.error})"
+    if getattr(stuck, "repeat_count", 0) >= 3:
+        return "no progress — the stuck detector is repeating"
+    # The user's words outrank the machine's, the same rule
+    # _maybe_enqueue_goal_continuation follows: a queued message is direction
+    # this turn cannot read, so end the turn and let it be read.
+    if getattr(session, "pending_messages", None):
+        return "a user message is queued for the next turn"
+    if settings.goals_enabled and session.active_goal_id:
+        try:
+            exceeded = await asyncio.to_thread(_goal_budget_exceeded, session.active_goal_id)
+        except Exception as _e:
+            logger.debug("Round-renewal goal budget check failed: %s", _e)
+            exceeded = None
+        if exceeded:
+            return f"goal budget spent ({exceeded})"
+    return None
+
+
+async def _grant_round_renewal(
+    session: AgentSession,
+    session_id: str,
+    *,
+    granted: int,
+    authorized: int,
+    rounds_spent: int,
+) -> None:
+    """Open a fresh round window and tell the model what it actually has left."""
+    logger.info(
+        "Session %s: round window spent after %d round(s) — renewing %d/%d (%d fresh rounds)",
+        session_id,
+        rounds_spent,
+        granted,
+        authorized,
+        settings.max_tool_rounds,
+    )
+    # A renewed window of rounds is worth nothing on a spent clock. The old
+    # call was base-relative (extend_session_budget), so the second and third
+    # renewal each granted exactly 0 seconds; this one is measured from now
+    # and bounded by what the turn was actually authorized to spend.
+    try:
+        from core.llm.client import phase_budget_ceiling, renew_phase_budget
+
+        base = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else 0.0
+        if base > 0:
+            ceiling = phase_budget_ceiling(base, authorized, len(getattr(session, "worker_ids", ()) or ()))
+            headroom = renew_phase_budget(session_id, base, ceiling)
+            if headroom <= 0:
+                logger.warning(
+                    "Session %s: round renewal gets no headroom — cumulative budget ceiling of %.0fs reached",
+                    session_id,
+                    ceiling,
+                )
+    except Exception as _ext_err:
+        logger.debug("Round-cap continuation budget renewal failed: %s", _ext_err)
+    left = max(0, authorized - granted)
+    # The old copy said "No further continuations follow this one" whatever
+    # the configured allowance was, so an agent with three renewals left was
+    # told to wrap up on the first.
+    tail = (
+        f"{left} further renewal(s) can follow it."
+        if left
+        else "This is the LAST renewal — when these rounds run out the next "
+        "round is text-only synthesis with no tools."
+    )
+    await asyncio.to_thread(
+        db.add_message,
+        session_id,
+        "system",
+        f"[round budget renewed ({granted}/{authorized}) — {settings.max_tool_rounds} "
+        f"fresh tool rounds, granted because tool work is still progressing. Use "
+        f"them to FINISH: complete the task or wrap up honestly with verified "
+        f"state. {tail}]",
+    )
+    session.emit_event(
+        {
+            "type": "turn.round_renewal",
+            "granted": granted,
+            "authorized": authorized,
+            "rounds": settings.max_tool_rounds,
+        }
+    )
+    session.touch()
+
+
+async def _pre_round_gate(session: AgentSession, session_id: str, rounds_spent: int) -> str:
     """Decide whether the next tool round may start. "run" | "break" | "return".
 
     "break" leaves the loop through the final-answer path (the turn has work
     worth summarizing); "return" abandons it outright.
+
+    `rounds_spent` is the turn's TOTAL rounds consumed, not the current
+    window's index: the periodic goal-budget checkpoint below has to keep its
+    cadence across a round-budget renewal, which resets the window index to 0.
     """
     # Cooperative cancellation checkpoint
     if session.cancel_requested:
@@ -1847,9 +2403,9 @@ async def _pre_round_gate(session: AgentSession, session_id: str, tool_round: in
     # only BETWEEN turns, so a single turn could overshoot token/time budgets
     # without bound. Every third round is enough — the between-turns check
     # remains the authoritative settlement.
-    if settings.goals_enabled and session.active_goal_id and tool_round > 0 and tool_round % 3 == 0:
+    if settings.goals_enabled and session.active_goal_id and rounds_spent > 0 and rounds_spent % 3 == 0:
         try:
-            exceeded = await asyncio.to_thread(_goal_budget_exceeded, session_id, session.active_goal_id)
+            exceeded = await asyncio.to_thread(_goal_budget_exceeded, session.active_goal_id)
         except Exception as _e:
             logger.debug("In-turn goal budget check failed: %s", _e)
             exceeded = None
@@ -2023,6 +2579,15 @@ def _resolve_tool_surface(
     for t in registry.enabled_tools():
         if t.source == "builtin":
             active.add(t.name)
+    # Gates are a standing property of the session, not a per-task tool, so
+    # the one read-only way to see them travels with every turn. Scout dropped
+    # the gate tools from a session whose whole job was validating a build; the
+    # agent probed for an HTTP endpoint, found none, and wrote "no such gate
+    # API exists on this deployment" into the project's own task file
+    # (Agent Mesh build, 2026-09-08). list_gates is a no-argument reader — the
+    # cheapest possible way to make the mechanism findable.
+    if settings.gates_enabled and registry.exists("list_gates") and not registry.is_disabled("list_gates"):
+        active.add("list_gates")
     # Monotonic allowlist: if the agent successfully used an extension tool in
     # a prior turn of this session, keep it in the schema. Prevents scout from
     # silently narrowing the surface between turns (e.g. dropping
@@ -2041,7 +2606,7 @@ def _resolve_tool_surface(
     # get_worker_result / check_workers / await_workers into the schema.
     active = registry.expand_cooccurrence(active)
     # Scheduled-job tool allow-list (E1, field case 0ba19fdbc823): when the
-    # dispatching cron/heartbeat job declares allowed_tools, the schema is
+    # dispatching cron job declares allowed_tools, the schema is
     # intersected with it AFTER the builtin force-add, the monotonic allowlist
     # and cooccurrence expansion — a job's charter outranks all three. A tool
     # the model can't see is a tool it can't drift onto; the executor enforces
@@ -2092,14 +2657,29 @@ def record_tool_outcome(turn, result) -> None:
     declining the call (job allow-list, retry exclusion, disabled tool,
     approval gate; see core.tools.executor.is_policy_refusal) — is counted as
     `refusals` with its own `refusal_errors` previews and never as a failure:
-    candor's tool_ok, telos' anomaly scan, synthesis and the reflect summary
-    all read `failures` as "the tool is unreliable", which a refusal is not.
+    synthesis and the reflect summary both read `failures` as "the tool is unreliable", which a refusal is not.
     The stuck detector still sees refusals (a model that keeps calling a
     forbidden tool IS stuck) — that is handled by the caller.
+
+    By-design unavailability (core.tools.executor.is_unavailable — ask_user in
+    an unattended session) is counted as `unavailable` for the same reason and
+    is additionally netted out of the denominator by synthesis: a
+    refusal at least means the model tried something it should not have, while
+    an unavailable tool simply cannot apply here and says so.
     """
-    from core.tools.executor import is_policy_refusal
+    from core.tools.executor import is_command_failure, is_miss, is_policy_refusal, is_unavailable
 
     refused = is_policy_refusal(result)
+    unavailable = (not refused) and is_unavailable(result)
+    # A negative lookup (core.tools.executor.is_miss) is the agent asking for
+    # something that does not exist: counted as `misses`, previewed so reflect
+    # can see the wrong ask, never a failure of the tool.
+    miss = (not refused) and (not unavailable) and is_miss(result)
+    # A shell command that ran and exited non-zero is counted as itself
+    # (core.tools.executor.is_command_failure). It is an error the agent must
+    # see, but `failures` means the TOOL is unreliable, and a reproduction
+    # test that fails on purpose is no evidence of that.
+    command_failed = (not refused) and (not unavailable) and (not miss) and is_command_failure(result)
     entry = turn.tool_summary.setdefault(
         result.tool_name,
         {"calls": 0, "failures": 0, "refusals": 0, "errors": [], "total_latency_ms": 0},
@@ -2111,6 +2691,20 @@ def record_tool_outcome(turn, result) -> None:
         entry["refusals"] += 1
         preview = result.content[:300] if result.content else "refused"
         previews = entry.setdefault("refusal_errors", [])
+        if preview not in previews:
+            previews.append(preview)
+    elif unavailable:
+        entry["unavailable"] = int(entry.get("unavailable") or 0) + 1
+    elif miss:
+        entry["misses"] = int(entry.get("misses") or 0) + 1
+        preview = result.content[:300] if result.content else "miss"
+        previews = entry.setdefault("miss_errors", [])
+        if preview not in previews:
+            previews.append(preview)
+    elif command_failed:
+        entry["command_failures"] = int(entry.get("command_failures") or 0) + 1
+        preview = result.content[:300] if result.content else "non-zero exit"
+        previews = entry.setdefault("command_errors", [])
         if preview not in previews:
             previews.append(preview)
     elif result.was_error:
@@ -2131,6 +2725,10 @@ def record_tool_outcome(turn, result) -> None:
     a_entry["calls"] += 1
     if refused:
         a_entry["refusals"] += 1
+    elif unavailable:
+        a_entry["unavailable"] = int(a_entry.get("unavailable") or 0) + 1
+    elif command_failed:
+        a_entry["command_failures"] = int(a_entry.get("command_failures") or 0) + 1
     elif result.was_error:
         a_entry["failures"] += 1
 
@@ -2180,15 +2778,28 @@ async def _record_round_results(
     Five consumers read from the same pass: the transcript (what the model
     sees next round), the UI event stream, the stuck detector, the cross-round
     dedup cache, and the turn's tool summary that reflect grades against.
-    Two results also feed back into the schema — discover_tools and
-    create_tool/update_tool widen active_tools in place so a newly found or
-    newly written tool is callable on the very next round.
+    discover_tools also feeds back into the schema — it widens active_tools
+    in place so a newly found tool is callable on the very next round.
     """
     from core.harness.nudges import evaluate as _nudge_eval
 
     for item, result in zip(parsed_calls, results):
         tc = item["tc"]
-        tool_meta = json.dumps({"was_error": result.was_error, "latency_ms": result.latency_ms})
+        # The tool name and the miss/unavailable flags ride along so a recent
+        # window of results can be read back per tool without joining the
+        # assistant's tool_calls (db.recent_tool_outcomes).
+        from core.tools.executor import is_command_failure as _is_cmd_fail
+        from core.tools.executor import is_miss as _is_miss
+        from core.tools.executor import is_unavailable as _is_unavail
+
+        _tm = {"was_error": result.was_error, "latency_ms": result.latency_ms, "tool": result.tool_name}
+        if _is_miss(result):
+            _tm["miss"] = True
+        if _is_unavail(result):
+            _tm["unavailable"] = True
+        if _is_cmd_fail(result):
+            _tm["command_failed"] = True
+        tool_meta = json.dumps(_tm)
 
         # If the gate corrected this call (aliased name, coerced argument
         # types, dropped unknown params), prefix the notes onto the tool
@@ -2245,13 +2856,20 @@ async def _record_round_results(
             event_data["metadata"] = result.metadata
         session.emit_event(event_data)
 
-        # Track failures and update stuck detector
-        if result.was_error:
+        # Track failures and update stuck detector. A command that ran and
+        # exited non-zero is deliberately NOT a tool failure here: the tool
+        # worked, and signals 3/6/11 all watch for a tool that does not. A
+        # reproduction test is meant to fail and a `grep` exits 1 on no match,
+        # so charging those would score the very rerun the agent is supposed
+        # to make — the second half of edit-then-rerun — as an error loop.
+        # The result is still an error the model sees, and still not cached.
+        if result.was_error and not is_command_failure(result):
             tool_failures.setdefault(result.tool_name, []).append(_hash_args(tc.get("arguments", "")))
             stuck.mark_failure(tool_name=result.tool_name, args=item["parsed_args"])
         else:
             stuck.mark_success(tool_name=result.tool_name, args=item["parsed_args"])
-            gate.remember_success(result.tool_name, tc.get("arguments", ""), tool_round, result.content)
+            if not result.was_error:
+                gate.remember_success(result.tool_name, tc.get("arguments", ""), tool_round, result.content)
         # Semantic-streak observation (signals 8-10): records the result body's
         # "low info" status and hostname for the search-spiral / bot-wall /
         # same-domain-grind signals. Cheap bookkeeping only.
@@ -2262,19 +2880,58 @@ async def _record_round_results(
             was_error=result.was_error,
         )
 
-        # Cumulative + per-attempt tool execution summary for reflect,
-        # candor, telos and synthesis.
+        # Cumulative + per-attempt tool execution summary for reflect and
+        # synthesis.
         record_tool_outcome(session.turn, result)
 
         # Dynamic tool expansion via discover_tools
         if result.tool_name == "discover_tools" and not result.was_error:
             _expand_tools_from_discovery(result.content, active_tools)
 
-        # A newly created/updated custom tool goes straight into active_tools
-        # so it appears in the LLM schema on the next round without requiring
-        # a separate discover_tools call.
-        if result.tool_name in ("create_tool", "update_tool") and not result.was_error:
-            _inject_created_tool(item["parsed_args"].get("name", ""), active_tools)
+
+def _is_recovery_move(
+    *,
+    score: float,
+    tool_calls: list[dict],
+    active_tools: list[str],
+    stuck: StuckDetector,
+) -> bool:
+    """Is this round the change of approach the nudge asks for?
+
+    A low score is most of the answer: at <= 0.3 neither Signal 2 (the same
+    call signature again with nothing changed in between) nor Signal 3 (an
+    args hash that already failed) fired, so this is not the repeated call.
+    What is left to check is whether the tools it reaches for are the ones
+    already failing — a third guess at the same broken call is repetition
+    however novel its arguments are.
+
+    Two shapes qualify. `ask_user` is the way out the nudge names wherever it
+    is reachable. Where it is not — a worker kind or job charter whose
+    allowlist drops it — the way out is a tool with no failure history this
+    turn, which includes the `file_write` of the deliverable the worker
+    exists to produce. Every call must be one the session can actually run;
+    a move the gate would reject is not a recovery.
+    """
+    if not tool_calls or score > 0.3:
+        return False
+    allowed = set(active_tools or [])
+    names = [tc.get("name", "") for tc in tool_calls]
+    if any(n not in allowed for n in names):
+        return False
+    if "ask_user" in names:
+        return True
+    for tc in tool_calls:
+        # File tools carry their history per target, the way Signal 7 reads
+        # them (and the way Signal 11 declines to): a worker whose first
+        # attempt at the report file failed is not repeating itself by
+        # writing a different one.
+        target = _call_file_target(tc)
+        history = (
+            stuck.file_failure_counts.get(target, 0) if target else stuck.tool_failure_counts.get(tc.get("name", ""), 0)
+        )
+        if history:
+            return False
+    return True
 
 
 async def _handle_stuck_signals(
@@ -2286,23 +2943,46 @@ async def _handle_stuck_signals(
     active_tools: list[str],
     nudges_used: int,
     nudge_limit: int,
+    turn_user_msg_id: int | None = None,
+    stuck: StuckDetector | None = None,
+    recovery_limit: int = 2,
 ) -> tuple[str, int]:
     """Decide what a stuck score means for this round, and tell the model.
 
     Returns (action, nudges_used) where action is one of:
       "proceed"         — run the round normally (a mild-repetition nudge may
-                          still have been written to the transcript)
+                          still have been written to the transcript, or the
+                          round is a bounded recovery move past the threshold)
       "nudge-and-retry" — asked the agent to call ask_user; discard this
                           round's calls and give it another round to comply
       "stop"            — end the tool loop
 
-    Prefer asking the user over silent exhaustion: when ask_user is active,
-    direct the agent to call it with a concrete question. But cap the nudging
-    — an LLM that ignores the ask_user hint keeps the loop spinning, emitting
-    another nudge and burning more LLM time each round (observed: 16 in a row
-    before the agent self-corrected). Past the cap, fall through to the same
-    "summarize and stop" path used when ask_user isn't available at all.
+    Every session gets the same nudge budget; only the instruction differs.
+    Where ask_user is active, the way out is to ask. Where it is not — a worker
+    kind or a job charter whose allowlist drops it — the way out is to change
+    approach and, failing that, to WRITE THE DELIVERABLE with what is already
+    in hand.
+
+    That second branch used to have no budget at all: the first trip of the
+    detector went straight to "summarize your progress and stop". In the Agent
+    Mesh build all four research workers died that way, three of them before
+    writing the report file they existed to produce, and each cost a full
+    reflect retry that redid the research from scratch. Stopping a worker one
+    move before its deliverable is the most expensive thing this function can
+    do, so the message now names the file, not the summary.
+
+    The cap still matters — an LLM that ignores the hint keeps the loop
+    spinning and burns LLM time each round (observed: 16 in a row before the
+    agent self-corrected).
     """
+    # These notices are advice about THIS round's behavior. Stamped with the
+    # turn they belong to, the compiler drops them from every later turn's
+    # history — a stale "You are repeating tool calls" read as standing policy
+    # and steered turns that had nothing to do with it (session 3dc5a307d751:
+    # a notice from an earlier turn was still being obeyed rounds later). The
+    # rows stay in the DB for the transcript UI.
+    _ephemeral = json.dumps({"ephemeral_turn": int(turn_user_msg_id)}) if turn_user_msg_id is not None else None
+
     if repeats < 3:
         # Not stuck this round — reset the consecutive-nudge counter so a
         # later separate stuck episode gets the full nudge budget.
@@ -2315,50 +2995,80 @@ async def _handle_stuck_signals(
                 f"You are repeating tool calls ({', '.join(names) if names else 'unknown'}). "
                 "Do NOT retry the same operation. "
                 "Review what you have already accomplished and proceed to the next unfinished step.",
+                metadata=_ephemeral,
             )
         return "proceed", 0
 
     logger.warning("Session %s stuck (score=%.1f, repeats=%d)", session_id, score, repeats)
+
+    # The nudge asks for a change of approach and the discard below used to
+    # throw that change away: the calls never ran, so nothing could succeed,
+    # so the unresolved failure that pins repeat_count at the threshold never
+    # cleared, and three complied-with rounds later the turn was stopped for
+    # not complying. A recovery move runs instead. Bounded — two per turn —
+    # so a model that "changes approach" every round still meets the cap, and
+    # the nudge budget is untouched: real repetition is nudged then stopped
+    # exactly as before.
+    if (
+        stuck is not None
+        and stuck.recovery_passes < recovery_limit
+        and _is_recovery_move(score=score, tool_calls=tool_calls, active_tools=active_tools, stuck=stuck)
+    ):
+        stuck.recovery_passes += 1
+        logger.info(
+            "Session %s stuck but this round changes approach (%s) — letting recovery %d/%d run",
+            session_id,
+            ", ".join(sorted({tc.get("name", "") for tc in tool_calls})) or "n/a",
+            stuck.recovery_passes,
+            recovery_limit,
+        )
+        return "proceed", nudges_used
+
     ask_user_available = "ask_user" in (active_tools or [])
-    if ask_user_available and nudges_used < nudge_limit:
+    if nudges_used < nudge_limit:
         nudges_used += 1
         recent_tool_names = sorted({tc.get("name", "") for tc in (tool_calls or [])})
-        await asyncio.to_thread(
-            db.add_message,
-            session_id,
-            "system",
-            "You appear to be stuck in a loop "
-            f"(recently used: {', '.join(recent_tool_names) or 'n/a'}). "
-            "Do NOT retry the same approach. Call ask_user with a specific "
-            "clarifying question that names what you tried, what failed, and "
-            "what you need from the user to proceed. After ask_user returns, "
-            "use the answer to pick a new strategy.",
-        )
+        used = ", ".join(recent_tool_names) or "n/a"
+        if ask_user_available:
+            body = (
+                f"You appear to be stuck in a loop (recently used: {used}). "
+                "Do NOT retry the same approach. Call ask_user with a specific "
+                "clarifying question that names what you tried, what failed, and "
+                "what you need from the user to proceed. After ask_user returns, "
+                "use the answer to pick a new strategy."
+            )
+        else:
+            body = (
+                f"You appear to be stuck in a loop (recently used: {used}). "
+                "No user is reachable from this session, so decide for yourself. "
+                "Do NOT repeat those calls. Change approach: a different tool, a "
+                "different source, or fewer moving parts. If nothing else works, "
+                "WRITE YOUR DELIVERABLE NOW with what you already have, marking "
+                "what is unverified — a report on disk with gaps beats no report."
+            )
+        await asyncio.to_thread(db.add_message, session_id, "system", body, metadata=_ephemeral)
         return "nudge-and-retry", nudges_used
 
+    # Hit the cap. Emit a final, distinct system message so the transcript
+    # records why we gave up nudging, then stop.
+    logger.warning(
+        "Session %s stuck cap reached (%d consecutive nudges ignored), force-breaking loop",
+        session_id,
+        nudges_used,
+    )
     if ask_user_available:
-        # Hit the cap. Emit a final, distinct system message so the transcript
-        # records why we gave up nudging, then stop.
-        logger.warning(
-            "Session %s stuck cap reached (%d consecutive nudges ignored), force-breaking loop",
-            session_id,
-            nudges_used,
-        )
-        await asyncio.to_thread(
-            db.add_message,
-            session_id,
-            "system",
-            f"Stuck-detection nudged you {nudges_used} "
-            "times to call ask_user and you did not. Summarize what "
-            "you have so far and stop.",
+        final = (
+            f"Stuck-detection nudged you {nudges_used} times to call ask_user and "
+            "you did not. Write any file deliverable your task named, then "
+            "summarize what you have and stop."
         )
     else:
-        await asyncio.to_thread(
-            db.add_message,
-            session_id,
-            "system",
-            "You appear to be stuck in a loop. Summarize your progress and stop.",
+        final = (
+            f"Stuck-detection nudged you {nudges_used} times to change approach and "
+            "the loop continued. Write any file deliverable your task named — even "
+            "partial, with gaps marked — then summarize what you have and stop."
         )
+    await asyncio.to_thread(db.add_message, session_id, "system", final, metadata=_ephemeral)
     return "stop", nudges_used
 
 
@@ -2396,15 +3106,31 @@ async def _end_turn_on_stream_error(
         # evidence shows it AND the user-visible transcript explains the
         # truncation point. We do NOT set session.error here — that's reserved
         # for genuine failures.
-        await asyncio.to_thread(
-            db.add_message,
-            session_id,
-            "system",
+        body = (
             "Turn ended early: per-session LLM time budget exhausted. "
             "Any content the agent produced before this point is the "
             "best result available for this turn. Reflect should grade "
-            "the existing transcript on its merits.",
+            "the existing transcript on its merits."
         )
+        # The harness can carry a long task across turn boundaries by itself,
+        # but only for a session with a live goal — and nothing ever says so.
+        # Three sessions spent a combined 22 hours on an explicit "work till
+        # it's completed and tested" build, took two budget cuts, and never
+        # wrote a single session_goals row (Agent Mesh build, 2026-09-08).
+        # Say it at the one moment it is actionable, and only when there is no
+        # goal already doing the job.
+        try:
+            _goal = await asyncio.to_thread(db.get_active_goal, session_id)
+        except Exception:
+            _goal = None
+        if not _goal:
+            body += (
+                " If this task is meant to run to completion across turns, call "
+                "goal_create(objective=..., continuation_budget=N) — the harness "
+                "then resumes the goal automatically after a budget cut or a round "
+                "ceiling instead of waiting for the user."
+            )
+        await asyncio.to_thread(db.add_message, session_id, "system", body)
         logger.warning(
             "LLM budget exhausted in session %s — soft-landing as BUDGET_EXHAUSTED instead of error: %s",
             session_id,
@@ -2421,20 +3147,26 @@ async def _end_turn_on_stream_error(
     # reflect, so nothing downstream ever says what happened (field case
     # ae952f40e3d1: 61 rounds of work ended mid-flight with no final message,
     # no verdict, no notification — the session just went quiet). Leave a
-    # durable trace a human will actually see.
+    # durable trace a human will actually see. Canary and worker sessions are
+    # not the user's conversations: the sessions.stream_error category drops
+    # them, so they leave no bell item.
     try:
+        from core import notices
+
         sess_row = await asyncio.to_thread(db.get_session, session_id)
         title = (sess_row or {}).get("title") or session_id[:12]
         await asyncio.to_thread(
-            db.add_notification,
-            session_id=session_id,
-            title=f"{title}: turn ended on a stream error",
-            body=(
+            notices.notify,
+            "sessions.stream_error",
+            f"{title}: turn ended on a stream error",
+            (
                 f"The LLM stream failed after retries and fallback: {error[:300]} — "
                 "the turn's partial work is in the transcript, but it was not graded "
                 "(reflect skips errored turns). Reply in the session to resume."
             ),
-            urgency="high",
+            session_id=session_id,
+            link={"kind": "session", "id": session_id},
+            session_type=getattr(session, "session_type", None) or (sess_row or {}).get("session_type"),
         )
     except Exception as _ne:
         logger.debug("stream-error notification failed for %s: %s", session_id, _ne)
@@ -2479,6 +3211,38 @@ async def _continue_after_length_truncation(
     )
     session.emit_event({"type": "stream.length_continuation", "attempt": attempt, "max": limit})
     session.touch()
+
+
+async def _acknowledge_delivery(session: AgentSession, payload) -> None:
+    """Acknowledge only managed rows present in a successful LLM request.
+
+    Best-effort, like every other side-channel write in this region. The model
+    has already answered by the time this runs; a transient sqlite error here
+    used to propagate to _run_agent_safe, which classified the whole turn
+    agent-error and discarded the round's tool calls — a bookkeeping write
+    failing a good round. The rows stay 'pending' instead, which is the truth
+    and which orphan recovery already knows how to read, so the event is not
+    emitted either: telling the client 'consumed' when the row still says
+    'pending' would be the one outcome worse than the stale queued chip.
+    """
+    delivered_ids = list(getattr(payload, "delivered_message_ids", ()))
+    if not delivered_ids:
+        return
+    try:
+        await asyncio.to_thread(db.set_message_delivery, session.session_id, delivered_ids, "consumed")
+    except asyncio.CancelledError:
+        raise  # a cancelled turn is not a failed write
+    except Exception as e:
+        logger.warning(
+            "Delivery acknowledge failed for %s message(s) %s in session %s: %s — "
+            "rows stay pending and recovery will see them",
+            len(delivered_ids),
+            delivered_ids,
+            session.session_id[:12],
+            e,
+        )
+        return
+    session.emit_event({"type": "message.consumed", "message_ids": delivered_ids})
 
 
 async def _stream_final_answer(
@@ -2554,6 +3318,8 @@ async def _stream_final_answer(
     if final.content:
         await save_turn_msg("assistant", final.content)
     if final.error is not None:
+        session.error = str(final.error)
+        session.termination_reason = "error"
         logger.error("Final response error: %s", final.error)
         session.emit_event({"type": "stream.error", "error": final.error})
         # The turn is over either way; the caller's model attribution is the
@@ -2566,6 +3332,8 @@ async def _stream_final_answer(
             }
         )
         return usage
+
+    await _acknowledge_delivery(session, payload)
 
     session.emit_event(
         {
@@ -2587,20 +3355,6 @@ def _expand_tools_from_discovery(discovery_result: str, active_tools: list[str])
         tool_name = match.group(1)
         registry = get_registry()
         if registry.exists(tool_name) and not registry.is_disabled(tool_name) and tool_name not in active_tools:
-            bisect.insort(active_tools, tool_name)
-
-
-def _inject_created_tool(tool_name: str, active_tools: list[str]) -> None:
-    """Add a tool registered by create_tool/update_tool into the sorted active tools list.
-
-    Mirrors _expand_tools_from_discovery so a newly minted custom tool enters
-    the LLM schema on the very next round without a separate discover_tools call.
-    """
-    import bisect
-
-    registry = get_registry()
-    if tool_name and registry.exists(tool_name) and not registry.is_disabled(tool_name):
-        if tool_name not in active_tools:
             bisect.insort(active_tools, tool_name)
 
 
@@ -2669,6 +3423,7 @@ def _build_resource_status(
     tool_round: int = 0,
     context_budget: int | None = None,
     context_tokens: int | None = None,
+    renewals_remaining: int = 0,
 ) -> str:
     """Build resource status for system prompt.
 
@@ -2681,6 +3436,12 @@ def _build_resource_status(
     nothing. Now: context fullness is the window-relative percentage,
     lifetime spend is a plain informational count, and tool rounds are
     named as the only binding limit.
+
+    `tool_round` indexes the current round WINDOW; `renewals_remaining` is how
+    many more windows the harness is still authorized to open. While that is
+    non-zero the window is not the binding limit and the last-round copy would
+    be a lie — the renewal happens before the tools-disabled round is entered,
+    so an agent told to wrap up would be wrapping up for nothing.
     """
     usage = db.get_session_usage(session_id)
     total_tokens = usage.get("total", 0)
@@ -2694,13 +3455,28 @@ def _build_resource_status(
     else:
         window = f"Context window: {budget:,} tokens (auto-compacted)"
     remaining = settings.max_tool_rounds - tool_round
+    renewals = max(0, int(renewals_remaining or 0))
+    if renewals:
+        limit_note = (
+            f"in this window, {renewals} automatic renewal(s) of " f"{settings.max_tool_rounds} rounds still authorized"
+        )
+    else:
+        limit_note = "the only binding limit"
     base = (
         f"[RESOURCE STATUS] {window} | "
         f"Session spend so far: {total_tokens:,} tokens over {calls} LLM call(s) "
         f"(informational only — not a limit) | "
-        f"Tool rounds remaining: {remaining}/{settings.max_tool_rounds} (the only binding limit)"
+        f"Tool rounds remaining: {remaining}/{settings.max_tool_rounds} ({limit_note})"
     )
-    if remaining == 1:
+    if renewals:
+        if remaining <= 2:
+            base += (
+                "\nThis round window is nearly spent, but the harness will renew "
+                f"it ({renewals} renewal(s) left) as long as tool work keeps "
+                "making progress. Keep going — do not wrap up — and keep any "
+                "finished deliverable written to disk as you go."
+            )
+    elif remaining == 1:
         base += (
             "\nLAST ROUND (tools disabled): summarize what you finished and "
             "explicitly state what is unfinished. Do not attempt tool calls."

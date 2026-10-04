@@ -9,6 +9,7 @@ agent path (scout, builtins, agent loop).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from pathlib import Path
@@ -18,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from config import settings
+from core.tools.atomic import atomic_write, target_lock
 
 router = APIRouter(tags=["skills"])
 logger = logging.getLogger("pernix.api.skills")
@@ -29,6 +31,10 @@ MTIME_TOLERANCE_S = 0.5
 
 @router.get("/api/skills")
 async def list_skills():
+    return await asyncio.to_thread(_list_skills)
+
+
+def _list_skills():
     """List all installed skills with metadata, enabled state, and performance."""
     from core.signals import from_row
     from core.skills.registry import get_skill_registry
@@ -112,25 +118,47 @@ async def list_proposals(
 
 
 @router.post("/api/skills/proposals/{proposal_id}/approve")
-async def approve_proposal(proposal_id: str):
+def approve_proposal(proposal_id: str):
     """Mark a proposal as approved (user will edit the skill manually)."""
     from db import models as db
 
     ok = db.resolve_skill_proposal(proposal_id, "approved")
     if not ok:
-        raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found")
+        if db.get_skill_proposal(proposal_id) is None:
+            raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found")
+        raise HTTPException(status_code=409, detail="Proposal is no longer pending; refresh its status")
     return {"ok": True, "status": "approved"}
 
 
 @router.post("/api/skills/proposals/{proposal_id}/reject")
-async def reject_proposal(proposal_id: str):
+def reject_proposal(proposal_id: str):
     """Mark a proposal as rejected."""
     from db import models as db
 
     ok = db.resolve_skill_proposal(proposal_id, "rejected")
     if not ok:
-        raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found")
+        if db.get_skill_proposal(proposal_id) is None:
+            raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found")
+        raise HTTPException(status_code=409, detail="Proposal is no longer pending; refresh its status")
     return {"ok": True, "status": "rejected"}
+
+
+@router.post("/api/skills/proposals/{proposal_id}/rollback")
+async def rollback_proposal_route(proposal_id: str):
+    """Undo an applied proposal by restoring the backup taken at apply time.
+
+    The counterpart to apply: a timestamped backup is only
+    half an undo while restoring it means a human copying a file by hand.
+    Restores the exact journaled backup if no newer edit would be lost,
+    marks the proposal 'rolled_back', and backs up the state it
+    replaced first, so the rollback is itself reversible.
+    """
+    from core.skills.proposals import ProposalApplyError, restore_skill_backup
+
+    try:
+        return {"ok": True, **(await asyncio.to_thread(restore_skill_backup, proposal_id, actor="user"))}
+    except ProposalApplyError as e:
+        raise HTTPException(status_code=404 if "not found" in str(e) else 400, detail=str(e)) from None
 
 
 @router.post("/api/skills/proposals/{proposal_id}/apply")
@@ -143,7 +171,7 @@ async def apply_proposal_route(proposal_id: str):
     from core.skills.proposals import ProposalApplyError, apply_proposal
 
     try:
-        result = apply_proposal(proposal_id)
+        result = await asyncio.to_thread(apply_proposal, proposal_id)
     except ProposalApplyError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -164,6 +192,10 @@ async def apply_proposal_route(proposal_id: str):
 
 @router.get("/api/skills/{name}")
 async def get_skill(name: str):
+    return await asyncio.to_thread(_get_skill, name)
+
+
+def _get_skill(name: str):
     """Get full skill details including instructions."""
     from core.skills.registry import get_skill_registry
 
@@ -186,7 +218,21 @@ async def get_skill(name: str):
     except OSError:
         mtime = None
 
+    from db import models as db
+
+    history = db.list_skill_proposals(skill_name=name, limit=50)
     return {
+        "proposal_history": [
+            {
+                "id": p["id"],
+                "status": p["status"],
+                "section": p["section"],
+                "problem": p["problem"],
+                "can_rollback": bool(p.get("backup_name") and p.get("after_revision")),
+            }
+            for p in history
+            if p["status"] in ("applied", "auto_applied", "applying", "rolled_back")
+        ],
         "name": skill.name,
         "description": skill.description,
         "version": skill.version,
@@ -206,7 +252,7 @@ class SkillUpdate(BaseModel):
 
 
 @router.put("/api/skills/{name}")
-async def update_skill(name: str, body: SkillUpdate):
+def update_skill(name: str, body: SkillUpdate):
     """Update a skill's SKILL.md content."""
     from core.skills.registry import get_skill_registry
 
@@ -216,16 +262,17 @@ async def update_skill(name: str, body: SkillUpdate):
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
     skill_md = skill.path / "SKILL.md"
-    # Optimistic concurrency, opt-in: only a caller that read the file sends
-    # base_mtime, so every other writer keeps last-writer-wins.
-    if body.base_mtime is not None and skill_md.is_file():
-        try:
-            current = skill_md.stat().st_mtime
-        except OSError:
-            current = None
-        if current is not None and abs(current - body.base_mtime) > MTIME_TOLERANCE_S:
-            return JSONResponse(status_code=409, content={"detail": "changed_on_disk", "mtime": current})
-    skill_md.write_text(body.content, encoding="utf-8")
+    with target_lock(skill_md):
+        # Optimistic concurrency, opt-in: only a caller that read the file sends
+        # base_mtime, so every other writer keeps last-writer-wins.
+        if body.base_mtime is not None and skill_md.is_file():
+            try:
+                current = skill_md.stat().st_mtime
+            except OSError:
+                current = None
+            if current is not None and abs(current - body.base_mtime) > MTIME_TOLERANCE_S:
+                return JSONResponse(status_code=409, content={"detail": "changed_on_disk", "mtime": current})
+        atomic_write(skill_md, body.content)
 
     # Rescan to pick up changes
     reg.rescan(Path(settings.skills_dir))
@@ -239,7 +286,7 @@ class SkillToggle(BaseModel):
 
 
 @router.patch("/api/skills/{name}")
-async def toggle_skill(name: str, body: SkillToggle):
+def toggle_skill(name: str, body: SkillToggle):
     """Enable or disable a skill."""
     from core.skills.registry import get_skill_registry
 
@@ -257,7 +304,7 @@ async def toggle_skill(name: str, body: SkillToggle):
 
 
 @router.delete("/api/skills/{name}")
-async def delete_skill(name: str):
+def delete_skill(name: str):
     """Delete a skill permanently."""
     from core.skills.registry import get_skill_registry
 
@@ -267,7 +314,8 @@ async def delete_skill(name: str):
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
     # Remove from filesystem
-    shutil.rmtree(skill.path)
+    with target_lock(skill.path / "SKILL.md"):
+        shutil.rmtree(skill.path)
 
     # Clear from disabled set first (idempotent — no-op if not disabled)
     # so a future skill of the same name doesn't inherit a stale disabled flag.

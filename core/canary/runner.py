@@ -5,12 +5,15 @@ manager.prompt (the cron precedent) → wait for the turn to finish (including
 reflect retries) → score by re-running the canary's gates against the final
 workspace state → canary_runs row → cleanup (gates deleted, temp dir removed).
 
+A canary whose directory carries a generate.py builds its prompt, its seed
+files and its gates from a fresh random seed on every run (core/canary/
+fixtures.py) — the seed is recorded in gate_results_json and the expected
+value exists nowhere the agent can read it.
+
 Sweeps run canaries sequentially and one sweep runs at a time (the scheduler
 holds the lock) — a sweep is a background measurement, not a throughput
-problem. Selection is change-driven: the nightly `scheduled` trigger is a
-small least-recently-run heartbeat over the non-parked canaries, `full`
-(model swap, deploy, "Run all") runs everything, and `post_batch`/`manual`
-run the caller's explicit names.
+problem. Nothing runs on a wall clock: a sweep is either the-world-changed
+(model swap, deploy, "Run all" — everything) or the caller's explicit names.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from config import settings
-from core.canary.parser import CanaryDef, load_canary, scan_canaries
+from core.canary.parser import DECLARABLE_TOOLS, SERVE_PLACEHOLDER, CanaryDef, load_canary, scan_canaries
 
 logger = logging.getLogger("pernix.canary")
 
@@ -37,16 +40,25 @@ _POLL_INTERVAL_S = 1.0
 # The canary sandbox: every canary session runs under this tool allowlist
 # (enforced at the agent schema intersection, scout filtering, and the
 # executor backstop — the same three points as scheduled-job charters).
-# Canary prompts include machine-authored content — auto-admitted tasks,
-# skill-verify runs whose injected SKILL.md may instruct mutating actions —
-# so the session gets computation and reads only: workspace/file/search
-# tools, memory RECALL (recall quality is part of what's measured; writes
-# stay denied by the denied_session_types belt), and read-only skill/tool
-# discovery so a skill-verify canary can load the skill under test. No
-# workers, no jobs, no notifications, no skill/tool/memory mutation. Bash
-# remains — the seed tasks need it — so this is a strong fence, not a jail;
-# the verify-gate allowlist proof narrows what machine-authored canaries
-# can make of it.
+# A canary may load a skill whose SKILL.md instructs mutating actions, so
+# the session gets computation and reads only: workspace/file/search tools
+# plus read-only skill/tool discovery, so a canary can load the skill under
+# test. No workers, no jobs, no notifications, no skill/tool mutation. Bash
+# remains — the seed tasks need it — so this is a strong fence, not a jail.
+#
+# Three names were REMOVED by the 2026-09-04 trust-loop hardening (W5):
+#
+#   recall / deep_recall — memory reads. The suite's job is to measure the
+#     pipeline under the treatment (skills, tools), and "eval data
+#     stays out of memory, memory stays out of eval" is only half true while
+#     a canary can look its own answer up. The scout's preload recall is
+#     fenced at the same time (scout.runner.memory_recall_denied); memory
+#     WRITES were already denied by the denied_session_types belt.
+#   list_gates — it prints each gate's command verbatim, and a canary gate
+#     command *is* the answer key (`grep -qx '13' answer.txt`). One tool call
+#     turned every scored task into an open-book exam. Generated fixtures
+#     make this decisive: the expected value exists only inside the gate
+#     command, so the command must not be readable from inside the run.
 CANARY_TOOL_ALLOWLIST = frozenset(
     {
         "bash",
@@ -58,13 +70,10 @@ CANARY_TOOL_ALLOWLIST = frozenset(
         "grep",
         "repl",
         "view_image",
-        "recall",
-        "deep_recall",
         "discover_skills",
         "load_skill",
         "read_skill_resource",
         "discover_tools",
-        "list_gates",
     }
 )
 # Only used on the degraded no-task-handle path in _wait_for_turn_end: how long
@@ -85,13 +94,27 @@ class CanaryRunResult:
     error: str = ""
     run_id: int | None = None
     flaky: bool = False
+    # Generated fixtures (W5): the seed this run's prompt/files/gates were
+    # built from, or None for a hand-written canary.
+    seed: int | None = None
+    # Post-run contamination findings (W5). Non-empty disqualifies the run:
+    # `passed` stays exactly as the gates scored it, `outcome` becomes
+    # 'contaminated', and the row is counted apart from passes and failures.
+    # See core/canary/contamination.py.
+    contamination: list[str] = field(default_factory=list)
 
     @property
     def outcome(self) -> str:
-        """pass | gate_fail | timeout | error | noop — the honest failure
-        taxonomy. Only gate_fail means "the agent ran and the work was wrong";
-        the others are wall-clock or harness trouble and must never feed the
-        per-task tripwire."""
+        """contaminated | pass | gate_fail | timeout | error | noop — the
+        honest failure taxonomy. Only gate_fail means "the agent ran and the
+        work was wrong"; the others are wall-clock or harness trouble and
+        must never count as a regression.
+
+        'contaminated' outranks every other value, pass included: a run that
+        broke isolation measured something other than the pipeline, so it can
+        neither convict a batch nor vouch for one."""
+        if self.contamination:
+            return "contaminated"
         if self.passed:
             return "pass"
         if self.error.startswith("timeout"):
@@ -116,7 +139,58 @@ class CanaryRunResult:
             "error": self.error,
             "run_id": self.run_id,
             "flaky": self.flaky,
+            "seed": self.seed,
+            "contamination": self.contamination,
         }
+
+
+def serve_root() -> Path:
+    """Where served fixtures live: a subdirectory of the live workspace,
+    because GET /workspace/{path} is the route that serves files."""
+    from core.canary.contamination import SERVE_DIRNAME
+
+    return Path(settings.workspace_dir).resolve() / SERVE_DIRNAME
+
+
+def serve_base_url(token: str) -> str:
+    """The URL of one run's served-fixture directory on Pernix's own server.
+
+    https exactly when the server terminates TLS itself (network mode);
+    http_get then verifies against Pernix's own certificate for this one
+    host:port (core.extensions.web._own_tls_verify) — never verify=False.
+    """
+    scheme = "https" if settings.network_enabled else "http"
+    return f"{scheme}://localhost:{settings.port}/workspace/{serve_root().name}/{token}"
+
+
+def _publish_served(canary: CanaryDef) -> tuple[CanaryDef, Path]:
+    """Move the canary's `serve:` files out of its workspace seed into a
+    fresh served directory, and point {{SERVE_BASE}} at it.
+
+    Returns the rewritten canary and the directory the caller must delete.
+    """
+    from dataclasses import replace
+    from secrets import token_hex
+
+    missing = [rel for rel in canary.serve if rel not in (canary.files or {})]
+    if missing:
+        raise ValueError(f"serve: {', '.join(missing)} not among the canary's files")
+    token = token_hex(8)
+    target = serve_root() / token
+    target.mkdir(parents=True, exist_ok=False)
+    for rel in canary.serve:
+        dest = target / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(canary.files[rel], encoding="utf-8")
+    base = serve_base_url(token)
+    files = {k: v for k, v in canary.files.items() if k not in set(canary.serve)}
+    gates = [{**g, "command": g["command"].replace(SERVE_PLACEHOLDER, base)} for g in canary.gates]
+    return replace(canary, prompt=canary.prompt.replace(SERVE_PLACEHOLDER, base), files=files, gates=gates), target
+
+
+def _run_allowlist(canary: CanaryDef) -> frozenset:
+    """The sandbox plus whatever read-only web tools the canary declared."""
+    return CANARY_TOOL_ALLOWLIST | (frozenset(canary.tools) & DECLARABLE_TOOLS)
 
 
 def _seed_workspace(canary: CanaryDef, ws: Path) -> None:
@@ -218,14 +292,30 @@ async def run_canary(
     # can still be reading the temp workspace.
     turn_started = False
     turn_ended = False
+    served: Path | None = None
     try:
+        # Generated fixture (W5): a fresh seed per run, so the prompt, the
+        # seed files and the expected answer are all different from last
+        # time. The seed is the only part that gets persisted — the expected
+        # value lives solely inside the gate command, which the canary
+        # session cannot read (list_gates is off CANARY_TOOL_ALLOWLIST).
+        if canary.generated:
+            from core.canary.fixtures import generate_variant, pick_seed
+
+            result.seed = pick_seed()
+            canary = generate_variant(canary, result.seed)
+            logger.info("Canary '%s' generated fixture with seed %d", canary.name, result.seed)
+
+        if canary.serve:
+            canary, served = _publish_served(canary)
+
         _seed_workspace(canary, tmp)
 
         sid = manager.create_session(title=f"Canary: {canary.name}", session_type="canary")
         result.session_id = sid
         session = manager.get(sid)
         session.workspace_override = str(tmp)
-        session.tool_allowlist = CANARY_TOOL_ALLOWLIST
+        session.tool_allowlist = _run_allowlist(canary)
         if canary.model:
             session.model_override = canary.model
 
@@ -252,6 +342,10 @@ async def run_canary(
         gate_results = await asyncio.to_thread(run_gates, sid, {}, 1)
         result.gate_results = [g.to_payload() for g in gate_results]
         result.passed = bool(gate_results) and all(g.passed for g in gate_results) and not result.error
+        if result.seed is not None:
+            from core.canary.fixtures import generation_record
+
+            result.gate_results.append(generation_record(result.seed))
         result.retries = int(turn_state(session).reflect_count or 0)
         try:
             result.tokens = int((db.get_session_usage(sid) or {}).get("total", 0))
@@ -262,6 +356,10 @@ async def run_canary(
         result.error = result.error or str(e)
     finally:
         result.duration_s = time.monotonic() - start
+        # Served fixtures are per-run and public on the workspace route:
+        # never leave one behind, whatever the turn is doing.
+        if served is not None:
+            shutil.rmtree(served, ignore_errors=True)
         # Gates are per-run scaffolding, never inherited by a later run.
         try:
             if sid:
@@ -292,6 +390,26 @@ async def run_canary(
                 tmp,
             )
 
+    # Post-run contamination scan (W5). Deliberately outside the try/finally
+    # above: a timed-out or errored run is exactly the kind that wandered, and
+    # the scan needs only the session id and the workspace PATH, not its
+    # contents — which the finally block has already reclaimed.
+    if sid:
+        try:
+            from core.canary.contamination import contamination_record, scan_session
+
+            result.contamination = scan_session(sid, str(tmp), canary.name)
+            if result.contamination:
+                logger.warning(
+                    "Canary '%s' run contaminated (%s)",
+                    canary.name,
+                    "; ".join(result.contamination),
+                )
+                # A record on the run row, not an alarm (3.2): no notice.
+                result.gate_results.append(contamination_record(result.contamination))
+        except Exception as e:
+            logger.warning("Contamination scan failed for '%s': %s", canary.name, e)
+
     try:
         result.run_id = db.add_canary_run(
             task=canary.name,
@@ -320,38 +438,16 @@ async def run_canary(
     return result
 
 
-def _heartbeat_pick(defs: list[CanaryDef], k: int) -> list[CanaryDef]:
-    """The k least-recently-run active canaries — the nightly heartbeat.
-
-    Least-recently-run is self-healing under park/unpark/create/retire and
-    bounds every active canary's history staleness, which the per-task
-    tripwire's green precondition depends on. Never-run canaries sort first;
-    ties break by name for determinism.
-    """
-    from db import models as db
-
-    def last_run_at(d: CanaryDef) -> str:
-        rows = db.list_canary_runs(task=d.name, limit=1)
-        return rows[0].get("created_at") or "" if rows else ""
-
-    return sorted(defs, key=lambda d: (last_run_at(d), d.name))[: max(1, k)]
-
-
 async def run_sweep(
-    trigger: str = "scheduled",
+    trigger: str = "manual",
     batch_id: str | None = None,
     names: list[str] | None = None,
+    report: bool = False,
 ) -> list[CanaryRunResult]:
-    """Run a selection of the suite sequentially.
-
-    Selection by trigger: `scheduled` is the nightly heartbeat — the
-    canary_heartbeat_per_night least-recently-run non-parked canaries, just
-    enough to keep every active canary's history warm. `full` runs
-    everything including parked canaries (model swaps, deploys, "Run all" —
-    the world changed, so every canary gets to speak). `post_batch` and
-    `manual` run the caller's explicit `names` (or everything, absent one) —
-    the post-batch probe's targeting happens at the scheduling layer, and a
-    human asking for a run means now.
+    """Run a selection of the suite sequentially: the caller's explicit
+    `names`, or every canary when none are given. `trigger` is only the
+    label recorded on each run row. `report` (full sweeps: deploy, model
+    swap, Run all) posts one notice for the whole sweep when it finishes.
     """
     if not settings.canary_enabled:
         logger.info("Canary sweep skipped: canary_enabled is off")
@@ -360,11 +456,6 @@ async def run_sweep(
     if names:
         wanted = set(names)
         defs = [d for d in defs if d.name in wanted]
-    elif trigger == "scheduled":
-        active = [d for d in defs if not d.parked]
-        defs = _heartbeat_pick(active, settings.canary_heartbeat_per_night) if active else []
-        if defs:
-            logger.info("Canary heartbeat: %s", ", ".join(d.name for d in defs))
     if not defs:
         logger.info("Canary sweep: no canaries to run")
         return []
@@ -372,22 +463,55 @@ async def run_sweep(
     for d in defs:
         results.append(await run_canary(d, trigger=trigger, batch_id=batch_id))
 
-    # Confirm-rerun: the tripwire's active probe demands two independent
-    # gate_fails before a batch can be auto-rolled-back, and the rerun has to
-    # happen HERE — inside the sweep job, under the sweep lock — because the
-    # lock is skip-not-queue: a rerun enqueued from the (read-only) tripwire
-    # would be silently dropped while any sweep was running. Only honest
-    # gate_fails earn a rerun; timeouts and harness breaks are suite-health
-    # concerns and re-running them proves nothing about the batch.
-    if trigger == "post_batch":
-        by_name = {d.name: d for d in defs}
-        for r in list(results):
-            d = by_name.get(r.task)
-            if d is None or d.flaky or r.outcome != "gate_fail":
-                continue
-            logger.info("Canary '%s' gate-failed post-batch — confirm-rerun", r.task)
-            results.append(await run_canary(d, trigger=trigger, batch_id=batch_id))
-
     passed = sum(1 for r in results if r.passed)
     logger.info("Canary sweep complete: %d/%d passed (trigger=%s)", passed, len(results), trigger)
+    if report:
+        report_sweep(results, trigger)
     return results
+
+
+def report_sweep(results: list[CanaryRunResult], trigger: str) -> None:
+    """One notice per full sweep. Never raises.
+
+    A canary that gate-failed — the agent ran and the work was wrong — is a
+    quiet bell item (canary.sweep_failed, coalesced on one subject so
+    repeated red sweeps fold into it). Anything else is an activity-log line
+    (canary.sweep_result), and a sweep where every canary passed closes the
+    open bell item. Timeouts, harness errors and contaminated runs never
+    ring the bell: they say nothing about whether the agent got worse.
+    """
+    if not results:
+        return
+    from core import notices
+
+    passed = sum(1 for r in results if r.passed)
+    failed = sorted(r.task for r in results if r.outcome == "gate_fail")
+    other = sorted(f"{r.task} ({r.outcome})" for r in results if not r.passed and r.outcome != "gate_fail")
+    link = {"kind": "tab", "tab": "canary"}
+    detail = ""
+    if failed:
+        detail += f" Failed: {', '.join(failed)}."
+    if other:
+        detail += f" Did not finish: {', '.join(other)}."
+    try:
+        if failed:
+            notices.notify(
+                "canary.sweep_failed",
+                f"Canary sweep: {len(failed)} of {len(results)} failed ({trigger})",
+                f"{passed} of {len(results)} canaries passed after the {trigger} sweep.{detail} "
+                "The Canary tab has each run's gate output.",
+                subject="suite",
+                link=link,
+            )
+            return
+        notices.notify(
+            "canary.sweep_result",
+            f"Canary sweep: {passed} of {len(results)} passed ({trigger})",
+            f"No canary gate-failed in the {trigger} sweep.{detail}",
+            subject="suite",
+            link=link,
+        )
+        if passed == len(results):
+            notices.resolve("canary.sweep_failed", "suite")
+    except Exception as e:  # a notice must never fail a sweep
+        logger.warning("Canary sweep report failed: %s", e)

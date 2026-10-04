@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from contextvars import ContextVar
 from pathlib import Path
 
 from config import settings
+
+logger = logging.getLogger("pernix.tools.paths")
 
 # Per-call workspace override, set by ToolRegistry.execute_sync from the
 # session's workspace_override before invoking a tool function and reset
@@ -40,13 +43,12 @@ PROTECTED_FILES = frozenset(
     }
 )
 
-# `.venv` is here for the same reason `.git` is, but the consequence is
-# sharper: data/workspace/.venv sits inside the only write root, and
-# ensure_workspace_venv_on_path() puts its site-packages on sys.path for every
-# source="custom" tool. Without this entry, file_write — a "safe" tool — could
-# drop a module into site-packages that the server then imports and executes
-# in-process, with the full server environment. bash still manages the venv
-# (pip, python -m venv); only the path-tool surface is closed.
+# `.venv` is here for the same reason `.git` is: data/workspace/.venv sits
+# inside the only write root, and its site-packages is what bash, the REPL and
+# skill scripts import from. Without this entry, file_write — a "safe" tool —
+# could plant a module there that later runs with no dangerous-tool gate.
+# bash still manages the venv (pip, python -m venv); only the path-tool
+# surface is closed.
 PROTECTED_DIRS = frozenset({".git", "__pycache__", ".venv"})
 
 
@@ -65,13 +67,42 @@ def workspace() -> Path:
 
 
 def workspace_home() -> Path:
-    """The effective working folder for the current tool call: the space
-    home when one is active (and no sandbox override is), else workspace().
-    Used for bash cwd/HOME and kernel spawn cwd — never for containment."""
+    """THE default working root for the current tool call: the space home when
+    one is active (and no sandbox override is), else workspace().
+
+    This is the one relative-path contract, and every tool shares it — bash's
+    cwd and HOME, the file tools' first resolution root, grep/glob's default
+    search root, a detached job's cwd, a gate's cwd. Six tools used to resolve
+    three different roots from one relative name, and because gates ran in the
+    global tree while a space session edited and tested in its own, a gate
+    could report PASS on work the foreground had correctly failed (2026-09-08).
+
+    Never a containment boundary — that stays workspace(), separate on purpose
+    so this default cannot harden into a cross-space access restriction.
+    """
     home = WORKSPACE_HOME.get()
     if home and WORKSPACE_OVERRIDE.get() is None:
         return Path(home).resolve()
     return workspace()
+
+
+def roots_for_context(workspace_override: str | None, workspace_home_dir: str | None) -> tuple[Path, Path]:
+    """(containment root, default cwd) for a caller that runs OUTSIDE the
+    per-call ContextVar window, computed from values handed to it explicitly.
+
+    The detached job runner and the turn-end gate sweep both owe the agent the
+    same contract but cannot read it from ambient thread state: a job outlives
+    the thread that started it, and gates run from a post-hook long after
+    execute_sync reset the ContextVars. The rule is the one above — an override
+    is a sandbox and wins outright, otherwise the space home is the cwd and the
+    global workspace stays the containment root.
+    """
+    if workspace_override:
+        root = Path(workspace_override).resolve()
+        return root, root
+    root = Path(settings.workspace_dir).resolve()
+    home = Path(workspace_home_dir).resolve() if workspace_home_dir else root
+    return root, home
 
 
 # Harness-data subtrees that live under DATA_DIR, never under the workspace.
@@ -81,7 +112,6 @@ def workspace_home() -> Path:
 HARNESS_DATA_DIRS = frozenset(
     {
         "adaptive",
-        "telos",
         "memories",
         "canaries",
         "kernels",
@@ -90,7 +120,6 @@ HARNESS_DATA_DIRS = frozenset(
         "agent",
         "cache",
         "workflows",
-        "candor",
     }
 )
 
@@ -107,7 +136,7 @@ def root_mismatch_hint(path: str) -> str:
     """Suffix explaining a workspace-root failure caused by a harness-data path.
 
     glob/grep/file_read/file_write resolve relative paths under the workspace
-    root, so `data/telos` silently becomes <workspace>/data/telos and fails
+    root, so `data/memories` silently becomes <workspace>/data/memories and fails
     with an error that reads as "wrong path" when the real fault is "wrong
     root". Returns "" unless the path is one of those cases — an ordinary
     workspace typo must keep its clean error.
@@ -136,9 +165,9 @@ def root_mismatch_hint(path: str) -> str:
         if not target.is_relative_to(data) or target.is_relative_to(ws):
             return ""
     else:
-        # The tools resolve relative paths under the workspace; if that
+        # The tools resolve relative paths under the contract roots; if that
         # resolution would have worked, the root was never the problem.
-        if (ws / raw).exists():
+        if any((root / raw).exists() for root in relative_path_roots()):
             return ""
         parts = Path(raw).parts
         first = parts[0] if parts else ""
@@ -153,10 +182,10 @@ def root_mismatch_hint(path: str) -> str:
             return ""
 
     return (
-        f" — resolved against workspace root ({ws}). Harness data (telos ledgers, memory "
-        f"files, canary state) lives outside the workspace at {data}; use bash with an "
-        f"absolute path (e.g. ls {data}/telos/questions/) or purpose-built tools "
-        f"(telos_status, recall, search_sessions)."
+        f" — resolved against workspace root ({ws}). Harness data (memory files, canary "
+        f"state, session kernels) lives outside the workspace at {data}; use bash with an "
+        f"absolute path (e.g. ls {data}/memories/) or purpose-built tools "
+        f"(recall, search_sessions)."
     )
 
 
@@ -266,6 +295,39 @@ def _relative_resolution_roots(roots: list[Path]) -> list[Path]:
     return allowed or roots
 
 
+def relative_path_roots() -> list[Path]:
+    """The roots a relative path may land in, in contract order: the space home
+    (when active), then the global workspace.
+
+    Public because the search tools resolve their `path` argument through the
+    same rule the file tools use — `impl` has to name one directory to grep and
+    to file_read alike. Deliberately not allowed_read_roots(): /tmp, skills and
+    the spill trees stay absolute-path-only, so sharing a resolver never hands
+    one tool the union of every tool's roots.
+    """
+    return _relative_resolution_roots(_base_roots())
+
+
+def resolve_workspace_path(path: str) -> Path:
+    """Resolve a search tool's path argument under the shared contract.
+
+    The same doubled-prefix guard, prefer-existing scan and global fallback the
+    file tools get, contained to relative_path_roots(). Raises ValueError when
+    the path escapes them or names a protected location.
+    """
+    return _resolve_within(path, relative_path_roots(), create_roots=False)
+
+
+def owning_root(target: Path) -> Path:
+    """Which contract root a resolved path came from — the effective root a
+    tool displays so the agent can see which project it just hit."""
+    roots = relative_path_roots()
+    for root in roots:
+        if target.is_relative_to(root):
+            return root
+    return roots[0] if roots else workspace()
+
+
 def check_protected(resolved: Path, roots: list[Path]) -> None:
     """Raise ValueError if path targets a protected location.
 
@@ -308,6 +370,16 @@ def _resolve_within(path: str, roots: list[Path], create_roots: bool = False) ->
     # Applies to writes too, deliberately: edits land on the file where it
     # lives; only genuinely new files default into the home. Without a home
     # the historical rule stands unchanged: first root wins outright.
+    # The doubled-prefix check runs BEFORE any root scan, deliberately. Once
+    # the mistake has been made even once, the nested tree EXISTS, so both
+    # "this candidate exists" and "this candidate's parent exists" point at
+    # the orphan and every later write compounds it. The prefix is the
+    # stronger signal precisely because the wrong directory may be real.
+    redirected = _redirect_doubled_home_path(path, roots)
+    if redirected is not None:
+        check_protected(redirected, roots)
+        return redirected
+
     prefer_existing = WORKSPACE_HOME.get() is not None and WORKSPACE_OVERRIDE.get() is None
     # ...but only across the two workspace-ish roots. Scanning EVERY root for
     # an existing file let a bare name be captured by a later root that has
@@ -318,19 +390,74 @@ def _resolve_within(path: str, roots: list[Path], create_roots: bool = False) ->
     # which is the loop above.
     scan_roots = _relative_resolution_roots(roots) if prefer_existing else roots
     first_valid: Path | None = None
+    parent_exists: Path | None = None
     for root in scan_roots:
         candidate = (root / path).resolve()
         if candidate.is_relative_to(root):
             if not prefer_existing or candidate.exists():
                 check_protected(candidate, roots)
                 return candidate
+            # A file that does not exist yet still belongs next to its
+            # siblings: prefer the root where the containing directory is
+            # already there. Without this, a NEW file always fell to the
+            # space home even when the directory it named lived at the
+            # workspace root — which is how the Agent Mesh build wrote
+            # `spaces/agent-mesh/impl/Makefile` into
+            # <home>/spaces/agent-mesh/impl/ instead of the impl/ directory
+            # holding the rest of the package (2026-09-08).
+            if parent_exists is None and candidate.parent.is_dir():
+                parent_exists = candidate
             if first_valid is None:
                 first_valid = candidate
+    if parent_exists is not None:
+        check_protected(parent_exists, roots)
+        return parent_exists
     if first_valid is not None:
         check_protected(first_valid, roots)
         return first_valid
 
     raise ValueError(f"Path not within allowed directories: {path}")
+
+
+def _redirect_doubled_home_path(path: str, roots: list[Path]) -> Path | None:
+    """Catch a relative path that repeats the space home's own prefix.
+
+    A session in a space has its file-tool root at the space home, e.g.
+    <workspace>/spaces/agent-mesh. Writing the workspace-relative path
+    `spaces/agent-mesh/impl/x.py` from there produces
+    <workspace>/spaces/agent-mesh/spaces/agent-mesh/impl/x.py — a phantom tree
+    that looks right in every listing until you notice the doubling. The agent
+    that hit this then spent rounds trying to delete the orphan.
+
+    Nobody means to nest a space inside itself, so when the relative path
+    starts with the home's own workspace-relative prefix, resolve it against
+    the workspace root instead and say so in the log.
+    """
+    home = WORKSPACE_HOME.get()
+    if not home or WORKSPACE_OVERRIDE.get() is not None:
+        return None
+    try:
+        ws = workspace()
+        resolved_home = Path(home).resolve()
+        prefix = resolved_home.relative_to(ws)
+    except (ValueError, OSError):
+        return None  # home is not under the workspace — no doubling to detect
+    if prefix == Path("."):
+        return None
+    rel = Path(path)
+    if not rel.parts[: len(prefix.parts)] == prefix.parts:
+        return None
+    candidate = (ws / rel).resolve()
+    if not candidate.is_relative_to(ws):
+        return None
+    logger.info(
+        "Path %r repeats this session's space prefix %r — resolving against the "
+        "workspace root (%s) rather than nesting the space inside itself",
+        path,
+        str(prefix),
+        candidate,
+    )
+    return candidate
 
 
 def safe_read_path(path: str) -> Path:
@@ -343,17 +470,47 @@ def safe_write_path(path: str) -> Path:
     return _resolve_within(path, allowed_write_roots(), create_roots=True)
 
 
-def ensure_workspace_venv_on_path() -> None:
-    """Add workspace venv site-packages to sys.path (idempotent).
+def build_shell_env(workspace_root: Path | None = None, run_dir: Path | None = None) -> dict[str, str]:
+    """Environment for a shell the agent launches — the bash tool and the
+    background-job runner alike.
 
-    Core tools run in the project venv. Custom tools (source='custom') need
-    packages installed via install_package into data/workspace/.venv.
-    Called before any custom_* module is imported or reloaded.
+    One builder for both because they had drifted: job_start used a bare
+    os.environ.copy(), so `python3 script.py` inside a job could not import
+    packages the bash tool had just installed into the workspace venv (field
+    case, session 3dc5a307d751: sympy imported fine in bash, ImportError in
+    the job). Applies the configured shell_env_mode filter, then always pins
+    the sandbox PATH/HOME/VIRTUAL_ENV.
     """
-    import glob
+    import os
+    import subprocess
     import sys
 
-    ws_lib = Path(settings.workspace_dir).resolve() / ".venv" / "lib"
-    site_pkgs = next(glob.iglob(str(ws_lib / "python*" / "site-packages")), None)
-    if site_pkgs and site_pkgs not in sys.path:
-        sys.path.insert(0, site_pkgs)
+    ws = workspace() if workspace_root is None else workspace_root
+    home = workspace_home() if run_dir is None else run_dir
+
+    # Ensure workspace venv exists for Python/pip isolation
+    venv_dir = ws / ".venv"
+    if not (venv_dir / "bin" / "python").exists():
+        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], capture_output=True, timeout=60)
+
+    # Build environment based on configured mode
+    if settings.shell_env_mode == "passthrough":
+        env = dict(os.environ)
+    elif settings.shell_env_mode == "denylist":
+        denied = set(settings.shell_env_denylist)
+        env = {k: v for k, v in os.environ.items() if k not in denied}
+    else:  # allowlist
+        allowed = set(settings.shell_env_allowlist)
+        env = {k: v for k, v in os.environ.items() if k in allowed}
+    # Always override PATH and HOME for sandbox
+    # Prepend workspace venv bin so pip/python resolve to venv, not system
+    env["PATH"] = f"{venv_dir / 'bin'}:/usr/local/bin:/usr/bin:/bin"
+    env["HOME"] = str(home)
+    env["VIRTUAL_ENV"] = str(venv_dir)
+    # Python block-buffers stdout when it isn't a tty, so a long-running
+    # script's progress prints sit in an unflushed buffer — and the
+    # [partial output before timeout] block comes back empty exactly when
+    # it matters most (field case c93232a0521b: a 30-minute search printed
+    # progress the whole way and the timeout returned none of it).
+    env["PYTHONUNBUFFERED"] = "1"
+    return env

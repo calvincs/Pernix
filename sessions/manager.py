@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
-from typing import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Awaitable, Callable, NamedTuple
 
 from config import settings
+from core import notices
 from db import models as db
 from sessions import state_v2 as sv2
 from sessions.state import AgentSession, PendingMessage, TurnState
@@ -22,6 +25,11 @@ logger = logging.getLogger("pernix.sessions")
 # the current turn" still produces its own turn. Mid-turn injection has its
 # own dedicated endpoint (POST /api/chat/inject) and is unaffected.
 RAPID_FIRE_WINDOW_SECONDS = 3.0
+# Eval-retry budget per turn. The plumbing stays until follow-up C2 retires
+# it, but nothing has requested an eval retry since the feature-eval loop and
+# its eval_max_retries setting were removed (2026-10 prune).
+_EVAL_MAX_RETRIES = 2
+
 _COMBINED_PREFIX = "[Combined rapid-fire messages]"
 _COMBINED_ITEM_RE = re.compile(r"^(\d+)\.\s", re.MULTILINE)
 
@@ -41,6 +49,160 @@ def _combine_rapid_fire(existing: str, addition: str) -> str:
     return f"{_COMBINED_PREFIX}\n\n1. {existing}\n\n2. {addition}"
 
 
+# ---------------------------------------------------------------------------
+# Admission and execution: the contract between a caller and one turn
+# ---------------------------------------------------------------------------
+#
+# Two unrelated things used to be called "the session's settings": the
+# configuration a session carries BETWEEN turns (a user's pinned model, a
+# worker kind's confinement) and the options one unit of scheduled work needs
+# for the turn it is about to run (a cron job's model pin and tool charter).
+# The scheduler wrote the second kind straight onto AgentSession before
+# prompt() had decided whether the message would start a turn or queue behind
+# one. On a busy session that meant the USER's live turn ran under the JOB's
+# charter, the job's own turn later ran with nothing, and the cleanup assigned
+# None over whatever the user had pinned — unrecoverably, since the DB restore
+# is worker-only.
+#
+# ExecOptions is the per-turn half: it rides with the admitted message, is
+# applied when THAT turn starts, and is lifted back to the value it displaced
+# when that turn ends. Never to None.
+#
+# TurnExecution is the handle the admitting caller keeps. It answers the one
+# question a scheduler actually needs and previously could not ask: did the
+# work this fire admitted reach a terminal outcome, and which one? Admission
+# and outcome are separate facts — a caller that stops WAITING has learned
+# nothing about the turn.
+
+
+@dataclass(frozen=True)
+class ExecOptions:
+    """Execution settings owned by one admitted message, not by the session.
+
+    model            per-turn model pin (session.model_override for its turn)
+    tool_allowlist   exclusive tool charter for the turn (schema + executor)
+    context_budget   context budget matching `model`; without it a pinned run
+                     compiles against the previous model's window
+    """
+
+    model: str | None = None
+    tool_allowlist: frozenset | None = None
+    context_budget: int | None = None
+
+    def is_empty(self) -> bool:
+        return not (self.model or self.tool_allowlist or self.context_budget)
+
+
+# Terminal results a TurnExecution settles on. Only COMPLETED means the turn
+# ran and ended cleanly; everything else is a caller-visible non-success.
+EXEC_COMPLETED = "completed"
+EXEC_FAILED = "failed"
+EXEC_CANCELLED = "cancelled"
+EXEC_REJECTED = "rejected"
+EXEC_DROPPED = "dropped"
+EXEC_ABSORBED = "absorbed"
+
+# What prompt() decided about a message. Deliberately NOT an outcome.
+ADMIT_STARTED = "started"
+ADMIT_QUEUED = "queued"
+ADMIT_ABSORBED = "absorbed"
+ADMIT_REJECTED = "rejected"
+
+
+class TurnExecution:
+    """One admitted unit of work, from admission through terminal outcome.
+
+    The handle is stable: it is created at admission, survives the message
+    sitting in the queue behind another turn, and is settled exactly once by
+    whichever path ends the work — the turn's own finally, the cancel that
+    cleared the queue, or the admission that refused it. `wait()` resolves
+    only on that terminal event, so a caller that times out waiting knows it
+    still does not have an outcome, which is the whole point.
+    """
+
+    __slots__ = (
+        "session_id",
+        "options",
+        "origin",
+        "msg_id",
+        "state",
+        "result",
+        "error",
+        "termination_reason",
+        "_done",
+    )
+
+    def __init__(self, session_id: str, options: "ExecOptions | None" = None, origin: str = "user"):
+        self.session_id = session_id
+        self.options = options
+        self.origin = origin
+        self.msg_id: int | None = None
+        self.state = "pending"  # pending -> running -> <terminal result>
+        self.result: str | None = None
+        self.error: str | None = None
+        self.termination_reason: str | None = None
+        self._done = asyncio.Event()
+
+    @property
+    def settled(self) -> bool:
+        return self.result is not None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.result == EXEC_COMPLETED
+
+    def mark_running(self) -> None:
+        if not self.settled:
+            self.state = "running"
+
+    def settle(self, result: str, error: str | None = None, termination_reason: str | None = None) -> bool:
+        """Record the terminal outcome. First writer wins; True if that was us."""
+        if self.settled:
+            return False
+        self.result = result
+        self.error = error
+        self.termination_reason = termination_reason
+        self.state = result
+        self._done.set()
+        return True
+
+    async def wait(self) -> str | None:
+        """Block until the work reaches a terminal outcome, then name it."""
+        await self._done.wait()
+        return self.result
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<TurnExecution {self.session_id[:12]} {self.state} origin={self.origin}>"
+
+
+@dataclass(frozen=True)
+class Admission:
+    """What prompt() decided about one message — never whether it succeeded."""
+
+    outcome: str
+    session_id: str
+    execution: TurnExecution
+    reason: str = ""
+    msg_id: int | None = None
+
+    @property
+    def accepted(self) -> bool:
+        return self.outcome in (ADMIT_STARTED, ADMIT_QUEUED)
+
+    @property
+    def rejected(self) -> bool:
+        return self.outcome == ADMIT_REJECTED
+
+
+class _AppliedExec(NamedTuple):
+    """An execution whose options are live on a session, plus what they displaced."""
+
+    execution: TurnExecution
+    model_override: str | None
+    tool_allowlist: frozenset | None
+    context_budget_override: int | None
+
+
 def _build_retry_directive(session) -> str:
     """Collect this turn's corrective signal — the text a retry must react to.
 
@@ -48,7 +210,7 @@ def _build_retry_directive(session) -> str:
     session.turn.reflect_lessons, and the eval harness writes per-feature judge
     feedback to session.turn.eval_feedback. Eval's used to exist only inside an
     `eval.retry` SSE event, so an eval retry re-ran a byte-identical turn and
-    failed the same features again up to eval_max_retries times.
+    failed the same features again up to _EVAL_MAX_RETRIES times.
 
     Returns "" for a normal (non-retry) turn.
     """
@@ -100,9 +262,9 @@ def _broadcast_session_timeout_notification(session) -> None:
     so the user doesn't have to guess from a silent UI.
 
     Best-effort. Never re-raises — failure to notify must not mask the
-    underlying error path. Fires on the same channels as reflect
-    notifications: db.notifications (bell panel), session SSE
-    (dialog.notification event), and global event bus (push subscribers).
+    underlying error path. Tier and delivery come from the sessions.timeout
+    category (interrupt for a normal session, bell for cron, nothing for
+    canary/worker).
     """
     try:
         session_id = session.session_id
@@ -119,39 +281,16 @@ def _broadcast_session_timeout_notification(session) -> None:
             "Send a new message to give it a fresh time window — your reply "
             "resets the clock."
         )
-        notification = {
-            "type": "dialog.notification",
-            "title": title,
-            "body": body,
-            "urgency": "high",
-            "source_session_id": session_id,
-        }
-        try:
-            nid = db.add_notification(
-                session_id=session_id,
-                title=title,
-                body=body,
-                urgency="high",
-            )
-            notification["notification_id"] = nid
-        except Exception as _e:
-            logger.debug(
-                "Persisting session-timeout notification for %s failed: %s",
-                session_id,
-                _e,
-            )
-        # Session-scoped event for SSE clients on this session's stream.
-        try:
-            session.emit_event(notification)
-        except Exception as _e:
-            logger.debug("emit_event for session timeout failed: %s", _e)
-        # Global event bus for push subscribers + global notification stream.
-        try:
-            from core.events import get_event_bus
-
-            get_event_bus().emit({**notification, "session_id": session_id})
-        except Exception as _e:
-            logger.debug("event_bus emit for session timeout failed: %s", _e)
+        # core.notices records the row and does the SSE + push emission;
+        # broadcast() also reaches this session's own stream subscribers.
+        notices.notify(
+            "sessions.timeout",
+            title,
+            body,
+            session_id=session_id,
+            link={"kind": "session", "id": session_id},
+            session_type=getattr(session, "session_type", None),
+        )
     except Exception as _outer:
         logger.warning(
             "Broadcasting session-timeout notification failed: %s",
@@ -159,25 +298,59 @@ def _broadcast_session_timeout_notification(session) -> None:
         )
 
 
+# The states whose exit routes through _map_termination_to_v2_reason: the
+# loop-complete finally in _run_agent_safe and the reflect-retry finally both
+# use this tuple. It is a module constant so the regression test can multiply
+# it by the mapping below and assert every resulting (state, reason) pair is
+# declared in sv2.TRANSITIONS — an undeclared pair is rejected silently and
+# strands the turn until the reaper.
+TERMINATION_ROUTED_STATES: tuple[sv2.SessionStateV2, ...] = (
+    sv2.SessionStateV2.PROCESSING,
+    sv2.SessionStateV2.PAUSE_REQUESTED,
+)
+
+# agent.py's termination_reason string → the v2 (reason, TerminationReason)
+# pair the FINALIZING edge carries. Module-level for the same reason as
+# TERMINATION_ROUTED_STATES: the test enumerates it.
+TERMINATION_TO_V2: dict[str, tuple[str, sv2.TerminationReason]] = {
+    "complete": ("loop-complete", sv2.TerminationReason.COMPLETE),
+    "round_ceiling": ("round-ceiling", sv2.TerminationReason.ROUND_CEILING),
+    # The stuck detector force-breaking a repetition loop is its own wall:
+    # it fires at any round number, so it must not be logged as the round
+    # budget running out.
+    "stuck_loop": ("stuck-loop", sv2.TerminationReason.STUCK_LOOP),
+    "compaction_failed": ("compaction-failed", sv2.TerminationReason.COMPACTION_FAILED),
+    # agent.py uses `return` (not `raise`) for stream/failover errors, so no
+    # exception propagates to _run_agent_safe's except block. The finally's
+    # PROCESSING branch uses this mapping — without "error" here it would
+    # fall through to the default and log the turn as "loop-complete/complete".
+    "error": ("agent-error", sv2.TerminationReason.ERROR),
+    # Soft-land for LLM session-time budget exhaustion. Treat as a clean
+    # transition (loop-complete) so the turn ends in IDLE_READY rather
+    # than going through the error path, but record BUDGET_EXHAUSTED in
+    # the state log so post-mortem queries can distinguish "agent ran
+    # out of LLM time mid-turn" from a genuine "complete" outcome.
+    "budget_exhausted": ("loop-complete", sv2.TerminationReason.BUDGET_EXHAUSTED),
+}
+
+
+def finalize_failure_reason(current: sv2.SessionStateV2) -> str:
+    """The reason _run_agent_safe uses when turn finalization itself raised.
+
+    Whatever state finalization died in has to reach IDLE_READY or the
+    session is stranded with no post hooks and a hidden cancel control.
+    FINALIZING has its own named reason; every other state borrows the
+    reaper's. A function rather than an inline conditional so the regression
+    test can run every state through it and check the edge is declared —
+    CANCELLING was not, and a cancel that raced the finally stalled there.
+    """
+    return "finalize-error" if current is sv2.SessionStateV2.FINALIZING else "reaper-unstick"
+
+
 def _map_termination_to_v2_reason(tr: str | None) -> tuple[str, sv2.TerminationReason]:
     """Translate agent.py's legacy termination_reason string into a v2
     (reason, TerminationReason) pair for the PROCESSING → FINALIZING edge."""
-    mapping = {
-        "complete": ("loop-complete", sv2.TerminationReason.COMPLETE),
-        "round_ceiling": ("round-ceiling", sv2.TerminationReason.ROUND_CEILING),
-        "compaction_failed": ("compaction-failed", sv2.TerminationReason.COMPACTION_FAILED),
-        # agent.py uses `return` (not `raise`) for stream/failover errors, so no
-        # exception propagates to _run_agent_safe's except block. The finally's
-        # PROCESSING branch uses this mapping — without "error" here it would
-        # fall through to the default and log the turn as "loop-complete/complete".
-        "error": ("agent-error", sv2.TerminationReason.ERROR),
-        # Soft-land for LLM session-time budget exhaustion. Treat as a clean
-        # transition (loop-complete) so the turn ends in IDLE_READY rather
-        # than going through the error path, but record BUDGET_EXHAUSTED in
-        # the state log so post-mortem queries can distinguish "agent ran
-        # out of LLM time mid-turn" from a genuine "complete" outcome.
-        "budget_exhausted": ("loop-complete", sv2.TerminationReason.BUDGET_EXHAUSTED),
-    }
+    mapping = TERMINATION_TO_V2
     key = tr or "complete"
     if key not in mapping:
         # A termination reason added in agent.py but not mapped here would
@@ -214,6 +387,59 @@ def _apply_space_fields(session: AgentSession, space_id: str | None) -> None:
             session.workspace_home = str(home)
     except Exception as e:
         logger.warning("workspace_home setup failed for space %s: %s", space_id, e)
+
+
+def _durable_termination(session_id: str) -> str | None:
+    """How this session's last turn ended, from the state log.
+
+    The in-memory field is the fresh source while a session is resident; this
+    is the answer after a reap or a restart, and the two must agree or a capped
+    worker reads as a clean one.
+    """
+    try:
+        recent = db.recent_termination_reasons(session_id, 1)
+        return recent[0] if recent else None
+    except Exception as e:
+        logger.debug("durable termination lookup failed for %s: %s", session_id, e)
+        return None
+
+
+def _restore_worker_goal(worker_id: str, row: dict) -> int | None:
+    """The goal a rehydrated worker inherited at spawn, or None.
+
+    Two sources, in order of how much they prove:
+
+      1. The worker's own token_usage rows. A worker bills its inherited goal
+         directly, so a row carrying a goal_id IS the attribution — nothing
+         infers anything.
+      2. Failing that (a worker that had not spent yet), the parent's currently
+         active goal — but ONLY when that goal already existed when the worker
+         was created. A parent that finished one objective and started another
+         must not have the new one charged retroactively to old work.
+    """
+    try:
+        goal_id = db.inherited_goal_id(worker_id)
+        if goal_id is not None:
+            return goal_id
+    except Exception as e:
+        logger.debug("inherited_goal_id lookup failed for %s: %s", worker_id, e)
+    parent_id = row.get("parent_session_id")
+    if not parent_id:
+        return None
+    try:
+        goal = db.get_active_goal(parent_id)
+        if not goal:
+            return None
+        # session_goals stamps started_at, not created_at. An unstamped goal
+        # cannot prove it predates the worker, so it does not get the benefit
+        # of the doubt.
+        started = goal.get("started_at") or ""
+        created = row.get("created_at") or ""
+        if started and created and started <= created:
+            return goal.get("id")
+    except Exception as e:
+        logger.debug("parent goal lookup failed for %s: %s", worker_id, e)
+    return None
 
 
 def kill_session_processes(session, *, kill_after: float = 3.0) -> int:
@@ -265,6 +491,19 @@ class SessionManager:
         self._global_subscribers: list[asyncio.Queue] = []  # global notification listeners
         # Strong refs for detached recovery tasks — see _spawn_detached.
         self._detached_tasks: set[asyncio.Task] = set()
+        # Admitted-but-not-yet-started executions, per session, keyed by the
+        # queued message's row id. A queued cron job's options and its outcome
+        # handle live here until _process_pending pops the entry that owns
+        # them — or until the queue is cancelled or drained without them.
+        self._pending_execs: dict[str, dict[int, TurnExecution]] = {}
+        # The execution whose options are currently applied to each session,
+        # carrying the session-level values it displaced so they can be put
+        # back rather than nulled.
+        self._active_exec: dict[str, _AppliedExec] = {}
+        # Every live turn task, not just the one session.task happens to point
+        # at. Shutdown drains this: session.task is overwritten by the next
+        # turn, so a snapshot taken from it misses anything admitted since.
+        self._live_turn_tasks: set[asyncio.Task] = set()
 
     def _spawn_detached(self, coro, label: str) -> asyncio.Task:
         """Schedule a fire-and-forget task, retaining a reference to it.
@@ -295,6 +534,210 @@ class SessionManager:
 
         task.add_done_callback(_done)
         return task
+
+    # ------------------------------------------------------------------
+    # Admission gate, turn registry, per-turn execution options
+    # ------------------------------------------------------------------
+
+    def close_admission(self, reason: str = "shutdown") -> None:
+        """Refuse every new turn from here on.
+
+        Called BEFORE the shutdown drain takes its snapshot. The flag used to
+        go up at the same point but only guarded the pending dispatch and the
+        worker resume — prompt() itself never read it, so a cron fire
+        landing in the window between the snapshot and the loop
+        stopping created a brand new agent task that the drain had already
+        walked past. Producers that live on tool threads (orchestration's
+        message_worker / resume_worker, which reach the loop through
+        run_coroutine_threadsafe) are never cancelled by shutdown at all, so
+        the gate has to be inside prompt() to cover them.
+        """
+        self.shutting_down = True
+        logger.info("Session admission closed (%s)", reason)
+
+    def _start_turn_task(self, session: AgentSession, coro) -> asyncio.Task:
+        """Create a turn task and register it for the shutdown drain."""
+        task = asyncio.create_task(coro)
+        self._live_turn_tasks.add(task)
+        task.add_done_callback(self._live_turn_tasks.discard)
+        return task
+
+    def live_turn_tasks(self) -> list[asyncio.Task]:
+        return [t for t in self._live_turn_tasks if not t.done()]
+
+    async def drain_turns(self, timeout: float = 5.0) -> int:
+        """Cancel and await every live turn, re-collecting until none are left.
+
+        Admission must already be closed, or this races the producers it is
+        trying to outlive. Re-collecting is what makes it a drain rather than
+        a snapshot: a dispatch that was past the gate and mid-persist when
+        admission closed still creates its task, and that task has to be
+        awaited before the LLM client, the MCP bridge and the browser go away.
+        Returns the number of distinct tasks it cancelled.
+        """
+        if not self.shutting_down:
+            raise RuntimeError("close_admission() must run before drain_turns()")
+        deadline = time.monotonic() + timeout
+        seen: set[asyncio.Task] = set()
+        while True:
+            live = self.live_turn_tasks()
+            # Belt and braces: a turn task created by something that bypassed
+            # _start_turn_task is still reachable through the session.
+            for sid in self.active_session_ids():
+                sess = self.get(sid)
+                task = getattr(sess, "task", None) if sess is not None else None
+                if task is not None and not task.done() and task not in live:
+                    live.append(task)
+            if not live:
+                return len(seen)
+            seen.update(live)
+            for task in live:
+                task.cancel()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("%d agent task(s) still running at the drain deadline", len(live))
+                return len(seen)
+            try:
+                await asyncio.wait_for(asyncio.gather(*live, return_exceptions=True), timeout=remaining)
+            except asyncio.TimeoutError:
+                logger.warning("%d agent task(s) did not stop within the drain window", len(live))
+                return len(seen)
+
+    def _reject_admission(
+        self,
+        execution: TurnExecution,
+        session: AgentSession | None,
+        session_id: str,
+        reason: str,
+    ) -> Admission:
+        """Refuse a message and settle its handle so the caller sees why."""
+        execution.settle(EXEC_REJECTED, error=reason)
+        if session is not None:
+            session.emit_event({"type": "session.prompt_rejected", "reason": reason})
+        logger.info("Session %s prompt rejected: %s", session_id[:12], reason)
+        return Admission(ADMIT_REJECTED, session_id, execution, reason=reason)
+
+    def _register_pending_exec(self, session_id: str, msg_id: int | None, execution: TurnExecution) -> None:
+        """Park an execution against the queued row that will eventually run it."""
+        if msg_id is None:
+            return
+        execution.msg_id = msg_id
+        self._pending_execs.setdefault(session_id, {})[msg_id] = execution
+
+    def _take_pending_exec(self, session_id: str, msg_id: int | None) -> TurnExecution | None:
+        by_id = self._pending_execs.get(session_id)
+        if not by_id or msg_id is None:
+            return None
+        found = by_id.pop(msg_id, None)
+        if not by_id:
+            self._pending_execs.pop(session_id, None)
+        return found
+
+    def _reap_pending_execs(
+        self,
+        session: AgentSession,
+        *,
+        result: str = EXEC_DROPPED,
+        error: str | None = None,
+        msg_ids: list | None = None,
+    ) -> None:
+        """Settle executions whose queue entry is gone without having run.
+
+        A queued message can leave the deque without a turn: the user cancels,
+        a continuation is refused at dispatch, the pending-message endpoint
+        removes it. Each of those is a terminal outcome for whoever admitted
+        the work — leaving the handle unsettled would hang a waiting caller
+        and, for cron, leave the run row reading 'running' forever.
+        """
+        by_id = self._pending_execs.get(session.session_id)
+        if not by_id:
+            return
+        if msg_ids is None:
+            queued: set[int] = set()
+            for raw in session.pending_messages:
+                try:
+                    entry = PendingMessage.coerce(raw)
+                except Exception:
+                    continue
+                if entry.msg_id is not None:
+                    queued.add(entry.msg_id)
+            msg_ids = [m for m in list(by_id) if m not in queued]
+        for msg_id in list(msg_ids):
+            if msg_id is None:
+                continue
+            found = by_id.pop(msg_id, None)
+            if found is not None and found.settle(result, error=error):
+                logger.info(
+                    "Session %s: queued execution for msg %s settled as %s",
+                    session.session_id[:12],
+                    msg_id,
+                    result,
+                )
+        if not by_id:
+            self._pending_execs.pop(session.session_id, None)
+
+    def _apply_execution(self, session: AgentSession, execution: TurnExecution | None) -> None:
+        """Put one turn's execution options on the session, saving what they displace.
+
+        Self-healing: a predecessor that left through one of _finalize_turn's
+        early returns is released here first, so the baseline this turn saves
+        is the session's own configuration and never the previous turn's pin.
+        """
+        sid = session.session_id
+        stale = self._active_exec.pop(sid, None)
+        if stale is not None:
+            self._restore_session_settings(session, stale)
+        if execution is None or execution.options is None or execution.options.is_empty():
+            return
+        opts = execution.options
+        applied = _AppliedExec(
+            execution,
+            session.model_override,
+            session.tool_allowlist,
+            session.context_budget_override,
+        )
+        if opts.model:
+            session.model_override = opts.model
+        if opts.tool_allowlist:
+            session.tool_allowlist = opts.tool_allowlist
+        if opts.context_budget:
+            session.context_budget_override = opts.context_budget
+        self._active_exec[sid] = applied
+        logger.info(
+            "Session %s: turn running under %s options (model=%s, tools=%s)",
+            sid[:12],
+            execution.origin,
+            opts.model or "session default",
+            len(opts.tool_allowlist) if opts.tool_allowlist else "unrestricted",
+        )
+
+    def _release_execution(self, session: AgentSession, execution: TurnExecution | None) -> None:
+        """Lift this turn's options, if they are still the ones in force."""
+        if execution is None:
+            return
+        applied = self._active_exec.get(session.session_id)
+        if applied is None or applied.execution is not execution:
+            return  # a later turn already took over and saved its own baseline
+        del self._active_exec[session.session_id]
+        self._restore_session_settings(session, applied)
+
+    def _restore_session_settings(self, session: AgentSession, applied: _AppliedExec) -> None:
+        """Put back exactly the fields this execution overwrote.
+
+        Assignment, not deletion: the old cleanup set model_override and
+        tool_allowlist to None, which threw away a user's pinned model (the
+        API sets it in memory only, so nothing restores it) and stripped a
+        worker kind's confinement until the session was rehydrated from disk.
+        """
+        opts = applied.execution.options
+        if opts is None:
+            return
+        if opts.model:
+            session.model_override = applied.model_override
+        if opts.tool_allowlist:
+            session.tool_allowlist = applied.tool_allowlist
+        if opts.context_budget:
+            session.context_budget_override = applied.context_budget_override
 
     def _turn_in_flight(self, session: AgentSession) -> bool:
         """True when a live turn other than the caller's own owns this session.
@@ -420,8 +863,52 @@ class SessionManager:
                 except Exception as e:
                     logger.warning("Worker kind restore failed for %s: %s", session_id, e)
 
+            # Terminal metadata (H09). The in-memory field dies with the
+            # process, and every consumer downstream — the cap warning in
+            # get_worker_result, the resume manifest, check_workers — reads it.
+            # A round-capped worker that hydrates with None reads as a clean
+            # one, and the parent is the one who pays for believing it.
+            try:
+                _recent = db.recent_termination_reasons(session_id, 1)
+                if _recent:
+                    session.termination_reason = _recent[0]
+            except Exception as e:
+                logger.debug("termination_reason restore failed for %s: %s", session_id, e)
+
+            # Goal attribution. Workers never re-resolve a goal of their own
+            # (they own none); they carry the one inherited at spawn, and it is
+            # what the budget check shipped in b257532 guards on. Restore it
+            # from the rows the spend was actually billed to.
+            session.active_goal_id = _restore_worker_goal(session_id, db_session)
+        else:
+            # Which children this session owns is durable in
+            # sessions.parent_session_id; worker_ids was only ever a cache of
+            # it, and hydration used to leave that cache empty while telling
+            # the parent to collect "every worker listed above".
+            try:
+                session.worker_ids = db.worker_child_ids(session_id)
+            except Exception as e:
+                logger.warning("Worker inventory restore failed for %s: %s", session_id, e)
+
         self._sessions[session_id] = session
         return session
+
+    def worker_inventory(self, session: AgentSession) -> list[str]:
+        """This session's worker children — memory first, durable rows behind.
+
+        Read-only by design: `worker_ids` is mutated only on the event loop
+        (spawn_worker marshals its append there), so the tool-thread and
+        to_thread callers that need the full list take a copy instead of
+        writing to it.
+        """
+        ids = list(session.worker_ids)
+        try:
+            for wid in db.worker_child_ids(session.session_id):
+                if wid not in ids:
+                    ids.append(wid)
+        except Exception as e:
+            logger.debug("worker inventory sweep failed for %s: %s", session.session_id, e)
+        return ids
 
     async def reconcile_awaiting_workers(self) -> int:
         """Boot-time sweep: hydrate every session persisted in
@@ -470,9 +957,33 @@ class SessionManager:
                     continue
                 w_v2 = sv2._current_state(w)
                 has_started = w.task is not None or getattr(w, "_turn_id", 0) > 0
+                task_alive = w.task is not None and not w.task.done()
                 if w_v2 is sv2.SessionStateV2.IDLE_READY:
                     if has_started or w.error or w.termination_reason:
                         stale.add(wid)
+                elif not task_alive:
+                    # A child persisted mid-turn with no task: the process died
+                    # inside its turn. It is neither running nor finished, so
+                    # the old sweep left it in the watch-set and the parent sat
+                    # in AWAITING_WORKERS until the reaper's thirty-minute net.
+                    # Classify the wreck and let the parent synthesize what
+                    # actually exists.
+                    logger.info(
+                        "Boot reconcile: worker %s was interrupted mid-%s; releasing it",
+                        wid[:12],
+                        w_v2.value,
+                    )
+                    try:
+                        sv2.transition(
+                            w,
+                            sv2.SessionStateV2.IDLE_READY,
+                            "reaper-unstick",
+                            termination_reason=sv2.TerminationReason.INTERRUPTED,
+                        )
+                    except Exception as _e:
+                        logger.error("reconcile interrupted-child reset failed for %s: %s", wid, _e)
+                    w.termination_reason = sv2.TerminationReason.INTERRUPTED.value
+                    stale.add(wid)
             if stale:
                 watched -= stale
                 parent._watched_worker_ids = watched
@@ -638,6 +1149,98 @@ class SessionManager:
                 reset += 1
         return reset
 
+    # Prepended to a continuation whose predecessor died with the claim still
+    # held. What it did — a shell command, a file write, an HTTP call — is
+    # unknown, and the only safe move is to look before repeating anything.
+    _RECOVERED_CONTINUATION_PREAMBLE = (
+        "[recovered continuation] The server restarted while this continuation "
+        "was running. Whatever it had started may have completed, may have "
+        "half-completed, or may never have begun — the outcome was not "
+        "recorded. Before doing anything: re-read the workspace, the files "
+        "this task writes, and any command receipts or logs, and work out what "
+        "the current state actually is. Do NOT re-run a command, re-apply a "
+        "file write, or re-send an external request whose result you have not "
+        "confirmed is missing. Then continue from the state you observed.\n"
+        "{checkpoint_line}\n"
+    )
+
+    async def recover_goal_continuations(self) -> int:
+        """Boot-time sweep for continuations a dead process left mid-flight.
+
+        Nothing swept for these before. The debit was durable and the dispatch
+        was an in-memory deque, and the two orphan sweeps that exist run only
+        at turn finalization or inside prompt() — so an unattended goal drained
+        its whole allowance across restarts without executing one continuation,
+        and only a human sending a fresh message could dislodge it.
+
+        Recovery is not replay. A row that was merely `pending` never started a
+        turn and goes back out unchanged; a row that was `claimed` comes back
+        marked recovered and carries an explicit instruction to verify state
+        before repeating anything. Either way the user's standing intent is
+        re-checked first: a goal that is no longer active, or a session with
+        un-answered user direction waiting, settles the row instead of running
+        it. Returns the number actually re-queued.
+        """
+        if not settings.goals_enabled:
+            return 0
+        try:
+            rows = await asyncio.to_thread(db.recover_abandoned_continuations)
+        except Exception as e:
+            logger.error("Continuation outbox recovery failed: %s", e)
+            return 0
+        if not rows:
+            return 0
+
+        async def _abandon(cid: int, reason: str) -> None:
+            logger.warning("Boot recovery: continuation %s dropped — %s", cid, reason)
+            try:
+                await asyncio.to_thread(db.settle_goal_continuation, cid, "abandoned", reason)
+            except Exception as _e:
+                logger.warning("Continuation %s abandon-settle failed: %s", cid, _e)
+
+        requeued = 0
+        for row in rows:
+            cid = row["id"]
+            goal = await asyncio.to_thread(db.get_goal, int(row["goal_id"]))
+            if goal is None or goal.get("status") != "active":
+                # A paused goal is the durable form of "the user stopped this".
+                await _abandon(cid, f"goal is {goal.get('status') if goal else 'gone'}, not active")
+                continue
+            try:
+                session = self.get_or_create(row["session_id"])
+            except ValueError:
+                await _abandon(cid, "session no longer exists")
+                continue
+            if session.cancel_requested or not session.pause_event.is_set():
+                await _abandon(cid, "the session is cancelled or paused")
+                continue
+            if any(PendingMessage.coerce(e).continuation_id == cid for e in session.pending_messages):
+                continue  # already queued in this process
+            if self._find_db_orphans(session):
+                await _abandon(cid, "un-answered user direction is waiting — the user's words come first")
+                continue
+
+            message = row["prompt"]
+            if int(row.get("recovered") or 0):
+                checkpoint_line = (
+                    f"Checkpoint at the time it was dispatched: {row['checkpoint']}"
+                    if row.get("checkpoint")
+                    else "No checkpoint was recorded."
+                )
+                message = self._RECOVERED_CONTINUATION_PREAMBLE.format(checkpoint_line=checkpoint_line) + message
+            session.pending_messages.append(
+                PendingMessage(message, None, False, is_goal_continuation=True, continuation_id=cid)
+            )
+            requeued += 1
+            logger.warning(
+                "Boot recovery: re-queued continuation %s (%s) for %s",
+                cid,
+                "uncertain — was mid-dispatch" if row.get("recovered") else "never dispatched",
+                row["session_id"][:12],
+            )
+            self._spawn_detached(self._process_pending(session), "process-pending")
+        return requeued
+
     def _persist_watched(self, session: AgentSession) -> None:
         """Centralized helper: persist the watch-set after every mutation.
 
@@ -694,9 +1297,12 @@ class SessionManager:
         budget_exhausted} — the latter two ARE the long-running case (the
         turn ran out of rounds or LLM session budget mid-goal, not out of
         work). Never on cancelled/error/compaction_failed (a human is
-        needed), never in AWAITING_USER (waiting on a human is a legitimate
-        block — push notifications alert them), never over queued user
-        messages (the user's words outrank the machine's).
+        needed), and never on stuck_loop: the turn was force-broken out of a
+        repetition loop, so handing it a fresh turn on the same approach is
+        the one case where continuing reliably repeats the loop. Never in
+        AWAITING_USER (waiting on a human is a legitimate block — push
+        notifications alert them), never over queued user messages (the
+        user's words outrank the machine's).
         """
         from sessions import state_v2 as sv2
         from sessions.state import PendingMessage
@@ -742,61 +1348,154 @@ class SessionManager:
             await self._limit_goal(session, goal, f"continuation budget spent ({used_cont}/{budget})")
             return
 
-        # A budget_exhausted turn's continuation would inherit the exhausted
-        # LLM session clock and die immediately — synthetic messages don't
-        # get the reset real user messages get. Extend deliberately; the
-        # goal's own budgets are the governing limit now.
-        if session.termination_reason == "budget_exhausted":
-            try:
-                from core.llm.client import extend_session_budget
+        # Every continuation inherits the running LLM session clock, whatever
+        # ended the turn before it: a synthetic message gets none of the reset
+        # a real user row gets (_process_pending only resets for entry.msg_id,
+        # and this entry has none by design). So the window has to be opened
+        # here, for round_ceiling and complete as much as for budget_exhausted
+        # — the old branch extended only the last of the three, and a
+        # round-ceiling continuation started on a clock that was already spent.
+        #
+        # Clock-relative, not base-relative. extend_session_budget grants
+        # headroom against the BASE timeout, so a fixed argument is idempotent:
+        # three cycles of "extend by one base timeout" granted [1799s, 0s, 0s],
+        # and a single prior spawn_worker had already installed a larger cap,
+        # which swallowed even the first grant. The ceiling is what keeps this
+        # from being an unlimited self-service bypass — one window per
+        # authorized continuation plus one per worker, capped at 24h.
+        self._renew_continuation_budget(session, budget)
 
-                extend_session_budget(session.session_id, float(settings.llm_session_timeout))
-            except Exception as _e:
-                logger.warning("Session budget extension failed for goal continuation: %s", _e)
+        # Debit and enqueue in ONE transaction against the outbox. They used
+        # to be a durable update_goal followed by an append to an in-memory
+        # deque nothing persists, and no boot path swept for the difference —
+        # a crash in between spent the allowance and ran nothing at all
+        # (measured: three cycles, allowance drained, zero continuations
+        # executed). The row is also what makes the dispatch claimable, so a
+        # duplicate attempt cannot start a second turn for the same ordinal.
+        checkpoint = self._continuation_checkpoint(session, goal)
 
-        ordinal = used_cont + 1
-        await asyncio.to_thread(db.update_goal, goal["id"], continuations_used=ordinal)
-        prompt = (
-            f"[goal continuation {ordinal}/{budget}] The goal is still active:\n"
-            f"{goal['objective']}\n\n"
-            f"Continue working toward it, or report blockage with host-observable "
-            f"evidence — do not end the goal yourself. Use goal_complete only when "
-            f"the objective is met and its gates pass."
+        def _prompt_for(ordinal: int, cap: int) -> str:
+            return (
+                f"[goal continuation {ordinal}/{cap}] The goal is still active:\n"
+                f"{goal['objective']}\n\n"
+                f"Continue working toward it, or report blockage with host-observable "
+                f"evidence — do not end the goal yourself. Use goal_complete only when "
+                f"the objective is met and its gates pass."
+            )
+
+        row = await asyncio.to_thread(
+            db.enqueue_goal_continuation,
+            session.session_id,
+            goal["id"],
+            budget,
+            _prompt_for,
+            checkpoint,
         )
-        session.pending_messages.append(PendingMessage(prompt, None, False, is_goal_continuation=True))
+        if row is None:
+            logger.info(
+                "Goal #%d: continuation refused at the outbox for %s (status/allowance changed)",
+                goal["id"],
+                session.session_id[:12],
+            )
+            return
+        ordinal = row["ordinal"]
+        session.pending_messages.append(
+            PendingMessage(
+                row["prompt"],
+                None,
+                False,
+                is_goal_continuation=True,
+                continuation_id=row["id"],
+            )
+        )
         session.emit_event({"type": "goal.continuation", "goal_id": goal["id"], "ordinal": ordinal, "budget": budget})
         logger.info(
-            "Goal #%d: auto-continuation %d/%d enqueued for %s (termination=%s)",
+            "Goal #%d: auto-continuation %d/%d enqueued for %s (termination=%s, outbox row %d)",
             goal["id"],
             ordinal,
             budget,
             session.session_id[:12],
             session.termination_reason,
+            row["id"],
         )
+
+    def _continuation_checkpoint(self, session: AgentSession, goal: dict) -> str:
+        """A bounded record of where the work stood when the debit happened.
+
+        A synthetic "continue working toward it" is an instruction, not a
+        position. After a restart the recovering turn needs to know what the
+        last durable thing was so it can re-read from there instead of
+        guessing — and, when its predecessor died mid-flight, so it can tell
+        what may already have happened.
+        """
+        try:
+            tail = db.get_messages(session.session_id, last=1)
+            last_id = tail[-1]["id"] if tail else None
+        except Exception:
+            last_id = None
+        try:
+            return json.dumps(
+                {
+                    "goal_id": goal["id"],
+                    "last_message_id": last_id,
+                    "termination_reason": session.termination_reason,
+                    "workspace": str(settings.workspace_dir),
+                    "worker_ids": [w[:12] for w in list(getattr(session, "worker_ids", ()) or ())[:10]],
+                }
+            )[:2000]
+        except Exception:
+            return ""
+
+    def _renew_continuation_budget(self, session: AgentSession, continuation_budget: int) -> float:
+        """Give the next goal continuation a real window. Returns its headroom.
+
+        The ceiling is the whole point: an active goal is authorization to run
+        `continuation_budget` more phases, not authorization to keep buying
+        wall-clock forever. Once the cumulative cap is reached this grants
+        nothing, the continuation dies on its own acquire, and that death is
+        typed as a time-budget exhaustion rather than a provider failure.
+        """
+        base = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else 0.0
+        if base <= 0:
+            return float("inf")  # 0 = unlimited; there is no window to renew
+        try:
+            from core.llm.client import phase_budget_ceiling, renew_phase_budget
+
+            ceiling = phase_budget_ceiling(base, continuation_budget, len(getattr(session, "worker_ids", ()) or ()))
+            headroom = renew_phase_budget(session.session_id, base, ceiling)
+        except Exception as _e:
+            logger.warning("Session budget renewal failed for goal continuation: %s", _e)
+            return 0.0
+        if headroom <= 0:
+            logger.warning(
+                "Session %s: goal continuation gets no headroom — cumulative " "budget ceiling of %.0fs reached",
+                session.session_id[:12],
+                ceiling,
+            )
+        else:
+            logger.info(
+                "Session %s: goal continuation window renewed — %.0fs headroom (ceiling %.0fs)",
+                session.session_id[:12],
+                headroom,
+                ceiling,
+            )
+        return headroom
 
     async def _limit_goal(self, session: AgentSession, goal: dict, reason: str) -> None:
         await asyncio.to_thread(db.update_goal, goal["id"], status="budget_limited")
-        try:
-            nid = await asyncio.to_thread(
-                db.add_notification,
-                session_id=session.session_id,
-                title=f"Goal #{goal['id']} budget-limited",
-                body=f"{reason}. The goal is paused at budget_limited — raise its budget "
-                f"(goal_update) or complete it to proceed.",
-                urgency="high",
-            )
-            self.broadcast(
-                {
-                    "type": "dialog.notification",
-                    "notification_id": nid,
-                    "title": f"Goal #{goal['id']} budget-limited",
-                    "body": reason,
-                    "urgency": "high",
-                    "source_session_id": session.session_id,
-                }
-            )
-        except Exception as _e:
-            logger.warning("Goal budget notification failed: %s", _e)
+        # notify() never raises; it does the DB write (hence the thread) and
+        # the SSE/push emission. The body is the full text — the old broadcast
+        # carried only `reason`, the bell row the full sentence.
+        await asyncio.to_thread(
+            notices.notify,
+            "sessions.goal_budget",
+            f"Goal #{goal['id']} budget-limited",
+            f"{reason}. The goal is paused at budget_limited — raise its budget "
+            f"(goal_update) or complete it to proceed.",
+            session_id=session.session_id,
+            link={"kind": "session", "id": session.session_id},
+            session_type=session.session_type,
+        )
         logger.info("Goal #%d budget-limited for %s: %s", goal["id"], session.session_id[:12], reason)
 
     def remove(self, session_id: str) -> None:
@@ -818,7 +1517,41 @@ class SessionManager:
         except Exception as e:
             logger.warning("Kernel shutdown scheduling failed for %s: %s", session_id[:12], e)
 
-    def cancel_session(self, session: AgentSession, *, cascade: bool = True) -> bool:
+    def control_session(self, session_id: str, action: str) -> dict:
+        """Apply a loop-affine control command and return its actual disposition."""
+        session = self.get(session_id)
+        if session is None:
+            return {"status": "rejected", "detail": "Session not found"}
+        current = sv2._current_state(session)
+        if not sv2.capabilities(session).get(action, False):
+            return {"status": "rejected", "detail": f"Cannot {action} session in {current.value}"}
+        if action == "pause":
+            session.pause_event.clear()
+            try:
+                sv2.transition(session, sv2.S.PAUSE_REQUESTED, "pause-requested")
+            except Exception:
+                session.pause_event.set()
+                raise
+            detail = "Session will pause at next checkpoint"
+        elif action == "resume":
+            session.pause_event.set()
+            if current is sv2.S.PAUSE_REQUESTED:
+                try:
+                    sv2.transition(session, sv2.S.PROCESSING, "resume")
+                except Exception:
+                    session.pause_event.clear()
+                    raise
+            detail = "Session resumed"
+        else:
+            return {"status": "rejected", "detail": f"Unsupported control: {action}"}
+        return {
+            "status": "pause_requested" if action == "pause" else "resumed",
+            "detail": detail,
+            "state": sv2._current_state(session).value,
+            "capabilities": sv2.capabilities(session),
+        }
+
+    def cancel_session(self, session: AgentSession, *, cascade: bool = True, for_delete: bool = False) -> bool:
         """Stop a session's turn now: cooperative flag, queued prompts, child
         processes, and the asyncio task. Loop-affine (Task.cancel).
 
@@ -827,9 +1560,13 @@ class SessionManager:
         worker's executor swallowed the CancelledError, the bash child ran
         on, and the loop's cancel_requested checkpoints never fired.
         Returns True when a running task was cancelled.
+
+        for_delete skips the pending-row scan: the delete path is about to
+        drop every one of those rows, so reading them to stamp a disposition
+        nobody will ever read is pure cost on the loop.
         """
         session.cancel_requested = True
-        session.pending_messages.clear()
+        self.drop_pending_for_cancel(session, scan_pending=not for_delete)
         kill_session_processes(session)
         if cascade:
             for wid in list(getattr(session, "worker_ids", []) or []):
@@ -839,7 +1576,127 @@ class SessionManager:
         if session.task and not session.task.done():
             session.task.cancel()
             return True
+        if cascade and sv2._current_state(session) is sv2.SessionStateV2.AWAITING_WORKERS:
+            # Nothing to cancel and nothing to finalize: a parent suspended on
+            # await_workers owns no task, so the flag above is the whole of the
+            # cancel and the session stays parked. Release it from a task of
+            # our own — this method is synchronous and the release needs the
+            # session lock, which the in-flight resume may still be holding.
+            self._spawn_detached(
+                self._settle_cancelled_awaiting_workers(session),
+                "settle-cancelled-parent",
+            )
         return False
+
+    def drop_pending_for_cancel(self, session: AgentSession, *, scan_pending: bool = True) -> int:
+        """Empty the queue and record, in the DB, that a cancel dropped it.
+
+        Returns the number of queued messages dropped, for the caller's notice.
+
+        Clearing pending_messages only retires the in-memory copy. The rows are
+        still in the transcript, unanswered, so the next prompt()'s Window B
+        sweep read them as work a restart had lost and dispatched them — the
+        user's cancelled operation ran anyway, ahead of the unrelated request
+        that triggered the sweep. The stamp gives them a disposition orphan
+        recovery can see; the text stays, so the transcript still shows what
+        was asked and that it was stopped.
+
+        The running turn's own user row goes too, when nothing has answered it
+        yet. That is the worse half of the same bug: cancel during scout or the
+        first stream leaves a user row with no assistant row behind it, which is
+        precisely the orphan shape, so the cancelled prompt itself came back.
+        Once any assistant row exists the turn is on the record as having
+        started, the sequence no longer reads as orphaned, and we leave it be.
+
+        Both cancel paths (this manager's cancel_session and the /cancel route)
+        call this, so neither can drift from the other again. The route uses
+        drop_pending_for_cancel_async, which is the same work with the DB half
+        on a thread; this synchronous form exists for the loop-affine callers
+        (cancel_session, and the delete path, which passes scan_pending=False).
+        """
+        dropped, queued_ids, running = self._drain_pending_for_cancel(session)
+        self._stamp_cancel_disposition(session.session_id, queued_ids, running, scan_pending=scan_pending)
+        return dropped
+
+    async def drop_pending_for_cancel_async(self, session: AgentSession) -> int:
+        """drop_pending_for_cancel with the DB half off the event loop.
+
+        The queue drain mutates loop-affine state and stays here; the stamp is
+        SQLite writes and a query, which the /cancel route has no reason to
+        hold the loop for.
+        """
+        dropped, queued_ids, running = self._drain_pending_for_cancel(session)
+        await asyncio.to_thread(
+            self._stamp_cancel_disposition,
+            session.session_id,
+            queued_ids,
+            running,
+            scan_pending=True,
+        )
+        return dropped
+
+    def _drain_pending_for_cancel(self, session: AgentSession) -> tuple[int, list[int], int | None]:
+        """Loop-affine half: empty the queue, settle the executions it owed,
+        and report (count dropped, the row ids behind them, the running turn's
+        row id). The running id is read here rather than in the blocking half
+        so nothing off the loop reads session state the loop is still
+        mutating."""
+        # Synthetic entries (worker resume, worker timeout) carry no row, and
+        # neither does anything in the deque that isn't a PendingMessage at
+        # all; one odd entry must not cost the caller its cancel.
+        queued_ids: list[int] = []
+        for raw in session.pending_messages:
+            try:
+                entry = PendingMessage.coerce(raw)
+            except Exception:
+                continue
+            if entry.msg_id is not None:
+                queued_ids.append(entry.msg_id)
+        dropped = len(session.pending_messages)
+        session.pending_messages.clear()
+        # Whoever admitted that queued work is owed the outcome, not silence.
+        self._reap_pending_execs(session, result=EXEC_CANCELLED, error="queued work cancelled")
+        return dropped, queued_ids, session.current_turn_user_msg_id
+
+    def _stamp_cancel_disposition(
+        self,
+        session_id: str,
+        queued_ids: list[int],
+        running: int | None,
+        *,
+        scan_pending: bool,
+    ) -> None:
+        """Blocking half: mark the dropped rows cancelled.
+
+        Reads ids, never rows. get_orphaned_user_messages materialises every
+        message in the session, content and all, and JSON-parses each one —
+        on the event loop, once per session, so a bulk purge of N sessions
+        paid for N full transcripts. get_pending_user_message_ids asks SQLite
+        the one question this path has.
+        """
+        dropped_ids = list(queued_ids)
+        try:
+            if scan_pending:
+                for mid in db.get_pending_user_message_ids(session_id):
+                    if mid != running and mid not in dropped_ids:
+                        dropped_ids.append(mid)
+            if running is not None:
+                # The running turn's row stays 'pending' until the delivery
+                # acknowledge lands, which is *after* the assistant row is
+                # saved — so a cancel arriving in that window found it in the
+                # scan and stamped an answered message as cancelled, guard and
+                # all. The guard decides this row, and the scan does not get a
+                # second vote. Queued rows are deliberately not guarded: the
+                # running turn's assistant rows sit after them by id, so the
+                # same question would answer "answered" for work that never
+                # ran.
+                if not db.turn_has_assistant_row(session_id, running):
+                    dropped_ids.append(running)
+            if dropped_ids:
+                db.mark_messages_cancelled(dropped_ids)
+                db.set_message_delivery(session_id, dropped_ids, "cancelled")
+        except Exception as e:
+            logger.warning("Cancel stamp failed for %s: %s", session_id[:12], e)
 
     def delete_session(self, session_id: str) -> None:
         """Delete session from both memory and DB (cascades workers).
@@ -866,7 +1723,7 @@ class SessionManager:
         ids: list[str] = []
         session = self._sessions.get(session_id)
         if session:
-            self.cancel_session(session, cascade=False)
+            self.cancel_session(session, cascade=False, for_delete=True)
             for wid in list(session.worker_ids):
                 ids.extend(self._delete_session_phase1(wid))
         self._sessions.pop(session_id, None)
@@ -937,13 +1794,60 @@ class SessionManager:
     # Prompt routing
     # ------------------------------------------------------------------
 
+    async def steer(self, session_id: str, message: str, *, origin: str = "user") -> dict:
+        """Deliver a correction to this run, or admit it as a separate request.
+
+        Browser and worker steering share this path. The durable pending stamp
+        remains until a successful model response used the row; finalization
+        requeues corrections that arrived too late for another round.
+        """
+        session = self.get_or_create(session_id)
+        async with session.lock:
+            current = sv2._current_state(session)
+            if self.shutting_down or session.cancel_requested or current is sv2.S.CANCELLING:
+                reason = "shutting_down" if self.shutting_down else "cancelling"
+                self._reject_admission(TurnExecution(session_id, origin=origin), session, session_id, reason)
+                return {"status": "rejected", "session_id": session_id, "reason": reason}
+            live = session.task is not None and not session.task.done()
+            if (
+                live
+                and current in {sv2.S.SCOUTING, sv2.S.PROCESSING, sv2.S.COMPACTING, sv2.S.PAUSE_REQUESTED, sv2.S.PAUSED}
+            ) or current is sv2.S.AWAITING_WORKERS:
+                meta = {"injected": True, "delivery_kind": "correction", "delivery_status": "pending"}
+                if session.current_turn_user_msg_id is not None:
+                    meta["parent_user_msg_id"] = session.current_turn_user_msg_id
+                mid = db.add_message(session_id, "user", message, metadata=json.dumps(meta))
+                session.turn.user_row_version += 1
+                session.emit_event(
+                    {
+                        "type": "message.injected",
+                        "message_id": mid,
+                        "source": origin,
+                        "content": message[:100],
+                        "delivery_status": "pending",
+                    }
+                )
+                return {"status": "injected", "session_id": session_id, "message_id": mid}
+        admission = await self.prompt(session_id, message, origin=origin)
+        return {
+            "status": admission.outcome,
+            "session_id": session_id,
+            "message_id": admission.msg_id,
+            "reason": admission.reason,
+        }
+
     async def prompt(
         self,
         session_id: str,
         message: str,
         system_prompt: str = "",
         idempotency_key: str | None = None,
-    ) -> None:
+        *,
+        exec_options: ExecOptions | None = None,
+        origin: str = "user",
+        question_id: str | None = None,
+        question_answer: str | None = None,
+    ) -> Admission:
         """Send a message to a session.
 
         Events are delivered via the persistent SSE connection.
@@ -952,7 +1856,43 @@ class SessionManager:
         idempotency_key, when provided, is persisted on the user message row
         so a concurrent re-submission with the same key is caught by the
         chat-router dedup check (api/routers/chat.py).
+
+        exec_options are the settings THIS message's turn runs under. They are
+        carried with the message and applied when its own turn starts, so a
+        message that queues behind a live turn cannot reconfigure that turn.
+
+        origin names the producer ("user", "scheduled", ...). Scheduled work
+        is never folded into another message's row: the machine's instructions
+        would end up appended to a human's turn, and the job that "ran" would
+        never have run at all.
+
+        Returns an Admission: what was decided about the message, plus the
+        stable TurnExecution handle that will eventually carry its outcome.
+        Admission is not outcome — `accepted` means the work was taken on,
+        never that it succeeded.
         """
+
+        async def save_prompt(*args, **kwargs):
+            if question_id is not None:
+                # Question resolution and its durable delivery commit together.
+                # No await between admission's final checks and this write.
+                metadata = json.loads(kwargs.get("metadata") or "{}")
+                metadata["question_id"] = question_id
+                kwargs["metadata"] = json.dumps(metadata)
+                return db.add_message(*args, question_id=question_id, question_answer=question_answer, **kwargs)
+            return await asyncio.to_thread(db.add_message, *args, **kwargs)
+
+        execution = TurnExecution(session_id, exec_options, origin)
+        if exec_options is not None and not message:
+            # Options with nothing to run: there would be no row to hang the
+            # execution on and no turn to apply them to.
+            return self._reject_admission(execution, self.get(session_id), session_id, "empty_message")
+        # Admission closes before the shutdown drain snapshots anything. Every
+        # start path funnels through here, including the orchestration tool
+        # threads that hop onto the loop with run_coroutine_threadsafe and are
+        # not cancelled by shutdown at all.
+        if self.shutting_down:
+            return self._reject_admission(execution, self.get(session_id), session_id, "shutting_down")
         # Cancel Snooze if running (user work takes priority). Snooze-
         # transparent sessions (canary sweeps) skip both signals — a 3am
         # sweep must not cancel the very snooze cycle it coexists with.
@@ -966,6 +1906,10 @@ class SessionManager:
         session = self.get_or_create(session_id)
 
         async with session.lock:
+            # Recheck under the lock: admission can close while this coroutine
+            # waits for it, and by then the drain has taken its snapshot.
+            if self.shutting_down:
+                return self._reject_admission(execution, session, session_id, "shutting_down")
             # v2 state-aware prompt acceptance. IDLE_READY / AWAITING_USER
             # accept immediately (AWAITING_USER routes the prompt as
             # "answer-received" via _run_agent_safe's start-state detection).
@@ -982,14 +1926,7 @@ class SessionManager:
                 sv2.SessionStateV2.AWAITING_USER,
             )
             if current_v2 is sv2.SessionStateV2.CANCELLING:
-                session.emit_event(
-                    {
-                        "type": "session.prompt_rejected",
-                        "reason": "cancelling",
-                    }
-                )
-                logger.info("Session %s prompt rejected: cancelling", session_id)
-                return
+                return self._reject_admission(execution, session, session_id, "cancelling")
             if settling or current_v2 not in (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_USER):
                 # Backpressure: reject if queue is full
                 if len(session.pending_messages) >= settings.max_pending_messages:
@@ -1000,16 +1937,10 @@ class SessionManager:
                             "max": settings.max_pending_messages,
                         }
                     )
-                    session.emit_event(
-                        {
-                            "type": "session.prompt_rejected",
-                            "reason": "queue_full",
-                        }
-                    )
                     logger.warning(
                         "Session %s queue full (%d), rejecting message", session_id, len(session.pending_messages)
                     )
-                    return
+                    return self._reject_admission(execution, session, session_id, "queue_full")
                 # Session is busy. If the most recent user message (running
                 # OR queued) landed within the rapid-fire window, fold this
                 # message into that DB row instead of opening a new turn.
@@ -1021,8 +1952,17 @@ class SessionManager:
                 # loop has stopped re-reading the row, so the appended text
                 # would be lost silently.
                 now = time.monotonic()
+                # Only a human's own follow-up may be folded into a human's
+                # row. A cron job firing within the window had its prompt
+                # appended to whatever the user had just typed — the machine's
+                # instructions injected into the human's turn, the job never
+                # run, and (with the job's model pin and tool charter also
+                # applied session-wide) that human turn executed under the
+                # job's charter. Scheduled work always gets its own turn.
+                absorbable = origin == "user" and exec_options is None
                 if (
                     message
+                    and absorbable
                     and not settling
                     and session.last_user_msg_id is not None
                     and (now - session.last_user_msg_at) <= RAPID_FIRE_WINDOW_SECONDS
@@ -1032,6 +1972,13 @@ class SessionManager:
                     if existing is not None and self._can_absorb_rapid_fire(session, target_id):
                         combined = _combine_rapid_fire(existing.get("content", "") or "", message)
                         db.update_message_content(target_id, combined)
+                        if target_id == session.current_turn_user_msg_id:
+                            # Under the session lock, so the agent either
+                            # compiled before this bump or sees it. The loop
+                            # re-reads the row each tool round; the version is
+                            # what tells a turn already writing its final
+                            # answer that the row moved beneath it.
+                            session.turn.user_row_version += 1
                         session.last_user_msg_at = now
                         # If the target is a queued entry (not the running one),
                         # update its in-memory tuple too so the agent runs with
@@ -1056,7 +2003,10 @@ class SessionManager:
                             target_id,
                             session_id,
                         )
-                        return
+                        # Absorbed, not run: no turn of its own will ever
+                        # start for this message.
+                        execution.settle(EXEC_ABSORBED)
+                        return Admission(ADMIT_ABSORBED, session_id, execution, msg_id=target_id)
                     # Fall through: the running turn can no longer pick this up.
                     # Queue it as its own turn below rather than writing into a
                     # row nothing will re-read.
@@ -1065,16 +2015,20 @@ class SessionManager:
                 # while waiting, then queue for later processing.
                 msg_id = None
                 if message:
-                    msg_id = await asyncio.to_thread(
-                        db.add_message,
+                    msg_id = await save_prompt(
                         session_id,
                         "user",
                         message,
                         idempotency_key=idempotency_key,
+                        metadata=json.dumps({"delivery_kind": origin, "delivery_status": "pending"}),
                     )
                     session.last_user_msg_id = msg_id
                     session.last_user_msg_at = now
                 session.pending_messages.append(PendingMessage(message, system_prompt, True, now, msg_id))
+                # The options and the outcome handle ride with the row, not
+                # with the session: they come back out when _process_pending
+                # pops this entry, and only then.
+                self._register_pending_exec(session_id, msg_id, execution)
                 session.emit_event(
                     {
                         "type": "session.queued",
@@ -1103,7 +2057,10 @@ class SessionManager:
                         ),
                         "dispatch-after-turn",
                     )
-                return
+                if msg_id is None:
+                    # Nothing durable to pop later; nobody can be left waiting.
+                    execution.settle(EXEC_DROPPED, error="no message to run")
+                return Admission(ADMIT_QUEUED, session_id, execution, msg_id=msg_id)
 
             # Start agent task — reset state for new user turn.
             # post_hooks_complete and waiting_for_input are now derived from
@@ -1141,7 +2098,9 @@ class SessionManager:
                         "error": "Agent runner not initialized",
                     }
                 )
-                return
+                # Nothing ran. An SSE error alone left every non-interactive
+                # caller believing its work had been done.
+                return self._reject_admission(execution, session, session_id, "no_agent_runner")
 
             # Window B recovery: before dispatching the new message, check the
             # DB for any user message that was orphaned by a prior restart (i.e.,
@@ -1167,6 +2126,7 @@ class SessionManager:
                 _now_m = _time.monotonic()
                 for _o in _orphans:
                     _oid = _o["id"]
+                    db.requeue_message_delivery(session.session_id, _oid)
                     session.swept_orphan_ids.add(_oid)
                     if not any(PendingMessage.coerce(_e).msg_id == _oid for _e in session.pending_messages):
                         session.pending_messages.append(PendingMessage(_o.get("content", ""), "", True, _now_m, _oid))
@@ -1176,40 +2136,56 @@ class SessionManager:
                             _oid,
                         )
                 if message:
-                    _new_id = await asyncio.to_thread(
-                        db.add_message,
+                    _new_id = await save_prompt(
                         session.session_id,
                         "user",
                         message,
                         idempotency_key=idempotency_key,
+                        metadata=json.dumps({"delivery_kind": origin, "delivery_status": "pending"}),
                     )
                     session.last_user_msg_id = _new_id
                     session.last_user_msg_at = _time.monotonic()
                     session.pending_messages.append(
                         PendingMessage(message, system_prompt, True, _time.monotonic(), _new_id)
                     )
+                    self._register_pending_exec(session_id, _new_id, execution)
+                else:
+                    execution.settle(EXEC_DROPPED, error="no message to run")
                 # Dispatch via _process_pending (pops oldest entry — the orphan)
                 self._spawn_detached(self._process_pending(session), "process-pending")
-                return
+                return Admission(ADMIT_QUEUED, session_id, execution, msg_id=execution.msg_id)
 
             # Pre-save the user message inline so a concurrent re-submission
             # with the same idempotency_key sees the row and the chat router
             # short-circuits to "duplicate". Without inline persistence, the
             # second call's SELECT runs before _run_agent_safe writes the row.
+            _started_id = None
             if message:
-                _new_id = await asyncio.to_thread(
-                    db.add_message,
+                _new_id = await save_prompt(
                     session.session_id,
                     "user",
                     message,
                     idempotency_key=idempotency_key,
+                    metadata=json.dumps({"delivery_kind": origin, "delivery_status": "pending"}),
                 )
                 session.last_user_msg_id = _new_id
                 session.last_user_msg_at = _time.monotonic()
                 session.current_turn_user_msg_id = _new_id
-            session.task = asyncio.create_task(
-                self._run_agent_safe(session, message, system_prompt, pre_saved=bool(message))
+                _started_id = _new_id
+            # Last gate, after the persistence hop and still under the lock:
+            # nothing awaits between here and create_task, so a shutdown that
+            # has not closed admission by now cannot miss this task. The row
+            # stays on disk unanswered — the orphan sweep re-offers it after
+            # the restart rather than the message being silently lost.
+            if self.shutting_down:
+                return self._reject_admission(execution, session, session_id, "shutting_down")
+            execution.msg_id = _started_id
+            execution.mark_running()
+            session.task = self._start_turn_task(
+                session,
+                self._run_agent_safe(session, message, system_prompt, pre_saved=bool(message), execution=execution),
             )
+            return Admission(ADMIT_STARTED, session_id, execution, msg_id=_started_id)
 
     def _can_absorb_rapid_fire(self, session: AgentSession, target_id: int) -> bool:
         """Can a follow-up still be folded into message `target_id`?
@@ -1263,11 +2239,20 @@ class SessionManager:
         message: str,
         system_prompt: str,
         pre_saved: bool = False,
+        execution: TurnExecution | None = None,
     ) -> None:
         """Wrapper: runs scout → agent loop → post-task hooks, routed through
         the v2 state machine. State mutations go through sv2.transition() which
         writes a session_state_log row and emits session.state_changed SSE for
-        every transition."""
+        every transition.
+
+        `execution` is the handle for the admitted work this turn is running.
+        Its options go on at the turn boundary and come off when the turn ends;
+        its terminal result is recorded here, because this is the only frame
+        that sees every way a turn can end. Failures are recorded rather than
+        raised, which is exactly why callers could not tell a failed turn from
+        a finished one."""
+        run_message_id = session.current_turn_user_msg_id
         _was_cancelled = False
         try:
             # The single turn boundary. Every path into a turn passes through
@@ -1295,9 +2280,17 @@ class SessionManager:
             # racing case above, the previous turn's _finalize_turn is still
             # reading all three to classify its own completion; clearing them
             # from the incoming turn would make a failed turn look clean.
-            # prompt() and _resume_from_workers clear them under the session
-            # lock instead, where no prior turn can still be in flight.
+            # The three dispatch sites clear them under the session lock
+            # instead, where no prior turn can still be in flight: prompt(),
+            # _process_pending (the queued-popped path) and
+            # _resume_from_workers.
             session.turn = TurnState()
+
+            # This turn's own execution options go on HERE — at the boundary of
+            # the turn that owns them, not when their message was admitted. A
+            # message that queued behind someone else's turn no longer changes
+            # the model or the tool surface that turn runs under.
+            self._apply_execution(session, execution)
 
             # --- Scout phase ---
             # Distinguish an answer-resumed turn from a fresh user prompt and
@@ -1327,9 +2320,18 @@ class SessionManager:
                 # can overwrite session.last_user_msg_id. compile_context and
                 # reflect read this to scope to this turn only.
                 session.current_turn_user_msg_id = _new_id
+                run_message_id = _new_id
                 _pre_saved = True
 
             sv2.transition(session, sv2.SessionStateV2.SCOUTING, start_reason)
+            # A worker-resume turn is the harness talking to itself. Tag the
+            # turn id (just incremented by the transition) so the deferred
+            # grader doesn't read it as the user moving past the real turn it
+            # is about to grade (session 3dc5a307d751).
+            if start_reason == "workers-complete" or (
+                isinstance(message, str) and message.startswith(_WORKER_RESUME_PREFIX)
+            ):
+                session._synthetic_turn_ids.add(getattr(session, "_turn_id", 0))
 
             await self._run_scout_and_process(
                 session,
@@ -1395,47 +2397,101 @@ class SessionManager:
         except Exception as e:
             logger.error("Agent error in session %s: %s", session.session_id, e, exc_info=True)
             session.error = str(e)
-            current = sv2._current_state(session)
-            if current == sv2.SessionStateV2.SCOUTING:
-                session.termination_reason = "scout_error"
-                try:
-                    sv2.transition(
-                        session,
-                        sv2.SessionStateV2.FINALIZING,
-                        "scout-error",
-                        termination_reason=sv2.TerminationReason.SCOUT_ERROR,
-                    )
-                except Exception as _e:
-                    logger.error("Scout-error transition failed: %s", _e)
-            else:
-                session.termination_reason = "error"
-                try:
-                    sv2.transition(
-                        session,
-                        sv2.SessionStateV2.FINALIZING,
-                        "agent-error",
-                        termination_reason=sv2.TerminationReason.ERROR,
-                    )
-                except Exception as _e:
-                    logger.error("Agent-error transition failed: %s", _e)
-            session.emit_event({"type": "stream.error", "error": str(e)})
-
             # Budget-exhaustion is a special class of error: the user can
             # recover by sending a new message (which resets the wall-clock
-            # budget). Notify them so they know which session needs a nudge,
-            # rather than leaving them to wonder why their conversation went
-            # quiet. Skip for worker sessions — the orchestrator handles
-            # those internally; firing on every worker would spam the user.
+            # budget). Classify it before the state transition, because what
+            # this turn is called decides whether the goal driving it may
+            # continue. A continuation that died on its FIRST acquire was
+            # filed as scout_error — not one of the reasons
+            # _maybe_enqueue_goal_continuation accepts — so the goal stalled
+            # at status=active with its allowance already debited and nothing
+            # left to spend it. The wall it hit was the clock, not the scout.
             try:
                 from core.llm.semaphore import LLMSessionTimeoutError
 
                 is_budget_exhausted = isinstance(e, LLMSessionTimeoutError)
             except Exception:
                 is_budget_exhausted = False
-            if is_budget_exhausted and session.session_type != "worker":
+
+            current = sv2._current_state(session)
+            if current == sv2.SessionStateV2.SCOUTING:
+                session.termination_reason = "budget_exhausted" if is_budget_exhausted else "scout_error"
+                try:
+                    sv2.transition(
+                        session,
+                        sv2.SessionStateV2.FINALIZING,
+                        # The edge is still "the turn died during scout" —
+                        # only the classification of WHY changes.
+                        "scout-error",
+                        termination_reason=(
+                            sv2.TerminationReason.BUDGET_EXHAUSTED
+                            if is_budget_exhausted
+                            else sv2.TerminationReason.SCOUT_ERROR
+                        ),
+                    )
+                except Exception as _e:
+                    logger.error("Scout-error transition failed: %s", _e)
+            else:
+                session.termination_reason = "budget_exhausted" if is_budget_exhausted else "error"
+                try:
+                    sv2.transition(
+                        session,
+                        sv2.SessionStateV2.FINALIZING,
+                        "agent-error",
+                        termination_reason=(
+                            sv2.TerminationReason.BUDGET_EXHAUSTED
+                            if is_budget_exhausted
+                            else sv2.TerminationReason.ERROR
+                        ),
+                    )
+                except Exception as _e:
+                    logger.error("Agent-error transition failed: %s", _e)
+            session.emit_event({"type": "stream.error", "error": str(e)})
+
+            # Notify the user so they know which session needs a nudge, rather
+            # than leaving them to wonder why their conversation went quiet.
+            # Worker and canary sessions record nothing: the sessions.timeout
+            # category drops them (the orchestrator / Canary tab owns those).
+            if is_budget_exhausted:
                 _broadcast_session_timeout_notification(session)
         finally:
-            await self._finalize_turn(session, message, system_prompt, _was_cancelled)
+            # This task owns the run until verification, retries and cleanup
+            # have finished. Settle its handle before dispatching another run:
+            # reading session.error after queue dispatch reads the next run.
+            try:
+                await self._finalize_turn(session, message, system_prompt, _was_cancelled)
+            except asyncio.CancelledError:
+                session.termination_reason = "cancelled"
+                session.cancel_requested = False
+                session.pause_event.set()
+                if sv2._current_state(session) is not sv2.SessionStateV2.IDLE_READY:
+                    sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "cancel-timeout")
+            except Exception as exc:
+                logger.exception("Turn finalization failed for %s", session.session_id)
+                session.error = str(exc)
+                session.termination_reason = "error"
+                current = sv2._current_state(session)
+                if current is not sv2.SessionStateV2.IDLE_READY:
+                    reason = finalize_failure_reason(current)
+                    sv2.transition(session, sv2.SessionStateV2.IDLE_READY, reason)
+            finally:
+                if run_message_id is not None:
+                    try:
+                        db.set_message_delivery(session.session_id, [run_message_id], "settled")
+                    except Exception:
+                        logger.exception("Could not settle message delivery for %s", session.session_id)
+                self._restore_agent_model(session)
+                self._release_execution(session, execution)
+                if execution is not None:
+                    termination = session.termination_reason
+                    if termination == "cancelled" or session.cancel_requested:
+                        result = EXEC_CANCELLED
+                    elif session.error or termination in {"error", "scout_error", "compaction_failed", "interrupted"}:
+                        result = EXEC_FAILED
+                    else:
+                        result = EXEC_COMPLETED
+                    execution.settle(result, error=session.error, termination_reason=termination)
+            await self._process_pending(session)
 
     async def _finalize_turn(
         self,
@@ -1444,16 +2500,18 @@ class SessionManager:
         system_prompt: str,
         was_cancelled: bool,
     ) -> None:
-        """Terminal phase of every agent turn — extracted verbatim from
-        _run_agent_safe's finally block. Routes the session from its
-        post-loop state through CANCELLING/FINALIZING to IDLE_READY, runs
-        post-hooks plus the reflect/eval retry loop, restores model
-        overrides, stamps worker summaries, and drains the pending queue.
-        Always invoked from the finally of _run_agent_safe."""
+        """Run post-hooks, verification retries and worker settlement.
+
+        The owning _run_agent_safe frame restores overrides and settles the
+        execution before dispatching pending work. Parked user/worker waits
+        retain their state; completed turns return to IDLE_READY.
+        """
         session.touch()
 
         # If cancelled, close out via CANCELLING → IDLE_READY, skip post-hooks.
         if was_cancelled or session.cancel_requested:
+            session.termination_reason = "cancelled"
+            session.pause_event.set()
             current = sv2._current_state(session)
             cancel_reason = "cancel-complete"
             # Clear the cancel flag before every IDLE_READY transition —
@@ -1523,8 +2581,6 @@ class SessionManager:
             # queue and the task unwinding is a new request, not part of
             # the cancelled turn; without this it sat in an IDLE_READY
             # session's queue until the user's next send.
-            if session.pending_messages:
-                await self._process_pending(session)
             return
 
         # Normal path: if the agent loop returned cleanly we're still in
@@ -1534,7 +2590,11 @@ class SessionManager:
         # transition back), route via compaction-failed so reflect
         # classifies honestly.
         current = sv2._current_state(session)
-        if current == sv2.SessionStateV2.PROCESSING:
+        if current == sv2.SessionStateV2.PAUSE_REQUESTED:
+            # A final response has no next round at which to park. Finishing
+            # wins over a pause that has not been observed.
+            session.pause_event.set()
+        if current in TERMINATION_ROUTED_STATES:
             v2_reason, v2_term = _map_termination_to_v2_reason(session.termination_reason)
             try:
                 sv2.transition(
@@ -1606,7 +2666,7 @@ class SessionManager:
                 in_finalizing = sv2._current_state(session) == sv2.SessionStateV2.FINALIZING
                 if (
                     _turn.eval_retry_requested
-                    and _turn.eval_count < settings.eval_max_retries
+                    and _turn.eval_count < _EVAL_MAX_RETRIES
                     and not session.pending_messages
                     and in_finalizing
                 ):
@@ -1616,6 +2676,8 @@ class SessionManager:
                     continue
                 break
         except asyncio.CancelledError:
+            session.termination_reason = "cancelled"
+            session.pause_event.set()
             # A cancel arrived during a reflect/eval retry (_run_agent_retry
             # already transitioned the session to CANCELLING and re-raised).
             # Complete the CANCELLING → IDLE_READY arc here so the session
@@ -1651,48 +2713,6 @@ class SessionManager:
                 except Exception as _e:
                     logger.error("Retry-cancel watcher notify failed: %s", _e)
             return
-
-        # Restore per-session model override AFTER all retries complete.
-        if session._model_before_agent_switch is not None:
-            before = session._model_before_agent_switch
-            session._model_before_agent_switch = None
-            # Capture the model that was active during this turn BEFORE restoring
-            active_during_turn = session.model_override or settings.llm_model
-            session.model_override = before if before != "" else None
-            before_budget = session._budget_before_agent_switch
-            session._budget_before_agent_switch = None
-            session.context_budget_override = before_budget if before_budget not in (None, -1) else None
-            restored_to = session.model_override or settings.llm_model
-            logger.info("Restored per-session model override after agent turn and retries (was: %s)", before or "none")
-            session.emit_event(
-                {
-                    "type": "model.override",
-                    "from": active_during_turn,
-                    "to": session.model_override,
-                    "active": session.model_override is not None,
-                }
-            )
-            # Persist a model_divider so the switch-back is visible after reload.
-            # Only write it if the model actually changed (skip no-op restores).
-            if active_during_turn != restored_to:
-                import json as _json
-
-                try:
-                    db.add_message(
-                        session.session_id,
-                        "model_divider",
-                        "",
-                        metadata=_json.dumps(
-                            {
-                                "from": active_during_turn,
-                                "to": restored_to,
-                                "active": False,
-                                "baseline": settings.llm_model,
-                            }
-                        ),
-                    )
-                except Exception as _e:
-                    logger.debug("model_divider restore persist failed: %s", _e)
 
         # Stamp the worker's terminal summary file AFTER all reflect retries.
         # Skip when the worker is paused on ask_user — stamping now would
@@ -1745,11 +2765,10 @@ class SessionManager:
         # Everything below runs after IDLE_READY; an exception here escaped
         # _run_agent_safe's finally and left queued prompts undrained until
         # the next send. Each step is best-effort so _process_pending runs.
-        if not session.pending_messages:
-            try:
-                await self._sweep_db_pending(session, exclude_msg_id=_completed_turn_msg_id)
-            except Exception as _e:
-                logger.error("Post-turn DB pending sweep failed for %s: %s", session.session_id, _e)
+        try:
+            await self._sweep_db_pending(session, exclude_msg_id=_completed_turn_msg_id)
+        except Exception as _e:
+            logger.error("Post-turn DB pending sweep failed for %s: %s", session.session_id, _e)
 
         # Worker-specific: notify the parent session that this worker
         # turn has fully settled. Frontend listens for `worker.done`
@@ -1777,11 +2796,65 @@ class SessionManager:
             # Gap 1+2: wake parent if it's watching this worker.
             try:
                 await self._on_watched_worker_done(session)
+            except asyncio.CancelledError:
+                # The parent's cancel cascade reaches this worker's task while
+                # the resume it just triggered is mid-transcript-read. The
+                # parent's release is already scheduled by _resume_from_workers;
+                # re-raise so this task still ends as cancelled rather than
+                # looking like a clean finish.
+                logger.info(
+                    "Post-turn watcher notify cancelled for %s — parent release scheduled",
+                    session.session_id[:12],
+                )
+                raise
             except Exception as _e:
                 logger.error("Post-turn watcher notify failed for %s: %s", session.session_id, _e)
 
-        # Process pending messages.
-        await self._process_pending(session)
+        # The owning _run_agent_safe settles its outcome before queue dispatch.
+
+    def _restore_agent_model(self, session: AgentSession) -> None:
+        """Release an agent's temporary model choice on every exit, including cancel."""
+        # Restore per-session model override AFTER all retries complete.
+        if session._model_before_agent_switch is not None:
+            before = session._model_before_agent_switch
+            session._model_before_agent_switch = None
+            # Capture the model that was active during this turn BEFORE restoring
+            active_during_turn = session.model_override or settings.llm_model
+            session.model_override = before if before != "" else None
+            before_budget = session._budget_before_agent_switch
+            session._budget_before_agent_switch = None
+            session.context_budget_override = before_budget if before_budget not in (None, -1) else None
+            restored_to = session.model_override or settings.llm_model
+            logger.info("Restored per-session model override after agent turn and retries (was: %s)", before or "none")
+            session.emit_event(
+                {
+                    "type": "model.override",
+                    "from": active_during_turn,
+                    "to": session.model_override,
+                    "active": session.model_override is not None,
+                }
+            )
+            # Persist a model_divider so the switch-back is visible after reload.
+            # Only write it if the model actually changed (skip no-op restores).
+            if active_during_turn != restored_to:
+                import json as _json
+
+                try:
+                    db.add_message(
+                        session.session_id,
+                        "model_divider",
+                        "",
+                        metadata=_json.dumps(
+                            {
+                                "from": active_during_turn,
+                                "to": restored_to,
+                                "active": False,
+                                "baseline": settings.llm_model,
+                            }
+                        ),
+                    )
+                except Exception as _e:
+                    logger.debug("model_divider restore persist failed: %s", _e)
 
     # Cap on the last-assistant-message slice we persist in an auto-stamp.
     # Set to 2–3× `get_worker_result`'s 3000-char read cap so a future reader-side
@@ -1790,18 +2863,48 @@ class SessionManager:
     _STAMP_MAX_CHARS = 8000
 
     async def _finalize_worker(self, session: AgentSession) -> None:
-        """Ensure a worker produces a stamped summary file on completion.
+        """Ensure a worker's run ends with a report at the path its record names.
 
-        If the worker wrote its own `.worker_{id[:12]}_summary.md`, leave it alone.
-        Otherwise write a sentinel-prefixed file containing the last assistant
-        message so `get_worker_result` has something reliable to return.
+        If the worker wrote its own report, leave it alone. Otherwise write a
+        sentinel-prefixed file containing the last assistant message so
+        `get_worker_result` has something reliable to return.
+
+        The path comes from the run record, not from `settings.workspace_dir`:
+        a worker in a space writes its report into the space home, and stamping
+        the global root instead fabricated a second "report" out of the last
+        chat line while the real one sat unread (H08).
         """
         from pathlib import Path as _P
 
-        workspace = _P(settings.workspace_dir)
-        summary_path = workspace / f".worker_{session.session_id[:12]}_summary.md"
-        if summary_path.exists():
+        from core.extensions.orchestration import report as _wreport
+        from core.extensions.orchestration import worker_trust as _worker_trust
+
+        reason = session.termination_reason
+
+        existing = await asyncio.to_thread(_wreport.resolve_report, session.session_id)
+        if existing is not None:
+            # The worker wrote its own report: leave the bytes alone, but bind
+            # this run's grade to them. That binding is what lets a later read
+            # say "this changed after it was graded" instead of serving an
+            # edited artifact under an old verdict (H10).
+            _trust = await asyncio.to_thread(
+                _worker_trust, session.session_id, term_reason=reason, include_history=False
+            )
+            await asyncio.to_thread(
+                _wreport.record_grade,
+                session.session_id,
+                verdict=_trust.verdict,
+                verification=_trust.verification,
+                artifact=existing.path,
+            )
             return
+
+        _run = await asyncio.to_thread(_wreport.load_run, session.session_id)
+        summary_path = _P(
+            (_run or {}).get("report_path")
+            or (_P(session.workspace_home or settings.workspace_dir) / _wreport.report_name(session.session_id))
+        )
+        workspace = summary_path.parent
 
         # Grab the last assistant message as the best-available content.
         last_text = ""
@@ -1814,56 +2917,27 @@ class SessionManager:
         except Exception as e:
             logger.debug("Worker finalize: could not read messages for %s: %s", session.session_id, e)
 
-        # Classify from termination_reason, which survives the turn's return
-        # to IDLE_READY. The state itself says nothing here — the finally
-        # block has already transitioned home before we reach this point.
-        reason = session.termination_reason
-        # Pull the most recent reflect verdict (if any) to embed in the header.
-        # Reflect is the quality gate: when verdict != 'pass' (or reflect never
-        # ran) the stamped output should clearly say so, not just "auto-stamped"
-        # which reads as success.
-        reflect_verdict: str | None = None
-        reflect_reason: str = ""
-        try:
-            msgs = await asyncio.to_thread(db.get_messages, session.session_id, last=100)
-            for _m in reversed(msgs):
-                if _m.get("role") == "reflect":
-                    import json as _json
-
-                    try:
-                        _r = _json.loads(_m.get("content") or "{}")
-                        reflect_verdict = _r.get("verdict")
-                        reflect_reason = _r.get("reasoning", "")
-                    except (ValueError, TypeError):
-                        pass
-                    break
-        except Exception as _e:
-            logger.debug("Worker finalize: reflect lookup failed: %s", _e)
-
-        if reason in ("round_ceiling", "compaction_failed"):
-            header = "# INCOMPLETE (worker hit round ceiling / compaction failed)\n"
-        elif reason == "cancelled":
-            header = "# CANCELLED (worker was cancelled before completion)\n"
-        elif reason == "error" or (reason is None and session.error):
-            err = session.error or "unknown"
-            header = f"# ERROR (worker exited with error: {err})\n"
-        elif reflect_verdict == "escalate":
-            header = (
-                f"# ESCALATED (reflect verdict: escalate)\n"
-                f"# Reason: {reflect_reason or '(no reasoning provided)'}\n"
-                f"# Output below is the last assistant message — may not be the "
-                f"actual deliverable. Use get_worker_transcript for the full stream.\n"
+        # The header is the SAME record-derived state get_worker_result and the
+        # parent's resume manifest read. Three independently-written headers is
+        # how a cancelled run came to be stamped under an earlier run's pass.
+        # termination_reason survives the turn's return to IDLE_READY; the
+        # state itself says nothing by now.
+        trust = await asyncio.to_thread(
+            _worker_trust,
+            session.session_id,
+            term_reason=reason,
+            error=session.error or "",
+            include_history=False,
+        )
+        header = trust.interruption_note() + trust.verification_note()
+        if trust.verdict == "escalate":
+            header += (
+                "# Output below is the last assistant message — may not be the "
+                "actual deliverable. Use get_worker_transcript for the full stream.\n"
             )
-        elif reflect_verdict == "retry":
-            header = (
-                f"# UNVERIFIED (reflect verdict: retry, retries exhausted)\n"
-                f"# Reason: {reflect_reason or '(no reasoning provided)'}\n"
-            )
-        elif reflect_verdict == "pass":
+        if not header:
+            # A clean, current, verified pass. This file is ours and says so.
             header = "# AUTO-STAMPED (reflect=pass; worker did not write an explicit summary)\n"
-        else:
-            # No reflect verdict recorded (reflect disabled or hook never ran).
-            header = "# UNVERIFIED (no reflect verdict recorded — quality not gated)\n"
 
         truncated = len(last_text) > self._STAMP_MAX_CHARS
         body = last_text[: self._STAMP_MAX_CHARS] if last_text else "(no assistant output)"
@@ -1876,6 +2950,17 @@ class SessionManager:
 
         try:
             await asyncio.to_thread(_write)
+            # Record that WE wrote this header, over these exact bytes. That
+            # record is what makes the stamp recognizable without trusting the
+            # file's first line — the line a worker can author itself.
+            await asyncio.to_thread(_wreport.record_stamp, session.session_id, artifact=summary_path, header=header)
+            await asyncio.to_thread(
+                _wreport.record_grade,
+                session.session_id,
+                verdict=trust.verdict,
+                verification=trust.verification,
+                artifact=summary_path,
+            )
             logger.info(
                 "Auto-stamped worker summary for %s (reason=%s, truncated=%s)",
                 session.session_id,
@@ -1978,13 +3063,17 @@ class SessionManager:
             "injected_skill_name": scout_report.injected_skill_name,
             "from_cache": scout_report.from_cache,
             "from_fallback": scout_report.from_fallback,
+            # Why the deterministic report was used — "bypass" (cheap turn,
+            # skipped on purpose) or "degraded" (scout ran and produced nothing
+            # usable); None for a real scout report. Lets the box count them.
+            "fallback_reason": (
+                (getattr(scout_report, "fallback_reason", "") or "degraded") if scout_report.from_fallback else None
+            ),
             "latency_ms": scout_report.scout_latency_ms,
             "scout_model": scout_report.scout_model,
             # Observability fields (2026-08-28 scout audit): these existed on
             # the report but never reached the event, so the UI and every
-            # audit had to reconstruct them from post-mortems — and echo
-            # density (used_hints) was unmeasurable per-turn at all.
-            "used_hints": list(scout_report.used_hints or []),
+            # audit had to reconstruct them from post-mortems.
             "task_type": getattr(scout_report, "task_type", ""),
             "execution_mode": scout_report.execution_mode,
             "viability": scout_report.viability,
@@ -2084,7 +3173,9 @@ class SessionManager:
         finally:
             # Caller expects us to end in FINALIZING so post-hooks can re-run.
             current = sv2._current_state(session)
-            if current == sv2.SessionStateV2.PROCESSING:
+            if current == sv2.SessionStateV2.PAUSE_REQUESTED:
+                session.pause_event.set()
+            if current in TERMINATION_ROUTED_STATES:
                 v2_reason, v2_term = _map_termination_to_v2_reason(session.termination_reason)
                 try:
                     sv2.transition(
@@ -2178,58 +3269,128 @@ class SessionManager:
         # synthesis turn.
         await self._resume_from_workers(parent)
 
+    def _worker_results_already_collected(self, parent: AgentSession) -> bool:
+        """True when the parent's current turn already read every worker's
+        result, so a resume message would only ask it to repeat itself.
+
+        Scans the assistant rows since the last real (non-resume) user message
+        for get_worker_result calls naming each id the resume message would
+        list. Blocking DB read — callers run it off the loop.
+        """
+        import json as _json
+
+        from core.llm.types import is_rejected_call
+
+        ids = list(parent.worker_ids or [])
+        if not ids:
+            return False
+        try:
+            rows = db.get_messages(parent.session_id, last=200)
+        except Exception as e:
+            logger.debug("resume-skip check failed for %s: %s", parent.session_id, e)
+            return False
+        start = 0
+        for idx in range(len(rows) - 1, -1, -1):
+            row = rows[idx]
+            if row.get("role") == "user" and not str(row.get("content") or "").startswith(_WORKER_RESUME_PREFIX):
+                start = idx
+                break
+        collected: set[str] = set()
+        for row in rows[start:]:
+            if row.get("role") != "assistant" or not row.get("tool_calls"):
+                continue
+            try:
+                raw = row["tool_calls"]
+                calls = _json.loads(raw) if isinstance(raw, str) else raw
+            except (ValueError, TypeError):
+                continue
+            for call in calls or []:
+                if not isinstance(call, dict) or is_rejected_call(call):
+                    continue
+                fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                if (fn.get("name") or call.get("name")) != "get_worker_result":
+                    continue
+                args = fn.get("arguments") if fn else call.get("arguments")
+                text = args if isinstance(args, str) else _json.dumps(args or {})
+                collected.update(wid for wid in ids if wid in text)
+        return all(wid in collected for wid in ids)
+
     def _build_resume_message(self, parent: AgentSession) -> str:
         """Compose the synthetic message a parent receives on resume.
 
         Includes a per-worker terminal status (reflect verdict, error,
         cancellation) so the LLM is forced to acknowledge non-pass outcomes
         instead of having to discover them by reading get_worker_result()."""
+        # The inventory is the durable one. worker_ids is memory-only, so a
+        # restarted parent used to be handed "0 total" and then ordered to
+        # collect every worker "listed above".
+        inventory = self.worker_inventory(parent)
         lines = [
-            f"{_WORKER_RESUME_PREFIX} — {len(parent.worker_ids)} total]",
+            f"{_WORKER_RESUME_PREFIX} — {len(inventory)} total]",
         ]
         problem_workers: list[str] = []
-        for wid in parent.worker_ids:
+        for wid in inventory:
             w = self.get(wid)
-            if w is None:
-                # Full id — agent will copy this verbatim into get_worker_result.
-                lines.append(f"  - {wid}: (no longer in memory)")
-                continue
+            row = db.get_session(wid) or {}
+            # Run-scoped: a grade recorded below this run's message boundary
+            # graded earlier output, so it does not certify what the parent is
+            # about to synthesize (H10). The same scoping get_worker_result and
+            # the finalize stamp use — three readers, one record.
             verdict: str | None = None
+            verification = ""
             try:
-                import json as _json
+                from core.extensions.orchestration import report as _wreport
 
-                for m in reversed(db.get_messages(wid, last=100)):
-                    if m.get("role") == "reflect":
-                        try:
-                            verdict = _json.loads(m.get("content") or "{}").get("verdict")
-                        except (ValueError, TypeError):
-                            pass
-                        break
-            except Exception:
-                pass
-            tr = w.termination_reason or "unknown"
+                _current, _stale, _stale_seq = _wreport.run_scoped_reflect(wid)
+                verdict = (_current or {}).get("verdict")
+                verification = (_current or {}).get("verification") or ""
+                if verdict is None and _stale:
+                    verdict = "stale"
+            except Exception as _e:
+                logger.debug("resume manifest verdict lookup failed for %s: %s", wid, _e)
+            # Terminal metadata comes from the durable log whenever memory has
+            # none — a hydrated worker's object is real but incomplete, and the
+            # old `w is None` test could never reach the durable answer.
+            tr = (w.termination_reason if w is not None else None) or _durable_termination(wid) or "unknown"
+            err = w.error if w is not None else None
+            # Model and kind say who produced the output being synthesized.
+            ident = ", ".join(x for x in ((row.get("worker_kind") or ""), (row.get("model_override") or "")) if x)
+            suffix = f" [{ident}]" if ident else ""
             # Use the full worker id in the listing — earlier versions truncated
             # to wid[:8] for readability, but the agent then passed that short
             # form to get_worker_result and matched no row, returning a bogus
             # "no output" for workers that had real transcripts.
-            if w.error:
-                lines.append(f"  - {wid}: ERROR — {w.error[:80]}")
+            if err:
+                lines.append(f"  - {wid}{suffix}: ERROR — {err[:80]}")
                 problem_workers.append(wid)
             elif tr == "cancelled":
-                lines.append(f"  - {wid}: CANCELLED")
+                lines.append(f"  - {wid}{suffix}: CANCELLED")
+                problem_workers.append(wid)
+            elif tr == "interrupted":
+                lines.append(f"  - {wid}{suffix}: INTERRUPTED (the server restarted mid-turn)")
                 problem_workers.append(wid)
             elif verdict == "escalate":
-                lines.append(f"  - {wid}: ESCALATED — needs review")
+                lines.append(f"  - {wid}{suffix}: ESCALATED — needs review")
                 problem_workers.append(wid)
             elif verdict == "retry":
-                lines.append(f"  - {wid}: UNVERIFIED (retries exhausted)")
+                lines.append(f"  - {wid}{suffix}: UNVERIFIED (retries exhausted)")
+                problem_workers.append(wid)
+            elif verdict == "stale":
+                lines.append(f"  - {wid}{suffix}: UNVERIFIED (its last grade was of an earlier run)")
+                problem_workers.append(wid)
+            elif tr in ("round_ceiling", "stuck_loop", "budget_exhausted", "compaction_failed"):
+                lines.append(f"  - {wid}{suffix}: INCOMPLETE ({tr} — a hard cap, not completion)")
+                problem_workers.append(wid)
+            elif verdict == "pass" and verification and verification != "verified":
+                # A downgraded grade is pass for control flow only (H11).
+                lines.append(f"  - {wid}{suffix}: pass but UNVERIFIED (verification={verification})")
                 problem_workers.append(wid)
             elif verdict == "pass":
-                lines.append(f"  - {wid}: pass")
+                lines.append(f"  - {wid}{suffix}: pass")
             elif tr == "complete":
-                lines.append(f"  - {wid}: complete (no reflect verdict)")
+                lines.append(f"  - {wid}{suffix}: complete (no reflect verdict)")
             else:
-                lines.append(f"  - {wid}: {tr}")
+                lines.append(f"  - {wid}{suffix}: {tr}")
         lines.append(
             "Call get_worker_result(worker_id) for each worker (use the full id "
             "exactly as listed above) to read its full output."
@@ -2244,6 +3405,64 @@ class SessionManager:
             "deliverable is done."
         )
         return "\n".join(lines)
+
+    async def _settle_cancelled_awaiting_workers_locked(self, parent: AgentSession) -> bool:
+        """Release a parent parked in AWAITING_WORKERS whose turn was cancelled.
+
+        Caller holds `parent.lock`. Returns True when it did the release.
+
+        A parent suspended on await_workers has no task of its own, so every
+        cancel path's `task.cancel()` is a no-op for it and nothing walks it
+        back to IDLE_READY. Until this existed the only exit was the reaper's
+        empty-watch-set safety net, thirty minutes later, and a prompt sent
+        meanwhile queued behind a session that was never going to run.
+        """
+        if sv2._current_state(parent) is not sv2.SessionStateV2.AWAITING_WORKERS:
+            return False
+        try:
+            sv2.transition(
+                parent,
+                sv2.SessionStateV2.CANCELLING,
+                "cancel-requested",
+                termination_reason=sv2.TerminationReason.CANCELLED,
+            )
+            sv2.transition(
+                parent,
+                sv2.SessionStateV2.IDLE_READY,
+                "cancel-complete",
+            )
+        except Exception as _e:
+            logger.error(
+                "Cancel-after-workers transition failed for %s: %s",
+                parent.session_id,
+                _e,
+            )
+        # The watch-set is what a later worker callback resumes against, and
+        # what the reaper reads to decide a parked session is stuck. A
+        # cancelled turn wants neither.
+        parent._watched_worker_ids.clear()
+        self._persist_watched(parent)
+        parent.emit_event({"type": "turn.complete"})
+        try:
+            await asyncio.to_thread(
+                db.add_message,
+                parent.session_id,
+                "notice",
+                "[turn cancelled — workers cascade-cancelled by user]",
+            )
+        except Exception as _e:
+            logger.debug("Cascade-cancel notice insert skipped: %s", _e)
+        return True
+
+    async def _settle_cancelled_awaiting_workers(self, parent: AgentSession) -> bool:
+        """Lock-taking form of _settle_cancelled_awaiting_workers_locked.
+
+        Idempotent: whichever of the cancel routes, the resume path and the
+        finishing worker gets there first does the release, the rest see a
+        state that is no longer AWAITING_WORKERS and no-op.
+        """
+        async with parent.lock:
+            return await self._settle_cancelled_awaiting_workers_locked(parent)
 
     async def _resume_from_workers(self, parent: AgentSession) -> None:
         """Re-enter the parent session after all watched workers have completed.
@@ -2264,36 +3483,7 @@ class SessionManager:
             )
             # Honor the cancel: drive the parent back to IDLE_READY if it's
             # still suspended in AWAITING_WORKERS (no other path will).
-            current_v2 = sv2._current_state(parent)
-            if current_v2 is sv2.SessionStateV2.AWAITING_WORKERS:
-                async with parent.lock:
-                    try:
-                        sv2.transition(
-                            parent,
-                            sv2.SessionStateV2.CANCELLING,
-                            "cancel-requested",
-                            termination_reason=sv2.TerminationReason.CANCELLED,
-                        )
-                        sv2.transition(
-                            parent,
-                            sv2.SessionStateV2.IDLE_READY,
-                            "cancel-complete",
-                        )
-                    except Exception as _e:
-                        logger.error(
-                            "Cancel-after-workers transition failed for %s: %s",
-                            parent.session_id,
-                            _e,
-                        )
-                    parent.emit_event({"type": "turn.complete"})
-                    try:
-                        db.add_message(
-                            parent.session_id,
-                            "notice",
-                            "[turn cancelled — workers cascade-cancelled by user]",
-                        )
-                    except Exception as _e:
-                        logger.debug("Cascade-cancel notice insert skipped: %s", _e)
+            await self._settle_cancelled_awaiting_workers(parent)
             return
 
         # Workers may have run for a long time, draining the parent's LLM
@@ -2310,36 +3500,95 @@ class SessionManager:
             logger.debug("Resume-from-workers budget extend failed: %s", _ext_err)
 
         deferred_task: asyncio.Task | None = None
-        async with parent.lock:
-            current_v2 = sv2._current_state(parent)
-            # Off-loop: one 100-row transcript read per worker, under the
-            # parent lock — an orchestrator with 20 workers stalled every
-            # SSE stream for the duration when this ran inline.
-            resume_msg = await asyncio.to_thread(self._build_resume_message, parent)
-            # A fast worker can finish while the parent's suspended turn is
-            # still settling its post-hooks. Starting the synthesis turn now
-            # would run two turns against one transcript, so queue it and
-            # dispatch when the parent's task exits.
-            if self._turn_in_flight(parent):
-                logger.warning(
-                    "Session %s: worker resume queued — the suspended turn is still settling",
-                    parent.session_id[:12],
+        try:
+            async with parent.lock:
+                current_v2 = sv2._current_state(parent)
+                # Gap 1 only: the parent went idle on its own, which usually means
+                # its turn already collected everything. Field case (session
+                # 3dc5a307d751): it had called get_worker_result for all four
+                # workers and answered, and the resume injected the "[Watched
+                # workers have completed" message anyway — a redundant turn that
+                # re-read the same results, and whose grade then superseded the
+                # real turn's. A parked (AWAITING_WORKERS) parent is never skipped:
+                # it is waiting precisely because it has not collected them.
+                if current_v2 is sv2.SessionStateV2.IDLE_READY and await asyncio.to_thread(
+                    self._worker_results_already_collected, parent
+                ):
+                    logger.info(
+                        "Session %s: worker resume skipped — results already collected this turn",
+                        parent.session_id[:12],
+                    )
+                    parent._watched_worker_ids.clear()
+                    self._persist_watched(parent)
+                    parent.emit_event(
+                        {
+                            "type": "workers.resume_skipped",
+                            "workers": list(parent.worker_ids),
+                            "reason": "results-already-collected",
+                        }
+                    )
+                    return
+                # Off-loop: one 100-row transcript read per worker, under the
+                # parent lock — an orchestrator with 20 workers stalled every
+                # SSE stream for the duration when this ran inline.
+                resume_msg = await asyncio.to_thread(self._build_resume_message, parent)
+                # Re-validate before dispatching. Both awaits above are
+                # to_thread hops, and neither cancel route takes this lock, so a
+                # cancel that landed during the transcript read is invisible to
+                # every check made before it. Launching anyway restarted the work
+                # the user had just stopped and cleared the flag that said so.
+                if parent.cancel_requested or sv2._current_state(parent) is not current_v2:
+                    logger.info(
+                        "Session %s: worker resume abandoned — cancelled or state moved during prep",
+                        parent.session_id[:12],
+                    )
+                    await self._settle_cancelled_awaiting_workers_locked(parent)
+                    return
+                # A fast worker can finish while the parent's suspended turn is
+                # still settling its post-hooks. Starting the synthesis turn now
+                # would run two turns against one transcript, so queue it and
+                # dispatch when the parent's task exits.
+                if self._turn_in_flight(parent):
+                    logger.warning(
+                        "Session %s: worker resume queued — the suspended turn is still settling",
+                        parent.session_id[:12],
+                    )
+                    parent.pending_messages.append(PendingMessage(resume_msg, None, False))
+                    deferred_task = parent.task
+                elif current_v2 is sv2.SessionStateV2.AWAITING_WORKERS:
+                    # Parent is suspended waiting — start a new agent turn directly.
+                    # _run_agent_safe detects AWAITING_WORKERS and uses reason="workers-complete".
+                    if self.shutting_down:
+                        logger.info(
+                            "Session %s: worker resume abandoned — admission is closed",
+                            parent.session_id[:12],
+                        )
+                        return
+                    parent.cancel_requested = False
+                    parent.turn = TurnState()
+                    parent.error = None
+                    parent.termination_reason = None
+                    parent.task = self._start_turn_task(parent, self._run_agent_safe(parent, resume_msg, None))
+                elif current_v2 is sv2.SessionStateV2.IDLE_READY:
+                    # Parent already returned to idle; push as a pending message so
+                    # it's processed on the next available slot (Gap 1 auto-resume).
+                    parent.pending_messages.append(PendingMessage(resume_msg, None, False))
+                    # _process_pending acquires lock itself, so release first.
+        except asyncio.CancelledError:
+            # The ordinary resume runs inside the finishing worker's own
+            # task, and a cancel cascades worker.task.cancel() — which lands
+            # on the transcript read above. CancelledError is not an
+            # Exception, so _finalize_turn's handler let it through and the
+            # parent stayed parked in AWAITING_WORKERS with cancel_requested
+            # set, an empty watch-set and no notice; only the reaper's
+            # 30-minute safety net would ever have released it. Settle from a
+            # task of our own — this one is being torn down.
+            if parent.cancel_requested and not self.shutting_down:
+                self._spawn_detached(
+                    self._settle_cancelled_awaiting_workers(parent),
+                    "settle-cancelled-parent",
                 )
-                parent.pending_messages.append(PendingMessage(resume_msg, None, False))
-                deferred_task = parent.task
-            elif current_v2 is sv2.SessionStateV2.AWAITING_WORKERS:
-                # Parent is suspended waiting — start a new agent turn directly.
-                # _run_agent_safe detects AWAITING_WORKERS and uses reason="workers-complete".
-                parent.cancel_requested = False
-                parent.turn = TurnState()
-                parent.error = None
-                parent.termination_reason = None
-                parent.task = asyncio.create_task(self._run_agent_safe(parent, resume_msg, None))
-            elif current_v2 is sv2.SessionStateV2.IDLE_READY:
-                # Parent already returned to idle; push as a pending message so
-                # it's processed on the next available slot (Gap 1 auto-resume).
-                parent.pending_messages.append(PendingMessage(resume_msg, None, False))
-                # _process_pending acquires lock itself, so release first.
+            raise
 
         # Outside the lock: drain pending for the IDLE_READY case.
         if deferred_task is not None:
@@ -2367,6 +3616,14 @@ class SessionManager:
         if self.shutting_down:
             return
         async with session.lock:
+            # Recheck under the lock — admission may have closed while this
+            # coroutine waited for it, after the drain snapshot was taken.
+            if self.shutting_down:
+                return
+            # Anything that left the queue without running (the pending-message
+            # endpoint, a purge) settles its handle here rather than leaving a
+            # caller waiting on work that no longer exists.
+            self._reap_pending_execs(session)
             if not session.pending_messages:
                 return
             # Dispatch only from an explicitly ready state. The pre-v2 enum
@@ -2389,7 +3646,22 @@ class SessionManager:
                     session.session_id[:12],
                 )
                 return
-            entry = PendingMessage.coerce(session.pending_messages.popleft())
+            # A durably debited continuation is claimed here, immediately
+            # before the turn that spends it starts, and settled immediately
+            # after. Anything the claim refuses — the goal was paused or
+            # completed while this sat in the queue, the user cancelled, the
+            # row was already dispatched by someone else — is dropped and the
+            # next entry considered, so a refused continuation cannot block a
+            # real user message behind it.
+            entry = None
+            while session.pending_messages:
+                candidate = PendingMessage.coerce(session.pending_messages.popleft())
+                if await self._admit_continuation(session, candidate):
+                    entry = candidate
+                    break
+                self._reap_pending_execs(session, msg_ids=[candidate.msg_id], error="continuation refused")
+            if entry is None:
+                return
 
             # Per-turn transparency: only a goal auto-continuation turn is
             # snooze-transparent. A real user message dispatched from the
@@ -2419,15 +3691,99 @@ class SessionManager:
                 except Exception as _e:
                     logger.debug("Budget reset failed for %s: %s", session.session_id, _e)
 
-            # Start a new agent task for the pending message while lock is held
-            session.task = asyncio.create_task(
+            # Retire the previous turn's outcome. session.error and
+            # session.termination_reason are session-scoped, and prompt()
+            # clears both before an immediately dispatched turn; a queued
+            # turn entered here and inherited them. A turn that drained the
+            # queue behind a failed one then finished clean still read as
+            # errored: reflect and evaluate both return at their
+            # `if session.error` guard, the round-cap auto-continuation
+            # refuses to continue, and /status plus worker.done report the
+            # dead turn's error. The previous turn is done classifying
+            # itself by now — _turn_in_flight above says so — so this is the
+            # same safe point prompt() uses. cancel_requested is deliberately
+            # left alone: prompt() clears it because the user's new message
+            # is itself the intent to proceed, whereas a cancel that lands
+            # while this queue drains is a stop this turn must still honour.
+            session.error = None
+            session.termination_reason = None
+
+            # Start a new agent task for the pending message while lock is held.
+            # The entry's own execution — its options and its outcome handle —
+            # comes back out of the pending registry here, so the turn that
+            # runs the message is the turn its options are applied to.
+            _exec = self._take_pending_exec(session.session_id, entry.msg_id)
+            if _exec is not None:
+                _exec.mark_running()
+            session.task = self._start_turn_task(
+                session,
                 self._run_agent_safe(
                     session,
                     entry.message,
                     entry.system_prompt,
                     pre_saved=entry.pre_saved,
-                )
+                    execution=_exec,
+                ),
             )
+            # Settle the claim now that the turn exists. A crash before this
+            # leaves the row 'claimed', and boot recovery re-offers it with a
+            # verify-before-repeating preamble rather than replaying it: the
+            # turn may already have run a command or written a file, and
+            # durable dispatch is not exactly-once side effects.
+            if entry.continuation_id is not None:
+                try:
+                    await asyncio.to_thread(
+                        db.settle_goal_continuation, entry.continuation_id, "dispatched", "turn started"
+                    )
+                except Exception as _e:
+                    logger.warning("Continuation %s settle failed: %s", entry.continuation_id, _e)
+
+    async def _admit_continuation(self, session: AgentSession, entry: PendingMessage) -> bool:
+        """Claim a durable continuation immediately before it runs.
+
+        False means do not dispatch this entry. Anything without a
+        continuation_id — every real user message, every synthetic worker
+        resume — passes straight through.
+
+        The re-checks here are the ones that can change while an entry waits
+        in the queue: an explicit user stop, a goal that was paused or
+        completed in the meantime, and queued user direction, which outranks
+        the machine's own continuation the same way it does at enqueue time.
+        """
+        if entry.continuation_id is None:
+            return True
+        cid = entry.continuation_id
+
+        async def _abandon(reason: str) -> bool:
+            logger.info("Continuation %s not dispatched: %s", cid, reason)
+            try:
+                await asyncio.to_thread(db.settle_goal_continuation, cid, "abandoned", reason)
+            except Exception as _e:
+                logger.warning("Continuation %s abandon-settle failed: %s", cid, _e)
+            return False
+
+        if session.cancel_requested:
+            return await _abandon("the user cancelled the session")
+        if not session.pause_event.is_set():
+            return await _abandon("the session is paused")
+        try:
+            row = await asyncio.to_thread(db.get_goal_continuation, cid)
+            goal = await asyncio.to_thread(db.get_goal, int(row["goal_id"])) if row else None
+        except Exception as _e:
+            logger.warning("Continuation %s lookup failed: %s", cid, _e)
+            return await _abandon(f"outbox lookup failed: {_e}")
+        if goal is None or goal.get("status") != "active":
+            return await _abandon(f"goal is {goal.get('status') if goal else 'gone'}, not active")
+        if any(PendingMessage.coerce(e).msg_id is not None for e in session.pending_messages):
+            return await _abandon("a queued user message supersedes it")
+
+        claimed = await asyncio.to_thread(db.claim_goal_continuation, cid)
+        if claimed is None:
+            # Not an error: a duplicate dispatch attempt losing the race is
+            # exactly what the claim exists to make safe.
+            logger.info("Continuation %s already claimed or settled — not dispatching twice", cid)
+            return False
+        return True
 
     def _find_db_orphans(self, session: AgentSession) -> list[dict]:
         """Return DB user messages that have no subsequent assistant response.
@@ -2435,12 +3791,17 @@ class SessionManager:
         Uses db.get_orphaned_user_messages which walks the message sequence and
         returns any user message immediately followed by another user message (or
         end-of-session) with no assistant message between them. Worker sessions
-        never receive user-initiated follow-ups, so they are skipped.
+        recover only explicitly pending deliveries, not inferred assignments.
         """
-        if session.session_type == "worker":
-            return []
         try:
-            return db.get_orphaned_user_messages(session.session_id)
+            rows = db.get_orphaned_user_messages(session.session_id)
+            if session.session_type == "worker":
+                # Workers recover explicit unread deliveries, never infer a new
+                # run from their original assignment's transcript shape.
+                return [
+                    row for row in rows if json.loads(row.get("metadata") or "{}").get("delivery_status") == "pending"
+                ]
+            return rows
         except Exception as e:
             logger.warning("_find_db_orphans error for %s: %s", session.session_id[:12], e)
             return []
@@ -2452,8 +3813,8 @@ class SessionManager:
     ) -> None:
         """Re-queue any DB-orphaned user messages into pending_messages.
 
-        Called at turn finalization when pending_messages is empty (Window A:
-        server restarted between FINALIZING→IDLE_READY and _process_pending).
+        Called at turn finalization, including when normal prompts are already
+        queued. Recovers deliveries missed by the last context compilation.
         The duplicate-ID guard prevents double-queuing if the in-memory path
         already captured the same message.
 
@@ -2479,9 +3840,10 @@ class SessionManager:
         now = time.monotonic()
         for o in orphans:
             msg_id = o["id"]
-            session.swept_orphan_ids.add(msg_id)
             if any(PendingMessage.coerce(e).msg_id == msg_id for e in session.pending_messages):
                 continue
+            db.requeue_message_delivery(session.session_id, msg_id)
+            session.swept_orphan_ids.add(msg_id)
             session.pending_messages.append(PendingMessage(o.get("content", ""), "", True, now, msg_id))
         # Only advance the watermark — never regress it. A concurrent prompt()
         # running without the lock may have already set last_user_msg_id to a
@@ -2613,6 +3975,7 @@ class SessionManager:
             # The authoritative state (one of the 10 SessionStateV2 values).
             "state": v2_state.value,
             "compat_status": sv2.compat_status(v2_state),
+            "capabilities": sv2.capabilities(session),
             "session_type": session.session_type,
             "error": session.error,
             "termination_reason": session.termination_reason,
@@ -2636,7 +3999,7 @@ class SessionManager:
     def active_count(self) -> int:
         return len(self._sessions)
 
-    def _working_sessions(self, strict: bool = False):
+    def _working_sessions(self, strict: bool = False, transparent: bool = True):
         """Yield the in-memory sessions that are actually doing something.
 
         The single definition of "busy", so the question "is anything
@@ -2644,10 +4007,16 @@ class SessionManager:
         answer from two different rules.
 
         strict=True ignores goal-continuation transparency: only canary
-        sessions stay invisible. Mutating snooze work (adaptive applies,
-        memory-store surgery) uses this so it never runs while a goal turn
-        is mid-flight — a mid-turn prompt/memory mutation changes the very
-        turn the tripwire would then attribute it to.
+        sessions stay invisible. Mutating snooze work (memory-store surgery,
+        skill-file applies) uses this so it never runs while a goal turn is
+        mid-flight — a mid-turn memory mutation changes the very turn that
+        is reading it.
+
+        transparent=False drops both exemptions: nothing is invisible. Both
+        exemptions exist so snooze does not deadlock against its own sweeps,
+        which is a scheduling question; asked as proof that nothing is
+        WRITING to SQLite, even strict=True answered "idle" through a canary
+        turn that was mid-write (3.2.2 audit S07).
 
         Uses the v2 state machine directly. AWAITING_USER and AWAITING_WORKERS
         are excluded (agent genuinely suspended); FINALIZING is caught by the
@@ -2664,7 +4033,9 @@ class SessionManager:
         from core.snooze import SNOOZE_TRANSPARENT_TYPES, snooze_transparent
 
         for session in list(self._sessions.values()):
-            if strict:
+            if not transparent:
+                pass  # every turn counts, canaries and goal continuations too
+            elif strict:
                 if session.session_type in SNOOZE_TRANSPARENT_TYPES:
                     continue
             elif snooze_transparent(session):
@@ -2681,6 +4052,16 @@ class SessionManager:
         generator is lazy, so this still stops at the first busy session.
         """
         return next(self._working_sessions(strict), None) is not None
+
+    def has_database_writers(self) -> bool:
+        """True if any in-memory session is mid-turn — no exemptions.
+
+        What a database-exclusive operation has to ask. `has_active_work()`
+        answers the idle-SCHEDULING question, and both of its strictness
+        levels look through a canary turn, which writes to the same file as
+        any other turn. See _working_sessions(transparent=False).
+        """
+        return next(self._working_sessions(transparent=False), None) is not None
 
     def busy_count(self, strict: bool = False) -> int:
         """How many in-memory sessions are non-idle (see _working_sessions).

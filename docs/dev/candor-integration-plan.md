@@ -1,5 +1,7 @@
 # Candor integration plan — operational memory as a toggleable add-on
 
+> **RETIRED 2026-10.** Candor was removed in 3.2 (zero tool calls, no measurable benefit); this plan is kept as history only. See [../upgrade.md](../upgrade.md).
+
 Status: **phases 0–2 implemented** (2026-07-29) — see `core/extensions/candor/`,
 `sessions/hooks.py:_maybe_candor`, snooze Activity 12b, and the scout
 `_gather_candor_intel` preload. Phase 3 (backfill, settlement loop, `do:`

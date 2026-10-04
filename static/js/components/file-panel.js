@@ -15,9 +15,8 @@ import {
     buildActiveTab, buildScheduledTab, buildHistoryTab,
     setJobsCallbacks, clearElapsedTimers,
 } from './modals/jobs.js';
-import { renderAdaptiveTab } from './modals/adaptive.js';
 import { renderCanaryTab } from './modals/canary.js';
-import { renderTelosTab } from './modals/telos.js';
+import { renderTrustTab } from './modals/trust.js';
 
 // ---------------------------------------------------------------------------
 // Monaco Editor (vendored) with lightweight textarea fallback
@@ -207,7 +206,7 @@ const DEFAULT_WIDTH = 360;
 //
 // The Explorer carried nine peer tabs in one wrapping strip. At any panel
 // width worth using they took two rows of ten-point uppercase, and nothing
-// said that "Telos" and "Workspace" are different KINDS of thing — a file
+// said that "Canary" and "Workspace" are different KINDS of thing — a file
 // browser sat beside a governance surface as equals.
 //
 // Five groups, each with its own sub-tabs, puts the nine leaves one level
@@ -246,9 +245,10 @@ export const EXPLORER_GROUPS = [
     {
         key: 'tuning', label: 'Self-tuning', icon: 'refresh',
         tabs: [
-            { key: 'adaptive', label: 'Learning', term: 'Adaptive' },
             { key: 'canary', label: 'Self-checks', term: 'Canary' },
-            { key: 'telos', label: 'Goals', term: 'Telos' },
+            // Last, and deliberately so: it reads across the suite and the
+            // grader rather than governing a subsystem of its own.
+            { key: 'trust', label: 'Trust' },
         ],
     },
 ];
@@ -359,6 +359,14 @@ const BINARY_EXTS = new Set([
     '.sqlite', '.db', '.pyc', '.class', '.o', '.a',
 ]);
 const MAX_TEXT_SIZE = 2 * 1024 * 1024; // 2MB — don't load larger files as text
+// The image path had no ceiling at all: resp.blob() buffered whatever the
+// server sent, and IMAGE_EXTS includes .svg, so a generated plot or a
+// multi-megabyte SVG went straight into the tab's memory. 16MB is generous
+// for a screenshot and still bounded; past it the viewer falls back to the
+// same 'too-large' card the text path uses, which still offers open and
+// download. This is a COMPLEMENT to the lifecycle below, never a substitute
+// for it — a bounded leak is still a leak. (S21)
+const MAX_IMAGE_SIZE = 16 * 1024 * 1024; // 16MB — don't buffer larger images as blobs
 
 function getExt(name) {
     const dot = name.lastIndexOf('.');
@@ -552,6 +560,9 @@ export function toggleFilePanel() {
         document.getElementById('files-btn')?.classList.add('active');
         loadTabData();
     } else {
+        // Closing the panel is panel teardown: the preview stops being visible,
+        // so it stops being owned. (S21)
+        _disposePreview();
         _panel.classList.remove('open');
         _panel.style.width = '';
         document.getElementById('files-btn')?.classList.remove('active');
@@ -618,9 +629,8 @@ function buildPanelDOM() {
     const jobsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'jobs', id: 'fp-jobs' });
     const toolsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'tools', id: 'fp-tools' });
     const mcpContent = el('div', { class: 'fp-tab-content', 'data-tab': 'mcp', id: 'fp-mcp' });
-    const adaptiveContent = el('div', { class: 'fp-tab-content', 'data-tab': 'adaptive', id: 'fp-adaptive' });
     const canaryContent = el('div', { class: 'fp-tab-content', 'data-tab': 'canary', id: 'fp-canary' });
-    const telosContent = el('div', { class: 'fp-tab-content', 'data-tab': 'telos', id: 'fp-telos' });
+    const trustContent = el('div', { class: 'fp-tab-content', 'data-tab': 'trust', id: 'fp-trust' });
 
     _panel.appendChild(handle);
     _panel.appendChild(header);
@@ -631,9 +641,8 @@ function buildPanelDOM() {
     _panel.appendChild(toolsContent);
     _panel.appendChild(mcpContent);
     _panel.appendChild(jobsContent);
-    _panel.appendChild(adaptiveContent);
     _panel.appendChild(canaryContent);
-    _panel.appendChild(telosContent);
+    _panel.appendChild(trustContent);
 
     renderTabs();
 }
@@ -717,6 +726,9 @@ function _selectTab(key) {
     _state.tab = key;
     _state.group = _groupOf(key).key;
     _state.groupTabs[_state.group] = key;
+    // Leaving the tab is leaving the preview: without this the blob stayed
+    // pinned for the life of the tab, invisible and unreachable. (S21)
+    _disposePreview();
     _state.viewMode = 'tree';
     _state.currentFile = null;
     renderTabs();
@@ -785,7 +797,7 @@ function renderTabs() {
                 'aria-controls': `fp-${t.key}`,
                 tabindex: selected ? '0' : '-1',
                 // The internal term stays one hover away: the docs, the
-                // settings and the agent's logs all still say "Adaptive".
+                // settings and the agent's logs all still say "Canary".
                 title: t.term ? `${t.label} (${t.term})` : t.label,
             }, [text(t.label)]);
             btn.addEventListener('click', () => _selectTab(t.key));
@@ -826,9 +838,8 @@ async function loadTabData() {
     else if (_state.tab === 'tools') await loadTools();
     else if (_state.tab === 'mcp') await loadMcp();
     else if (_state.tab === 'jobs') await loadJobs();
-    else if (_state.tab === 'adaptive') await renderAdaptiveTab(document.getElementById('fp-adaptive'));
     else if (_state.tab === 'canary') await renderCanaryTab(document.getElementById('fp-canary'));
-    else if (_state.tab === 'telos') await renderTelosTab(document.getElementById('fp-telos'));
+    else if (_state.tab === 'trust') await renderTrustTab(document.getElementById('fp-trust'));
 }
 
 // ---------------------------------------------------------------------------
@@ -1235,55 +1246,176 @@ function _renderEntries(parent, entries) {
 // Viewer
 // ---------------------------------------------------------------------------
 
+// ── preview ownership (S21) ────────────────────────────────────────────────
+//
+// A blob: URL is an allocation on the DOCUMENT, not on the <img> that uses it.
+// Dropping the element, or the string, or the whole viewer frees nothing: the
+// image data stays resident for the life of the tab until someone calls
+// revokeObjectURL on that exact string. Revocation used to hang off the Back
+// button alone, so every other way of leaving a preview — a tab change, the
+// next file, deleting the file, closing the panel — pinned another copy. Fifty
+// screenshots in a working session is ~100MB the tab never gives back.
+//
+// The contract is a single owner. Exactly one preview URL is owned at a time,
+// `_previewUrl` is it, and the invariant is that it is non-null only while
+// `_state.currentFile` is the image it belongs to. Everything that installs a
+// preview goes through _installPreview (which revokes the outgoing one), and
+// everything that stops showing one goes through _disposePreview.
+//
+// Loads are generational because viewFile awaits. Each load claims a
+// generation on entry; anything that installs or retires a preview moves the
+// generation on, so a response that lands into a newer one revokes the blob it
+// just created instead of installing it over the newer view. That is not only
+// a leak fix: without it, two clicks whose fetches resolve out of order leave
+// the viewer showing the file the user navigated AWAY from — for text as well
+// as images. It is the same guard _wsSeq already applies to directory
+// listings, which is where the shape is borrowed from.
+let _previewUrl = null;   // the one object URL this panel owns, or null
+let _previewSeq = 0;      // ownership generation for preview loads
+
+function _releasePreviewUrl() {
+    if (!_previewUrl) return;
+    URL.revokeObjectURL(_previewUrl);
+    _previewUrl = null;
+}
+
+/** Claim the generation for a load that is about to start. */
+function _startPreviewLoad() { return ++_previewSeq; }
+
+/** True once anything else has taken the viewer over from generation `gen`. */
+function _previewSuperseded(gen) { return gen !== _previewSeq; }
+
+/**
+ * Make `file` the preview on screen, revoking whatever URL the outgoing one
+ * owned. `url` is the object URL the new file owns (images only), or null —
+ * a video/audio/binary preview references /workspace/<path> directly and owns
+ * nothing.
+ */
+function _installPreview(file, url = null) {
+    _releasePreviewUrl();
+    _previewUrl = url;
+    _state.currentFile = file;
+    _state.viewMode = 'viewer';
+    _state.dirty = false;
+}
+
+/**
+ * Retire the current preview and invalidate every load still in flight. A
+ * revoked blob cannot be rendered again, so the file it backed goes with it —
+ * leaving `currentFile` behind would show a broken image on the next paint.
+ * Only the URL this preview owns is revoked, never a replacement's. Safe to
+ * call with no preview open, which is why every leave-the-viewer path can call
+ * it unconditionally.
+ */
+function _disposePreview() {
+    if (_previewUrl) {
+        _releasePreviewUrl();
+        if (_state.currentFile?.type === 'image') {
+            _state.currentFile = null;
+            _state.viewMode = 'tree';
+        }
+    }
+    return ++_previewSeq;
+}
+
+/** Back out of the viewer to the tree. All four Back buttons come through here. */
+function _backToTree(rerender) {
+    _disposePreview();
+    _state.viewMode = 'tree';
+    _state.currentFile = null;
+    rerender();
+}
+
+/**
+ * A file that no longer exists must not stay on screen, and if it was an image
+ * preview its blob has to go with it. `path` matches the open file itself or
+ * any directory above it.
+ */
+function _closeViewerFor(path) {
+    const open = _state.currentFile?.path;
+    if (open !== path && !open?.startsWith(path + '/')) return false;
+    _disposePreview();
+    _state.currentFile = null;
+    _state.viewMode = 'tree';
+    return true;
+}
+// ── end preview ownership ──────────────────────────────────────────────────
+
 async function viewFile(path, source = 'workspace') {
     const url = `/workspace/${path}`;
+    // Claiming the generation here is what makes the SECOND click authoritative:
+    // from this line on, whatever this call loads is the only thing allowed to
+    // reach the viewer, and any earlier load is already obsolete.
+    const gen = _startPreviewLoad();
     try {
         const name = path.split('/').pop();
         const fileUrl = url;
 
         // Media files — don't load into memory, just reference the URL
         if (isVideo(name)) {
-            _state.currentFile = { path, content: fileUrl, source, type: 'video', name };
+            _installPreview({ path, content: fileUrl, source, type: 'video', name });
         } else if (isAudio(name)) {
-            _state.currentFile = { path, content: fileUrl, source, type: 'audio', name };
+            _installPreview({ path, content: fileUrl, source, type: 'audio', name });
         } else if (isBinary(name)) {
-            _state.currentFile = { path, content: '', source, type: 'binary', name, fileUrl };
+            _installPreview({ path, content: '', source, type: 'binary', name, fileUrl });
         } else {
             // Fetch the file — check size first via HEAD for non-image files
             const resp = await fetch(url, { headers: _authHdr() });
             if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+            const size = parseInt(resp.headers.get('content-length') || '0', 10);
 
             if (isImage(name)) {
-                const blob = await resp.blob();
-                const blobUrl = URL.createObjectURL(blob);
-                _state.currentFile = { path, content: blobUrl, source, type: 'image', name };
-            } else {
-                // Check content-length to avoid loading huge text files
-                const size = parseInt(resp.headers.get('content-length') || '0', 10);
-                if (size > MAX_TEXT_SIZE) {
-                    _state.currentFile = {
+                if (size > MAX_IMAGE_SIZE) {
+                    if (_previewSuperseded(gen)) return;
+                    _installPreview({
                         path, content: '', source, type: 'too-large', name,
                         fileUrl, fileSize: size,
-                    };
+                    });
                 } else {
-                    const content = await resp.text();
-                    const mtime = _mtimeOf(resp);
-                    // Double-check: if the fetched text is huge (chunked response with no content-length)
-                    if (content.length > MAX_TEXT_SIZE) {
-                        _state.currentFile = {
-                            path, content: content.slice(0, MAX_TEXT_SIZE),
-                            source, type: 'text', name, truncated: true, mtime,
-                        };
+                    const blob = await resp.blob();
+                    // Chunked response with no content-length: the bytes are
+                    // already here, but they must not become a blob URL.
+                    if (blob.size > MAX_IMAGE_SIZE) {
+                        if (_previewSuperseded(gen)) return;
+                        _installPreview({
+                            path, content: '', source, type: 'too-large', name,
+                            fileUrl, fileSize: blob.size,
+                        });
                     } else {
-                        _state.currentFile = { path, content, source, type: 'text', name, mtime };
+                        const blobUrl = URL.createObjectURL(blob);
+                        // Overtaken while the bytes were arriving: revoke the URL
+                        // we just made rather than installing a file the user has
+                        // already navigated away from.
+                        if (_previewSuperseded(gen)) { URL.revokeObjectURL(blobUrl); return; }
+                        _installPreview({ path, content: blobUrl, source, type: 'image', name }, blobUrl);
                     }
+                }
+            } else if (size > MAX_TEXT_SIZE) {
+                if (_previewSuperseded(gen)) return;
+                _installPreview({
+                    path, content: '', source, type: 'too-large', name,
+                    fileUrl, fileSize: size,
+                });
+            } else {
+                const content = await resp.text();
+                const mtime = _mtimeOf(resp);
+                if (_previewSuperseded(gen)) return;
+                // Double-check: if the fetched text is huge (chunked response with no content-length)
+                if (content.length > MAX_TEXT_SIZE) {
+                    _installPreview({
+                        path, content: content.slice(0, MAX_TEXT_SIZE),
+                        source, type: 'text', name, truncated: true, mtime,
+                    });
+                } else {
+                    _installPreview({ path, content, source, type: 'text', name, mtime });
                 }
             }
         }
-        _state.viewMode = 'viewer';
-        _state.dirty = false;
         renderCurrentTab();
     } catch (e) {
+        // A load the user has already left must not pop an error over the file
+        // they are actually looking at.
+        if (_previewSuperseded(gen)) return;
         notify('error', `Could not open ${path}: ${e.message || e}`);
     }
 }
@@ -1296,14 +1428,7 @@ function renderViewer(container) {
     const backBtn = el('button', {
         class: 'fp-toolbar-back', title: 'Back to tree', 'aria-label': 'Back to the file tree',
     }, [icon('arrow-left')]);
-    backBtn.addEventListener('click', () => {
-        if (file.type === 'image' && file.content.startsWith('blob:')) {
-            URL.revokeObjectURL(file.content);
-        }
-        _state.viewMode = 'tree';
-        _state.currentFile = null;
-        renderCurrentTab();
-    });
+    backBtn.addEventListener('click', () => _backToTree(renderCurrentTab));
 
     const actions = el('div', { class: 'fp-toolbar-actions' });
 
@@ -1454,10 +1579,21 @@ function _mtimeOf(resp) {
 // user needs to see which file this is about. (S3)
 function _showSaveConflict(container, { onReload, onOverwrite }) {
     container.querySelector('.fp-conflict')?.remove();
+    // The toolbar's own save button re-sends the same draft against the same
+    // base version. It used to be left enabled and dirty beside this banner,
+    // so a user who reached for it instead of answering here got a 200 — the
+    // 409 was a one-shot warning and the other writer's work died on the
+    // second click, silently. It is parked until one of these two answers
+    // the question. (S05)
+    const saveBtn = container.querySelector('.save-btn');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.className = 'fp-btn save-btn'; saveBtn.textContent = 'save'; }
+    const release = () => {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+    };
     const reloadBtn = el('button', { class: 'fp-btn' }, [text('Reload')]);
-    reloadBtn.addEventListener('click', () => { box.remove(); onReload(); });
+    reloadBtn.addEventListener('click', () => { box.remove(); release(); onReload(); });
     const overwriteBtn = el('button', { class: 'fp-btn fp-btn-danger' }, [text('Overwrite')]);
-    overwriteBtn.addEventListener('click', () => { box.remove(); onOverwrite(); });
+    overwriteBtn.addEventListener('click', () => { box.remove(); release(); onOverwrite(); });
     const box = el('div', { class: 'fp-conflict', role: 'alert' }, [
         el('span', { class: 'fp-conflict-msg' }, [text('Changed on disk since you opened it')]),
         el('span', { class: 'fp-conflict-actions' }, [reloadBtn, overwriteBtn]),
@@ -1597,8 +1733,13 @@ async function saveFile(container, { force = false } = {}) {
         if (resp.status === 409) {
             let payload = {};
             try { payload = await resp.json(); } catch { /* body is optional */ }
-            if (payload.mtime != null) file.mtime = payload.mtime;
-            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            // NOT file.mtime = payload.mtime. That is the version on disk —
+            // the other writer's — and adopting it as this draft's base makes
+            // the very next save match, succeed, and destroy their work with
+            // no second warning. The base stays what this editor actually
+            // read, so anything short of Reload or Overwrite conflicts
+            // again. (S05)
+            file.diskMtime = payload.mtime ?? null;
             if (statusEl) {
                 statusEl.className = 'fp-editor-status error';
                 statusEl.textContent = 'Changed on disk';
@@ -1656,11 +1797,7 @@ async function deleteEntry(path, type = 'file') {
     if (!go) return;
     try {
         await del(`/workspace/${path.split('/').map(encodeURIComponent).join('/')}`);
-        if (_state.currentFile?.path === path ||
-            _state.currentFile?.path?.startsWith(path + '/')) {
-            _state.currentFile = null;
-            _state.viewMode = 'tree';
-        }
+        _closeViewerFor(path);
         await loadWorkspace({ path: _wsCurrentPath });
     } catch (e) {
         notify('error', `Could not delete ${path}: ${e.message || e}`);
@@ -2038,9 +2175,14 @@ function renderSearchResults(listEl) {
 }
 
 /**
- * Open a memory file in the viewer, or straight into the editor. The mtime
- * comes back with the content and is what a later save hands to the server as
- * base_mtime — same optimistic-concurrency contract as the workspace. (S9)
+ * Open a memory file in the viewer, or straight into the editor. The version
+ * comes back with the content and is what a later save hands to the server —
+ * same optimistic-concurrency contract as the workspace. (S9)
+ *
+ * `revision` is a digest of the bytes just read and is the exact half of that
+ * contract: an mtime compare carries a millisecond of slack for the float
+ * round-trip, and two writes landing inside that slack look identical to
+ * it. Sent alongside base_mtime, which older servers still answer. (S05)
  */
 async function openMemoryFile(name, { edit = false } = {}) {
     if (!guardDirty()) return;
@@ -2054,6 +2196,7 @@ async function openMemoryFile(name, { edit = false } = {}) {
             type: 'text',
             name: name + '.md',
             mtime: data.mtime ?? null,
+            revision: data.revision ?? null,
         };
         _state.originalContent = data.content;
         _state.dirty = false;
@@ -2136,6 +2279,9 @@ async function _reloadMemoryFile(container) {
         if (data.error) throw new Error(data.error);
         file.content = data.content;
         file.mtime = data.mtime ?? null;
+        file.revision = data.revision ?? null;
+        file.diskMtime = null;
+        file.diskRevision = null;
         _state.originalContent = file.content;
         _state.dirty = false;
         renderMemory();
@@ -2162,9 +2308,12 @@ async function saveMemoryFile(container, { force = false } = {}) {
 
     try {
         const body = { content };
-        // Overwrite = resend without base_mtime, which is the server's own
+        // Overwrite = resend without a base version, which is the server's own
         // opt-out and therefore literally last-writer-wins again.
-        if (!force && file.mtime != null) body.base_mtime = file.mtime;
+        if (!force) {
+            if (file.revision != null) body.base_revision = file.revision;
+            if (file.mtime != null) body.base_mtime = file.mtime;
+        }
         const resp = await fetch(`/api/memory/files/${encodeURIComponent(file.path)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', ..._authHdr() },
@@ -2173,8 +2322,13 @@ async function saveMemoryFile(container, { force = false } = {}) {
         if (resp.status === 409) {
             let payload = {};
             try { payload = await resp.json(); } catch { /* body is optional */ }
-            if (payload.mtime != null) file.mtime = payload.mtime;
-            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            // The base version stays what this editor read. Adopting the
+            // server's — payload.mtime is the *current disk* version, i.e.
+            // the other writer's — turned the 409 into a one-shot warning:
+            // the next plain save matched, returned 200, and the newer
+            // content died silently. (S05)
+            file.diskMtime = payload.mtime ?? null;
+            file.diskRevision = payload.revision ?? null;
             if (statusEl) {
                 statusEl.className = 'fp-editor-status error';
                 statusEl.textContent = 'Changed on disk';
@@ -2187,7 +2341,13 @@ async function saveMemoryFile(container, { force = false } = {}) {
         }
         if (!resp.ok) throw new Error(await _errorDetail(resp));
         const saved = await resp.json().catch(() => ({}));
+        // The version the server committed for THIS content, not a stat it
+        // took afterwards — so the next save is based on bytes that were
+        // really ours. (S05)
         if (saved.mtime != null) file.mtime = saved.mtime;
+        file.revision = saved.revision ?? null;
+        file.diskMtime = null;
+        file.diskRevision = null;
 
         file.content = content;
         _state.originalContent = content;
@@ -2315,17 +2475,11 @@ function renderSkills() {
             const originLabel = origin === 'session'
                 ? `SESSION \u00b7 ${(proposal.session_id || '').slice(0, 8)}`
                 : `${origin.toUpperCase()} \u00b7 ${(proposal.session_id || '').slice(0, 8) || '?'}`;
-            const trialUses = proposal.trial_uses || 0;
-            const trialSuccesses = proposal.trial_successes || 0;
-            const trialLabel = trialUses > 0
-                ? ` \u00b7 trial: ${trialUses} use${trialUses === 1 ? '' : 's'} \u00b7 ${trialSuccesses} helped`
-                : '';
             const info = el('div', { class: 'fp-proposal-info' }, [
                 el('span', { class: `fp-proposal-origin fp-proposal-origin-${origin}` }, [text(originLabel)]),
                 el('span', { class: 'fp-proposal-skill' }, [text(proposal.skill_name)]),
                 el('span', { class: 'fp-proposal-section' }, [text(proposal.section ? ` \u00b7 ${proposal.section}` : '')]),
                 el('span', { class: 'fp-proposal-problem' }, [text(` — ${(proposal.problem || '').slice(0, 80)}${(proposal.problem || '').length > 80 ? '\u2026' : ''}`)]),
-                el('span', { class: 'fp-proposal-trial' }, [text(trialLabel)]),
             ]);
             const reviewBtn = el('button', { class: 'fp-btn fp-btn-xs' }, [text('review')]);
             reviewBtn.addEventListener('click', async () => {
@@ -2498,6 +2652,38 @@ async function viewSkill(name) {
     }
 }
 
+function renderSkillProposalHistory(container, data) {
+    const history = data.proposal_history || [];
+    if (!history.length) return;
+    const labels = { applied: 'Applied', auto_applied: 'Applied automatically', applying: 'Unfinished change', rolled_back: 'Rolled back' };
+    const section = el('div', { class: 'fp-proposal-callout' });
+    section.appendChild(el('div', { class: 'fp-proposal-callout-label' }, [text('Recent skill changes')]));
+    for (const proposal of history) {
+        const row = el('div', { class: 'fp-proposal-callout-row' }, [
+            text(`${labels[proposal.status] || proposal.status} · ${proposal.section || 'Notes'}: ${proposal.problem || ''}`),
+        ]);
+        if (proposal.status !== 'rolled_back' && proposal.can_rollback) {
+            const button = el('button', { class: 'fp-btn', type: 'button' }, [text('Roll back')]);
+            button.addEventListener('click', async () => {
+                button.disabled = true;
+                try {
+                    await post(`/api/skills/proposals/${encodeURIComponent(proposal.id)}/rollback`, {});
+                    await viewSkill(data.name);
+                } catch (error) {
+                    notify('error', `Could not roll back: ${error.message || error}`);
+                } finally {
+                    button.disabled = false;
+                }
+            });
+            row.appendChild(button);
+        } else if (proposal.status !== 'rolled_back') {
+            row.appendChild(el('span', {}, [text(' · Older change: restore its backup manually.')]));
+        }
+        section.appendChild(row);
+    }
+    container.appendChild(section);
+}
+
 function renderSkillViewer(container) {
     const file = _state.currentFile;
     if (!file || !file.skillData) return;
@@ -2507,11 +2693,7 @@ function renderSkillViewer(container) {
     const backBtn = el('button', {
         class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the skills list',
     }, [icon('arrow-left')]);
-    backBtn.addEventListener('click', () => {
-        _state.viewMode = 'tree';
-        _state.currentFile = null;
-        renderSkills();
-    });
+    backBtn.addEventListener('click', () => _backToTree(renderSkills));
 
     const editBtn = el('button', { class: 'fp-btn' }, [text('edit')]);
     editBtn.addEventListener('click', () => {
@@ -2583,9 +2765,9 @@ function renderSkillViewer(container) {
                 file.pendingProposal = null;
                 const delta = (res.bytes_after || 0) - (res.bytes_before || 0);
                 console.log(`[skills] proposal applied: +${delta} bytes into ${res.skill_md_path}`);
-                // Reload file data so the editor shows the updated skill body
+                // Reload the body and the recovery actions together.
                 await loadSkills();
-                renderSkills();
+                await viewSkill(proposal.skill_name);
             } catch (e) {
                 notify('error', `Could not apply the proposal: ${e.message || e}`);
             }
@@ -2609,6 +2791,8 @@ function renderSkillViewer(container) {
         callout.appendChild(actions);
         container.appendChild(callout);
     }
+
+    renderSkillProposalHistory(container, data);
 
     // Skill info card
     const info = el('div', { class: 'fp-skill-info' });
@@ -2759,8 +2943,9 @@ async function saveSkill(container, { force = false } = {}) {
         if (resp.status === 409) {
             let payload = {};
             try { payload = await resp.json(); } catch { /* body is optional */ }
-            if (payload.mtime != null) file.mtime = payload.mtime;
-            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            // Same rule as the workspace and memory editors: report the disk
+            // version, never adopt it as this draft's base. (S05)
+            file.diskMtime = payload.mtime ?? null;
             if (statusEl) {
                 statusEl.className = 'fp-editor-status error';
                 statusEl.textContent = 'Changed on disk';
@@ -2908,8 +3093,8 @@ async function renderJobs() {
     ));
 
     // Live snooze activity line — fed by snooze.activity SSE events (which
-    // previously reached the browser and were discarded). Surfaces Candor
-    // maintenance, RLM run cleanup, and the other idle-time activities.
+    // previously reached the browser and were discarded). Surfaces dream,
+    // RLM run cleanup, and the other idle-time activities.
     if (_lastSnoozeActivity && _lastSnoozeActivity.detail) {
         container.appendChild(el('div', { class: 'fp-snooze-activity' }, [
             el('span', { class: 'fp-snooze-activity-icon' }, [icon('moon', { size: 12 })]),

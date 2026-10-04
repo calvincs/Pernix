@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 from pathlib import Path
 
-from core.tools.paths import root_mismatch_hint
+from core.tools.paths import owning_root, relative_path_roots, resolve_workspace_path, root_mismatch_hint
 from core.tools.paths import workspace as _workspace
+from core.tools.paths import workspace_home as _default_root
 
 logger = logging.getLogger("pernix.tools.glob")
+
+# How many paths are rendered inline.
+MAX_RESULTS = 300
+# How many are collected before the walk gives up. The old fallback broke at
+# 500 and then used `total` as if it were the real count, so every number
+# derived from it saturated in silence — the omitted count included. Reaching
+# this ceiling now makes the total an explicit floor instead.
+SCAN_CEILING = 5000
 
 
 def glob_search(pattern: str, path: str = "") -> str:
@@ -22,25 +30,36 @@ def glob_search(pattern: str, path: str = "") -> str:
 
     Args:
         pattern: Glob pattern (e.g. '**/*.py', 'src/**/*.ts', '*.md').
-        path: Optional subdirectory to search in. Default: workspace root.
+        path: Optional subdirectory to search in. Default: the working root.
     """
-    workspace = _workspace()
-    search_root = workspace
-
+    # Same relative-path contract as file_read, bash and grep (2026-09-08):
+    # `impl` is one directory, not one per tool. Containment is still the
+    # workspace-ish roots — the default moved, the fence did not.
     if path:
-        candidate = (workspace / path).resolve()
-        if not candidate.is_relative_to(workspace):
-            return f"Error: Path not within workspace: {path}{root_mismatch_hint(path)}"
+        try:
+            candidate = resolve_workspace_path(path)
+        except ValueError as e:
+            return f"Error: {e}{root_mismatch_hint(path)}"
         if not candidate.is_dir():
             return f"Error: Not a directory: {path}{root_mismatch_hint(path)}"
         search_root = candidate
+    else:
+        search_root = _default_root()
+    root = owning_root(search_root)
+    contained = relative_path_roots()
+
+    def _inside(fp: Path) -> bool:
+        return any(fp.is_relative_to(r) for r in contained)
 
     matches: list[Path] = []
+    saturated = False  # the walk stopped at SCAN_CEILING, so `total` is a floor
 
     # Try git ls-files first (respects .gitignore)
     try:
-        git_dir = workspace / ".git"
-        if git_dir.exists():
+        # git walks up to its repo root, so a .git at any of these means the
+        # search root is inside a repo — checking only the global workspace
+        # skipped a space home that is its own checkout.
+        if any((p / ".git").exists() for p in (search_root, root, _workspace())):
             result = subprocess.run(
                 ["git", "ls-files", "--cached", "--others", "--exclude-standard", pattern],
                 capture_output=True,
@@ -51,8 +70,11 @@ def glob_search(pattern: str, path: str = "") -> str:
             if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().split("\n"):
                     fp = (search_root / line).resolve()
-                    if fp.is_relative_to(workspace) and fp.exists():
+                    if _inside(fp) and fp.exists():
                         matches.append(fp)
+                    if len(matches) >= SCAN_CEILING:
+                        saturated = True
+                        break
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass  # Fall through to pathlib
 
@@ -60,15 +82,23 @@ def glob_search(pattern: str, path: str = "") -> str:
     if not matches:
         try:
             for fp in search_root.glob(pattern):
-                if fp.is_file() and fp.is_relative_to(workspace):
+                if fp.is_file() and _inside(fp):
                     matches.append(fp)
-                if len(matches) >= 500:  # Safety limit before sorting
+                if len(matches) >= SCAN_CEILING:  # Safety limit before sorting
+                    saturated = True
                     break
         except Exception as e:
             return f"Error: Invalid glob pattern: {e}"
 
+    # Two separate honesty obligations, kept as two separate lines: which tree
+    # this listing came from (H07) and the bounds it ran under (H16).
+    root_line = f"[root: {root}]"
+    scope = f"{path or '.'} pattern={pattern!r}"
+    caps = f"[scope: {scope} | caps: {MAX_RESULTS} shown, {SCAN_CEILING:,}-file scan ceiling, newest first]"
+
     if not matches:
-        return f"No files found matching '{pattern}'" + (f" in {path}" if path else "")
+        head = f"No files found matching '{pattern}'" + (f" in {path}" if path else "")
+        return f"{root_line}\n{head}\n{caps}"
 
     # Sort by modification time (newest first)
     try:
@@ -76,26 +106,34 @@ def glob_search(pattern: str, path: str = "") -> str:
     except OSError:
         pass
 
-    # Limit results (raised 100->300, audit P2)
     total = len(matches)
-    matches = matches[:300]
+    shown = matches[:MAX_RESULTS]
 
     # Format output as relative paths
     lines = []
-    for fp in matches:
+    for fp in shown:
         try:
-            rel = fp.relative_to(workspace)
+            rel = fp.relative_to(root)
         except ValueError:
             rel = fp
         lines.append(str(rel))
 
-    result = "\n".join(lines)
-    if total > 100:
-        result += f"\n\n[... {total - 100} more files not shown]"
+    # The arithmetic, spelled out because the old version's was wrong in both
+    # directions: `total - 100` invented 50 omissions for a 150-file result
+    # where nothing was omitted, and claimed 300 for a 400-file one where 100
+    # were.
+    omitted = total - len(lines)
+    if saturated:
+        head = (
+            f"[at least {total:,} files matched (scan ceiling reached — the true total is "
+            f"unknown); showing {len(lines):,}; at least {omitted:,} not shown]"
+        )
+    elif omitted:
+        head = f"[{total:,} files matched; showing {len(lines):,}; {omitted:,} not shown]"
     else:
-        result += f"\n\n[{total} file{'s' if total != 1 else ''} found]"
+        head = f"[{total:,} file{'s' if total != 1 else ''} found; showing all {len(lines):,}]"
 
-    return result
+    return f"{root_line}\n" + "\n".join(lines) + f"\n\n{head}\n{caps}"
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +159,11 @@ def register(reg) -> None:
                 },
                 "path": {
                     "type": "string",
-                    "description": "Subdirectory to search in. Default: workspace root.",
+                    "description": (
+                        "Subdirectory to search in. A relative path resolves the same way it "
+                        "does for file_read and bash. Default: your working root (shown as "
+                        "[root: ...] in the result)."
+                    ),
                 },
             },
             "required": ["pattern"],

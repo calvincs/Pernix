@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
@@ -178,35 +177,27 @@ async def test_job_endpoint(name: str):
         raise HTTPException(404, detail=f"Job '{name}' not found")
 
     async def _run_and_notify():
-        from sessions.manager import get_manager
+        from core import notices
 
         try:
             result = await run_job_test(name)
         except Exception as e:
             logger.error("Job test '%s' crashed: %s", name, e)
             return
-        try:
-            title = f"Job test {'passed' if result.get('ok') else 'FAILED'}: {name}"
-            body = (result.get("error") or result.get("answer_preview") or "completed cleanly")[:200]
-            nid = await asyncio.to_thread(
-                db.add_notification,
-                session_id=result.get("session_id") or "",
-                title=title,
-                body=body,
-                urgency="normal" if result.get("ok") else "high",
-            )
-            get_manager().broadcast(
-                {
-                    "type": "dialog.notification",
-                    "notification_id": nid,
-                    "title": title,
-                    "body": body,
-                    "urgency": "normal" if result.get("ok") else "high",
-                    "source_session_id": result.get("session_id") or "",
-                }
-            )
-        except Exception as e:
-            logger.debug("Job test notification failed: %s", e)
+        # A pass is a receipt (activity log); a failure is worth a look (bell).
+        # notices does the DB write and any SSE; notify() never raises.
+        ok = bool(result.get("ok"))
+        title = f"Job test {'passed' if ok else 'FAILED'}: {name}"
+        body = (result.get("error") or result.get("answer_preview") or "completed cleanly")[:200]
+        await asyncio.to_thread(
+            notices.notify,
+            "jobs.test_passed" if ok else "jobs.test_failed",
+            title,
+            body,
+            session_id=result.get("session_id") or "",
+            subject=name,
+            link={"kind": "tab", "tab": "jobs"},
+        )
 
     task = asyncio.create_task(_run_and_notify())
     _bg_tasks.add(task)
@@ -249,20 +240,32 @@ async def jobs_status():
     snooze_stats = snooze.get_stats()
 
     next_runs = []
+    scheduled_count = 0
     scheduler = _get_scheduler()
     if scheduler:
         try:
             for job in scheduler.get_jobs():
-                meta = job.kwargs.get("meta", {})
+                meta = job.kwargs.get("meta", {}) or {}
                 try:
                     next_time = str(job.next_run_time) if job.next_run_time else None
                 except Exception:
                     next_time = None
+                # Transient jobs are the harness's own housekeeping (canary
+                # sweep, grader hold-out, catch-up one-shots): recreated each
+                # boot, never in cron_jobs.json, not something the user
+                # scheduled. They stay in next_runs for the Jobs view but do
+                # not count as the user's scheduled work — the status-bar
+                # indicator would otherwise light up on a fresh install the
+                # moment a default-on housekeeping job exists.
+                system = bool(meta.get("transient"))
+                if not system:
+                    scheduled_count += 1
                 next_runs.append(
                     {
                         "name": job.id,
                         "next_run": next_time,
                         "paused": job.next_run_time is None,
+                        "system": system,
                     }
                 )
         except Exception:
@@ -270,7 +273,7 @@ async def jobs_status():
 
     return {
         "running_jobs": running_count,
-        "scheduled_count": len(next_runs),
+        "scheduled_count": scheduled_count,
         "snooze": snooze_stats,
         "next_runs": next_runs,
     }
@@ -308,46 +311,3 @@ async def job_events():
             bus.unsubscribe(queue)
 
     return sse_response(stream())
-
-
-# ---------------------------------------------------------------------------
-# User heartbeat (adaptation plan 3c) — one per session, API-only surface.
-# The agent's set_heartbeat/clear_heartbeat tools operate on a separate
-# owner namespace and can never see or modify this one.
-# ---------------------------------------------------------------------------
-
-
-@router.get("/api/sessions/{session_id}/heartbeat")
-async def get_heartbeat(session_id: str):
-    from core.extensions.scheduling import get_user_heartbeat
-
-    hb = get_user_heartbeat(session_id)
-    return {"heartbeat": hb}
-
-
-@router.put("/api/sessions/{session_id}/heartbeat")
-async def put_heartbeat(session_id: str, body: dict):
-    from config import settings as _settings
-    from core.extensions.scheduling import set_user_heartbeat
-
-    if not _settings.heartbeats_enabled:
-        return {"error": "heartbeats are disabled (settings.heartbeats_enabled)"}
-    instruction = (body or {}).get("instruction", "").strip()
-    if not instruction:
-        return {"error": "instruction is required"}
-    result = set_user_heartbeat(
-        session_id,
-        instruction,
-        every=(body or {}).get("every", "5m"),
-        delivery=(body or {}).get("delivery", "steer"),
-    )
-    if result.startswith("Error:"):
-        return {"error": result}
-    return {"ok": True, "job_id": result}
-
-
-@router.delete("/api/sessions/{session_id}/heartbeat")
-async def delete_heartbeat(session_id: str):
-    from core.extensions.scheduling import clear_user_heartbeat
-
-    return {"ok": clear_user_heartbeat(session_id)}

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from config import settings
+from core.llm.types import is_rejected_call
 from db import models as db
 
 logger = logging.getLogger("pernix.reflect")
@@ -39,7 +40,6 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
 - what_failed: If retry — tools/approaches that failed or wasted time (avoid). Empty string if pass.
 - strategy: If retry — concrete instruction for the retry attempt. Must propose a DIFFERENT approach if the same tools failed repeatedly. Empty string if pass.
 - retry_without_tools: OPTIONAL, only meaningful with verdict "retry" — array of tool names (e.g. ["spawn_worker"]) that the agent misused this attempt and must NOT be allowed to call on the retry. Use when the failure was caused by reaching for a tool against the plan (e.g. delegating to workers when told to work inline). The harness enforces this mechanically — the listed tools are disabled for the retry attempt — so name a tool only when its absence would force the correct approach. Omit or empty array otherwise.
-- cited_policies: OPTIONAL — when the evidence includes ACTIVE ADAPTIVE POLICIES, array of the [id] values (max 5) whose guidance demonstrably shaped this turn or was demonstrably violated in a way that caused the outcome. Omit (or empty array) when no policy visibly mattered — that is the honest default and the common case; never cite a policy just because it exists.
 - missing: If escalate — what specific information or clarification is needed from the user. Empty string otherwise.
 - turn_digest: REQUIRED when verdict is "retry" or "escalate"; optional on "pass" (you may omit the key entirely). When emitted, structure exactly as:
     {
@@ -71,6 +71,7 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
   Ground every field in transcript evidence: the user's actual words and reactions, not your judgment of the work's quality.
 
 RULES:
+- FACTUAL CORRECTIONS REQUIRE PROVENANCE: A claim that the answer used wrong, fabricated, mislabeled or contradictory facts must set failure_kind="factual" and include failure_evidence: [{"subject":"exact entity or identifier", "tool_call_id":"observed call ID", "quote":"verbatim result", "expected_tool_call_id":"later verification call ID", "expected_quote":"verbatim contradicting result"}]. Both calls must concern that same subject; an earlier abandoned request is not evidence against a later corrected fetch. Use the TOOL PROVENANCE ledger. Never substitute your own knowledge for a retrieved correction. If the ledger cannot establish a contradiction, use pass with verification="unknown" and explain the uncertainty; do not invent a corrective strategy. These citations are checked by the harness. Task incompleteness, user corrections and deterministic gate failures remain separate grounds for non-pass.
 - MATERIALITY BAR FOR NON-PASS VERDICTS: A retry is warranted only when a concrete user-facing deliverable is missing, incomplete, or factually false — or when a success claim (file written, job scheduled, memory saved, command executed) is unsupported by verifiable evidence. Plan-literalism (deviating from the scout plan when the outcome was delivered), tone/length mismatches, and defensible judgment calls are PASS — record them in the lessons fields and in `experience`, never as a retry. A non-pass verdict MUST name a concrete, checkable failure_cause; if you cannot name one, the verdict is "pass".
 - COMPLETED WORK IS NEVER RETRIED FOR PROCESS VIOLATIONS: when everything the user's request requires is verifiably done, violations of efficiency or procedure rules — call/budget caps exceeded, forbidden re-reads, redundant tool calls, a stray formatting artifact in otherwise-correct output — are a PASS with the violation recorded in what_failed and experience. A retry re-executes finished work, and the retry attempt has nothing left to do (field case: an attempt-2 with zero tool calls was then failed for "not verifying" prior work its charter forbade it from re-reading — an unwinnable trap the first verdict created).
 - ESCALATE GRADES THE TURN, NOT THE SITUATION: escalate means THIS turn's deliverable cannot exist without user input. If the turn's work is complete, the verdict is pass even when a question for the user remains (a stalled loop, a pending decision, a follow-up worth raising) — note the question in experience.note; the agent has its own channels for surfacing questions. Field case: a cron run the verdict itself described as "delivered cleanly" was escalated to flag a stale thread — a failure statistic for a turn that never failed.
@@ -85,14 +86,16 @@ RULES:
 - TRUST THE PLAN: If the evidence includes ACTIVE SKILL / PLANNED APPROACH / TOOL RATIONALE, treat those as the contract the agent was given. If the agent followed the planned approach using the planned tools, do NOT call hallucination just because the tools look "generic" (e.g. browse_web). Skills routinely mandate generic tools — that's expected, not a failure. Only flag hallucination when the agent invented data with no supporting tool calls AND the plan called for a tool that wasn't run.
 - Use the TOOL EXECUTION SUMMARY to identify failure patterns. If a tool failed 2+ times with the same error, the retry strategy MUST suggest a different tool or approach.
 - SELF-REPORTED COUNTS ARE NOT A RUBRIC INPUT: the agent cannot see the TOOL EXECUTION SUMMARY and, on a retry, cannot see prior attempts' totals — so a mismatch between the agent's own stated tool count and the summary is NOT, by itself, dishonesty or a retry cause. Grade what the agent DID against the summary and transcript; ignore its arithmetic about itself. (Actual misuse of a forbidden tool remains gradeable — from the summary, not from the agent's count.)
+- THE SUMMARY LISTS TOOLS, NOT PROGRAMS. A test suite, build, linter or script run through `bash`/`repl` has NO row of its own — the summary says "bash: 12 call(s)", never "pytest". Absence of a program from the TOOL EXECUTION SUMMARY is therefore NEVER evidence that it did not run. To check whether a command ran, read the COMMANDS RUN THIS ATTEMPT section and the transcript's tool results. Writing "the summary records zero pytest calls" about a turn whose transcript contains a pytest result is a verifier-side correctness failure.
 - TOOL CALL FACTS ARE NOT NEGOTIABLE. The TOOL EXECUTION SUMMARY is observed truth, not interpretation. Before claiming the agent did NOT use a tool, verify: if the tool name appears in the summary with calls > 0, the agent DID call it. Do NOT write "agent did not call X" or "agent failed to use X" or "X was skipped" if X.calls > 0 in the summary. If you believe the call was *ineffective* (tool ran but didn't produce the expected result), say that — but do not deny the call happened. Hallucinating absence of a call that the summary records as present is a verifier-side correctness failure.
 - REFUSALS ARE NOT FAILURES: "policy refusal(s)" and REFUSED lines in the summary are the harness declining a call (job allow-list, retry exclusion, disabled tool, approval gate). They say nothing about the tool's reliability and must never be written up as "the tool failed" or as an env problem. They DO show the agent called a tool it was told not to use: grade that as a rule breach only when the user or the job charter forbade it; otherwise note it in what_failed and move on.
 - A REQUIREMENT ATTRIBUTED TO THE USER MUST QUOTE THE USER: before a non-pass verdict says "the user asked for X" or "the user explicitly called out X", find X in USER REQUEST (or a TURN SCOPE block) and quote it in reasoning. A requirement that appears only in SCOUT DELIVERABLES PLAN, PLANNED APPROACH or TOOL RATIONALE is the planner's, not the user's — by the plan-literalism rule above it cannot justify retry or escalate. Field case: a deferred escalate on a correct reply cited two memory entries "the user explicitly called out" that appeared only in the scout plan.
 - EVIDENCE PRIMACY. The transcript's tool RESULTS are ground truth. When a tool result body in the transcript supports or contradicts a claim in the agent's final response, that body outranks your priors about the topic. If the agent fetched URL X and the transcript shows the fetch returned real content, do NOT call hallucination just because your training data doesn't recognize X. Verify against what the tools actually returned, not what you "know" about the topic. The verifier-side failure mode this prevents: dismissing a fact as fabricated when the session contains real evidence for it.
 - GROUNDING CHECK IS A FLAG, NOT A VERDICT: when the evidence ends with a GROUNDING CHECK section, it lists (a) identifiers the final response cites that appear in NO tool result this attempt and not in the user's message, and (b) markdown table rows that pair an identifier with a name or id that no SINGLE tool result shows together. A factual table or id→content mapping whose rows are flagged under (b) is "factually false" under the materiality bar — verdict retry, failure_cause agent, and quote the flagged rows verbatim in what_failed — UNLESS the response itself labels those cells as inferred / not retrieved. One incidental token under (a) (an example, a typo, a name the agent coined) is NOT a retry; name it in what_failed. Never grade a reconstructed mapping above confidence 0.6 while any of its rows is flagged.
 - TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
-- CEILING LOOP → ESCALATE: If TERMINATION HISTORY shows the same blocking reason (e.g. round_ceiling, budget_exhausted, compaction_failed) on the current turn AND at least one prior turn, the agent is hitting the same hard wall — another retry will hit it again. Verdict MUST be 'escalate'. In `missing`, name the wall: e.g. 'round_ceiling on consecutive attempts; agent cannot finish within max_tool_rounds — split the task or raise the limit.'
+- CEILING LOOP → ESCALATE: If TERMINATION HISTORY shows the same blocking reason (e.g. round_ceiling, stuck_loop, budget_exhausted, compaction_failed) on the current turn AND at least one prior turn, the agent is hitting the same hard wall — another retry will hit it again. Verdict MUST be 'escalate'. In `missing`, name the wall: e.g. 'round_ceiling on consecutive attempts; agent cannot finish within max_tool_rounds — split the task or raise the limit.' The walls are different problems: round_ceiling means the task did not fit the round budget, while stuck_loop means the stuck detector force-broke a repetition loop (it fires at ANY round number, so never advise raising max_tool_rounds for it — advise a different approach or a narrower step).
 - THRASHING → ESCALATE: When a CURRENT ATTEMPT TOOL CALLS section is present (retry attempts), judge thrashing from THAT section only — the cumulative summary includes prior attempts' tools, and a focused retry must not inherit a scattered first attempt's diversity. If the (scoped) summary shows ≥4 distinct tools used with no forward progress (empty outputs repeated, same files re-read, error count growing, or the agent drifting across unrelated checks), the agent is thrashing, not pursuing a coherent-but-wrong strategy. Prefer "escalate" with a clear "missing" field over "retry" — another round of the same thrashing will not help. A single failing tool being tried with sibling tools is NOT thrashing; reserve "escalate" for cases where the agent lost the thread.
+- THE USER'S NEXT MESSAGE IS GROUND TRUTH ABOUT INTENT: when the evidence carries a "USER'S NEXT MESSAGE (arrived after this turn)" section, that is what the user said after reading the final response above, and on the question "was their intent met?" it outranks your own reading of the transcript. If that message corrects the agent, repeats or rephrases the same request, or complains ("no, ...", "that's wrong", "not what I asked", "you didn't ...", "still broken", "try again"), then THIS turn missed the intent: verdict "retry" — or "escalate" when the correction shows the turn cannot be finished without more from them — with failure_cause "agent" unless the transcript names a different, checkable cause. If the message moves on to new work, accepts, thanks the agent, or asks a follow-up that BUILDS on what was delivered, that is evidence of pass: it does not by itself excuse a deliverable that verifiably does not exist, but it settles an otherwise ambiguous grade as "pass". Adding scope ("now also do X") is moving on, not a correction. The section is absent on most turns; say nothing about it then.
 - For failure_cause attribution: if tools were hallucinated or the plan jumped straight to the wrong approach, lean "scout". If the plan was sensible but the agent used tools incorrectly or gave up early, lean "agent". Don't guess — use "none" with low confidence if unclear.
 
 EVIDENCE QUALITY (outcome vs. execution):
@@ -130,6 +133,12 @@ FAILURE_CAUSES: frozenset = frozenset(
     }
 )
 
+# Valid values for ReflectResult.verification — the channel that answers "was
+# the deliverable actually checked?", which `verdict` (a retry disposition)
+# cannot. "" means the grade never said, and every consumer treats that as the
+# pre-H11 status quo rather than inventing an answer for it.
+VERIFICATION_STATES: frozenset = frozenset({"verified", "partial", "unknown"})
+
 
 @dataclass
 class ReflectResult:
@@ -152,8 +161,28 @@ class ReflectResult:
     reflect_latency_ms: int = 0
 
     # Structured attribution (populated from reflect output; defaults are safe).
+    failure_kind: str = ""
+    failure_evidence: list = field(default_factory=list)
+    correction_rejected: str = ""
     failure_cause: str = "none"
     confidence: float = 0.0  # 0.0–1.0
+
+    # Verification state — SEPARATE from the verdict on purpose (H11).
+    #
+    # `verdict` is a retry disposition: it answers "should this turn run
+    # again?". `verification` answers "was the deliverable actually checked?".
+    # They came apart the moment the materiality floor started downgrading a
+    # low-confidence non-pass to pass: "no retry is warranted, and I could not
+    # see the evidence" is a sensible control-flow decision and a terrible
+    # certification, and with one field it was recorded as the latter.
+    #
+    #   "verified" — the grader (or a deterministic check) saw the evidence
+    #   "partial"  — some of it; something named is unchecked or unavailable
+    #   "unknown"  — nothing here establishes the deliverable is correct
+    #   ""         — the grade predates this field; consumers read it as
+    #                "unstated" and behave exactly as they did before.
+    verification: str = ""
+    verification_reason: str = ""
     deliverables: list = field(default_factory=list)  # list[Deliverable]
     artifact_id: str = ""  # set by post_mortems writer
 
@@ -170,11 +199,6 @@ class ReflectResult:
     # each spawning workers against explicit instructions); this is enforced by
     # the executor and the active-tool filter instead.
     retry_without_tools: list = field(default_factory=list)
-
-    # Adaptive entries (by id) whose guidance demonstrably shaped or blocked
-    # this turn — the per-entry usage signal's reflect-side source. Empty is
-    # the honest default.
-    cited_policies: list = field(default_factory=list)
 
     # Experience read — the intangibles of the interaction (sentiment,
     # friction, per-turn user observations). Emitted on EVERY verdict: pass
@@ -364,7 +388,7 @@ def _format_message(msg: dict, tool_result_char_cap: int | None = None) -> str:
                         except (json.JSONDecodeError, ValueError):
                             pass
                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
-                    parts.append(f"[TOOL CALL: {name}]\nArguments: {args_str}")
+                    parts.append(f"[TOOL CALL: {name}] call_id={tc.get('id', 'unknown')}\nArguments: {args_str}")
             except (json.JSONDecodeError, TypeError):
                 pass
         return "\n".join(parts) if parts else "[ASSISTANT]\n(empty)"
@@ -396,11 +420,48 @@ _PER_TOOL_RESULT_CHAR_CAP = 5000
 
 _GROUNDING_ID_PATTERNS = (
     re.compile(r"#\d{2,}"),  # proposal / issue / message numbers
-    re.compile(r"\bab-[0-9a-f]{12}\b"),  # adaptive batch ids
+    re.compile(r"\bab-[0-9a-f]{12}\b"),  # adaptive batch ids (pre-3.2 rows still cite them)
     re.compile(r"(?<![\w-])[0-9a-f]{12}(?![\w-])"),  # session / hypothesis ids (not a batch id's tail)
 )
 _GROUNDING_SLUG_PATTERN = re.compile(r"`([^`\n]{6,80})`")  # backticked names
 _GROUNDING_MAX_LISTED = 12
+
+
+# The user's next message, capped before it reaches the evidence blob AND
+# before the deterministic pre-check below — both read the same text, so a
+# post-mortem's `next_msg_correction` always describes what the verifier saw.
+NEXT_MSG_CHAR_CAP = 1200
+
+# Deliberately small and literal. This is a mechanical tripwire, not a
+# sentiment model: it exists so a post-mortem records "the user pushed back"
+# even when the LLM grade says otherwise, and a false positive here is a
+# wrong ground-truth label, so the list stays conservative and word-bounded.
+_NEXT_MSG_CORRECTION_PATTERNS = (
+    r"\bno,",
+    r"\bthat['’]s wrong\b",
+    r"\bnot what i asked\b",
+    r"\byou didn['’]t\b",
+    r"\btry again\b",
+    r"\bstill broken\b",
+    r"\bwrong\b",
+    r"\bincorrect\b",
+    r"\bredo\b",
+)
+
+_NEXT_MSG_CORRECTION_RE = re.compile("|".join(_NEXT_MSG_CORRECTION_PATTERNS), re.IGNORECASE)
+
+
+def next_msg_correction(text: str) -> bool:
+    """True when the user's next message reads as a correction or complaint.
+
+    Runs on the same `NEXT_MSG_CHAR_CAP`-truncated text the evidence blob
+    carries, independently of the reflect LLM, and is stored on the
+    post-mortem either way — so the share of turns the user pushed back on
+    is measurable without trusting the grader that graded them.
+    """
+    if not text:
+        return False
+    return bool(_NEXT_MSG_CORRECTION_RE.search(text[:NEXT_MSG_CHAR_CAP]))
 
 
 def _grounding_tokens(text: str) -> tuple[list[str], list[str]]:
@@ -622,6 +683,72 @@ def _build_attempt_transcript_section(
     return "\n\n---\n\n".join(kept)
 
 
+# Tools whose real work is a program the summary never names: the tool row
+# says "bash: 12 calls", not that one of them ran the test suite.
+_SHELL_TOOLS = ("bash", "repl", "job_start")
+
+
+def _commands_run_section(attempt_msgs: list[dict]) -> str:
+    """What the shell tools actually RAN this attempt, with their result tails.
+
+    The TOOL EXECUTION SUMMARY lists tool names and counts. A test suite,
+    build or linter invoked through `bash` therefore has no row of its own,
+    and a grader reading that summary can find no evidence a program ran.
+    One did exactly that (Agent Mesh build, 2026-09-08): the agent ran pytest
+    twice and got "155 passed" both times, both results sitting in the graded
+    slice, and reflect returned `retry` on the grounds that no pytest call
+    appeared in the summary — then raised a high-urgency alert saying the
+    build was unverified.
+
+    Commands are the fact the summary cannot carry, so they get their own
+    section. The tail line is included because for a test run it IS the
+    result.
+    """
+    results_by_id: dict[str, str] = {}
+    for m in attempt_msgs:
+        if m.get("role") == "tool" and m.get("tool_call_id"):
+            results_by_id[m["tool_call_id"]] = m.get("content") or ""
+
+    entries: list[str] = []
+    for m in attempt_msgs:
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        try:
+            calls = json.loads(m["tool_calls"])
+        except (ValueError, TypeError):
+            continue
+        for tc in calls or []:
+            if is_rejected_call(tc):
+                continue  # the gate refused it — nothing ran
+            fn = tc.get("function") or tc
+            name = fn.get("name") or ""
+            if name not in _SHELL_TOOLS:
+                continue
+            try:
+                args = fn.get("arguments")
+                args = json.loads(args) if isinstance(args, str) else (args or {})
+            except (ValueError, TypeError):
+                args = {}
+            body = args.get("command") or args.get("code") or ""
+            if not isinstance(body, str) or not body.strip():
+                continue
+            head = " ".join(body.split())[:200]
+            tail = ""
+            raw = results_by_id.get(tc.get("id") or "", "")
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            if lines:
+                tail = lines[-1][:200]
+            entries.append(f"- {name}: {head}" + (f"\n    -> {tail}" if tail else ""))
+
+    if not entries:
+        return ""
+    return (
+        "COMMANDS RUN THIS ATTEMPT (what the shell tools executed, with the last "
+        "line each returned — these are observed facts, same standing as the tool "
+        "summary):\n" + "\n".join(entries[:40])
+    )
+
+
 def _build_compact_evidence(
     session_id: str,
     user_request: str,
@@ -634,6 +761,7 @@ def _build_compact_evidence(
     prior_termination_reasons: list[str] | None = None,
     turn_user_msg_id: int | None = None,
     grounding_out: dict | None = None,
+    next_user_message: str = "",
 ) -> str:
     """Build the evidence blob for reflect.
 
@@ -736,29 +864,6 @@ def _build_compact_evidence(
         if approach_lines:
             parts.append("\n\n".join(approach_lines))
 
-    # Active adaptive policies, by id — so the grade's cited_policies field
-    # has something real to cite. Ids and titles only: the full content is
-    # in the agent's prompt, and reflect only needs to say WHICH policies
-    # demonstrably shaped or blocked the outcome. This is the per-entry
-    # usage signal's second source (scout's used_hints is the first).
-    if settings.adaptive_enabled:
-        try:
-            from db import models as _db
-
-            pol = [
-                e
-                for e in _db.adaptive_list_entries(kind="policy") + _db.adaptive_list_entries(kind="prompt_note")
-                if e.get("scope") in ("global", f"session:{session_id}")
-            ]
-            if pol:
-                parts.append(
-                    "ACTIVE ADAPTIVE POLICIES (cite ids in cited_policies only when one "
-                    "demonstrably shaped or blocked this outcome):\n"
-                    + "\n".join(f"- [{e['id']}] {e['title']}" for e in pol[:30])
-                )
-        except Exception:
-            pass  # evidence enrichment, never a reason to skip the grade
-
     # Tool execution summary with last few errors per tool. Labeled with its
     # scope: tool_summary accumulates across ALL attempts of the turn (see
     # TurnState.tool_summary) while the transcript below is current-attempt
@@ -777,13 +882,20 @@ def _build_compact_evidence(
         summary_lines = [f"TOOL EXECUTION SUMMARY{scope_note}:"]
         for tool_name, stats in sorted(tool_summary.items()):
             refusals = int(stats.get("refusals") or 0)
+            nonzero = int(stats.get("command_failures") or 0)
             summary_lines.append(
                 f"- {tool_name}: {stats['calls']} call(s), "
                 f"{stats['failures']} failure(s), {stats['total_latency_ms']}ms total"
                 + (f", {refusals} policy refusal(s) — not tool failures" if refusals else "")
+                # The command failed, the tool did not — but the grader has to
+                # SEE that a check exited non-zero, or a turn whose every test
+                # run failed reads as a turn with nothing wrong in it.
+                + (f", {nonzero} non-zero exit(s) — the command failed, not the tool" if nonzero else "")
             )
             for err in stats.get("errors", [])[:5]:
                 summary_lines.append(f"    ERROR: {err}")
+            for err in stats.get("command_errors", [])[:3]:
+                summary_lines.append(f"    NON-ZERO EXIT: {err}")
             for err in stats.get("refusal_errors", [])[:3]:
                 summary_lines.append(f"    REFUSED: {err}")
         parts.append("\n".join(summary_lines))
@@ -804,6 +916,13 @@ def _build_compact_evidence(
         else:
             cur_lines.append("(no tool calls this attempt)")
         parts.append("\n".join(cur_lines))
+
+    # What the shell tools actually ran. Sits beside the tool summary because
+    # it carries the fact the summary structurally cannot: which program was
+    # invoked inside a `bash` call, and what it printed.
+    _commands = _commands_run_section(_messages_since_attempt_start(messages, turn_user_msg_id))
+    if _commands:
+        parts.append(_commands)
 
     # User's ask (echoed) so reflect anchors against the original goal even when
     # the transcript scrolls through tool calls.
@@ -844,6 +963,17 @@ def _build_compact_evidence(
     if section:
         parts.append(section)
 
+    # Ground truth, when it exists: what the user said after reading the
+    # response above. Last, and after the mechanical flags, because it is the
+    # only line here the user wrote themselves — the reviewer reads the turn,
+    # then the machine's doubts, then the reaction that settles them. Absent
+    # on turns the user never replied to.
+    if next_user_message:
+        parts.append(
+            "USER'S NEXT MESSAGE (arrived after this turn — the user has read the response above):\n"
+            + next_user_message[:NEXT_MSG_CHAR_CAP]
+        )
+
     return "\n\n".join(parts)
 
 
@@ -857,6 +987,8 @@ def _build_evidence(
     prior_termination_reasons: list[str] | None = None,
     tool_summary_attempts: list | None = None,
     grounding_out: dict | None = None,
+    turn_msg_id_range: tuple[int | None, int | None] | None = None,
+    next_user_message: str = "",
 ) -> tuple[str, str]:
     """Build evidence for reflect verification.
 
@@ -872,11 +1004,32 @@ def _build_evidence(
     `turn_user_msg_id` is used as a fallback boundary when no scout-role
     marker exists in the messages (older sessions, scout-skipped paths).
 
+    `turn_msg_id_range` is the inclusive (first, last) message-id window the
+    graded turn occupied, captured when the grade was scheduled. A deferred
+    grade can now run while the NEXT turn is already writing to the same
+    transcript, and the scout-marker slice would otherwise walk back to that
+    newer turn's marker and grade the wrong work. Clamping the message list
+    to the captured window first makes the slice stable no matter how much
+    has been appended since.
+
+    `next_user_message` is the user's reply to this turn, when there is one.
+
     Returns (user_request, evidence_summary).
     """
     messages = db.get_messages(session_id)
     if not messages:
         return "", ""
+
+    if turn_msg_id_range:
+        lo, hi = turn_msg_id_range
+        if lo is not None or hi is not None:
+            messages = [
+                m
+                for m in messages
+                if (lo is None or (m.get("id") or 0) >= lo) and (hi is None or (m.get("id") or 0) <= hi)
+            ]
+            if not messages:
+                return "", ""
 
     # Find the user message being verified. Prefer the explicit id (this turn's
     # user message). Fall back to the latest user message overall.
@@ -907,8 +1060,108 @@ def _build_evidence(
         prior_termination_reasons=prior_termination_reasons,
         turn_user_msg_id=turn_user_msg_id,
         grounding_out=grounding_out,
+        next_user_message=next_user_message,
     )
+    scoped = _messages_since_attempt_start(messages, turn_user_msg_id)
+    evidence += "\n\nTOOL PROVENANCE (paired requests/results; later records supersede failed earlier fetches):\n"
+    evidence += tool_provenance(scoped)
     return user_request, evidence
+
+
+def tool_provenance(messages: list[dict]) -> str:
+    calls = {}
+    records = []
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            raw = msg.get("tool_calls") or []
+            try:
+                raw = json.loads(raw) if isinstance(raw, str) else raw
+            except ValueError:
+                raw = []
+            for call in raw if isinstance(raw, list) else []:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function") or call
+                args = fn.get("arguments", "")
+                calls[call.get("id")] = str(args)[:1500]
+        elif msg.get("role") == "tool" and msg.get("tool_call_id") in calls:
+            call_id = msg["tool_call_id"]
+            records.append({"call_id": call_id, "request": calls[call_id], "result": (msg.get("content") or "")[:2000]})
+    return "\n".join("PROVENANCE " + json.dumps(row, ensure_ascii=False) for row in records[-20:])
+
+
+def guard_factual_correction(result: ReflectResult, evidence: str) -> None:
+    """Withhold factual corrections without paired, attributable source evidence.
+
+    This verifies provenance, not arbitrary factual truth. Gates are enforced
+    separately afterwards. Unsupported grades must not become future lessons.
+    """
+    if result.verdict == "pass" and not _has_pass_with_lessons(result):
+        return
+    description = " ".join(str(getattr(result, f) or "") for f in ("reasoning", "what_failed", "strategy"))
+    factual = result.failure_kind == "factual" or bool(
+        re.search(
+            r"wrong (?:fund|ETF|product|data|source)|mislabell?ed|factually (?:false|wrong)|contradict.*(?:data|source|fact)",
+            description,
+            re.I,
+        )
+    )
+    if not factual:
+        return
+    records = []
+    for line in evidence.splitlines():
+        if line.startswith("PROVENANCE "):
+            try:
+                row = json.loads(line[11:])
+                if isinstance(row, dict):
+                    records.append(row)
+            except ValueError:
+                pass
+    by_id = {r.get("call_id"): (i, r) for i, r in enumerate(records)}
+    reason = "factual correction has no attributable contradictory evidence"
+    supported = 0 < len(result.failure_evidence) <= 10
+    for claim in result.failure_evidence[:10]:
+        if not isinstance(claim, dict):
+            supported = False
+            break
+        subject = claim.get("subject")
+        observed_id, expected_id = claim.get("tool_call_id"), claim.get("expected_tool_call_id")
+        if not isinstance(observed_id, str) or not isinstance(expected_id, str):
+            supported = False
+            break
+        observed = by_id.get(observed_id)
+        expected = by_id.get(expected_id)
+        if not isinstance(subject, str) or not subject or not observed or not expected:
+            supported = False
+            break
+        if expected[0] <= observed[0]:
+            supported = False
+            reason = "an earlier request cannot disprove a later recovered result"
+            break
+        for row, key in ((observed[1], "quote"), (expected[1], "expected_quote")):
+            quote = claim.get(key)
+            if not isinstance(quote, str) or len(quote.strip()) < 8 or quote not in row.get("result", ""):
+                supported = False
+            if subject not in row.get("request", "") and subject not in row.get("result", ""):
+                supported = False
+        if claim.get("quote") == claim.get("expected_quote"):
+            supported = False
+        # Do not grade superseded attempts when a subsequent request recovered.
+        if any(subject in r.get("request", "") for r in records[expected[0] + 1 :]):
+            supported = False
+            reason = "a later result for this subject supersedes the cited evidence"
+    if supported:
+        return
+    result.correction_rejected = reason
+    result.verdict, result.failure_cause = "pass", "none"
+    result.verification, result.verification_reason = "unknown", reason
+    result.confidence = 0.0
+    result.reasoning = "The grader proposed a factual correction that its cited evidence could not establish. No corrective action is warranted from this grade."
+    result.diagnostic = result.what_failed = result.strategy = result.missing = ""
+    result.turn_digest = {}
+    result.retry_without_tools = []
+    result.deliverables = []
+    result.experience = {}
 
 
 def _count_unmatched_braces(s: str) -> int:
@@ -1010,6 +1263,8 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
         missing=data.get("missing", ""),
         reflect_model=model,
         reflect_latency_ms=latency_ms,
+        failure_kind=str(data.get("failure_kind") or ""),
+        failure_evidence=data.get("failure_evidence") if isinstance(data.get("failure_evidence"), list) else [],
     )
     if result.verdict not in ("pass", "retry", "escalate"):
         # Coerce invalid verdict — but to "retry", NOT "pass". Defaulting to
@@ -1058,6 +1313,13 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
         result.reasoning = (
             result.reasoning or ""
         ) + " [verdict coerced to pass: non-pass verdict carried failure_cause=none]"
+        # The verdict is now "no retry warranted". That is not the same claim
+        # as "the deliverable checks out", and recording it as one is H11.
+        result.verification = "unknown"
+        result.verification_reason = (
+            "the grade contradicted itself (non-pass verdict, failure_cause=none), so its "
+            "verdict was coerced to pass for control flow; nothing in it verified the deliverable"
+        )
 
     conf_explicit = False
     try:
@@ -1083,6 +1345,7 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
         and result.verdict in ("retry", "escalate")
         and result.confidence < floor
     ):
+        _downgraded_from = result.verdict
         logger.info(
             "Reflect %s at confidence %.2f (< %.2f floor) — downgrading to pass-with-lessons (%s)",
             result.verdict,
@@ -1096,6 +1359,15 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
         )
         result.verdict = "pass"
         result.failure_cause = "none"
+        # Same separation. The floor is a statement about whether to RETRY —
+        # the grader saying "I could not see enough to be sure" is precisely
+        # not a verification, and it used to be filed as one.
+        result.verification = "unknown"
+        result.verification_reason = (
+            f"downgraded from {_downgraded_from}: the grader's own confidence was "
+            f"{result.confidence:.2f}, below the {floor:.2f} materiality floor — ambiguous "
+            f"evidence does not warrant a retry, and does not verify anything either"
+        )
 
     raw_deliv = data.get("deliverables") or []
     if isinstance(raw_deliv, list):
@@ -1131,15 +1403,95 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
     if result.verdict == "retry" and isinstance(raw_excl, list):
         result.retry_without_tools = [str(t)[:80] for t in raw_excl if isinstance(t, str) and t.strip()][:5]
 
-    raw_cited = data.get("cited_policies")
-    if isinstance(raw_cited, list):
-        result.cited_policies = [str(p).strip("[] ")[:64] for p in raw_cited if isinstance(p, str) and p.strip()][:5]
-
     raw_exp = data.get("experience")
     if settings.reflect_experience and isinstance(raw_exp, dict) and raw_exp:
         result.experience = _sanitize_experience(raw_exp)
 
+    _settle_verification(result, data, coerced=_verdict_coerced)
     return result
+
+
+def _settle_verification(result: ReflectResult, data: dict, *, coerced: bool) -> None:
+    """Fill `verification` where the conversions above have not already.
+
+    Order of authority: what the model explicitly stated, then what the
+    conversions recorded, then what the rest of the grade implies. A pass that
+    still names something it could not see is `partial` — "no retry warranted"
+    and "everything checked out" are different sentences and the first one is
+    not evidence for the second.
+    """
+    stated = str(data.get("verification") or "").strip().lower()
+    if stated in VERIFICATION_STATES:
+        result.verification = stated
+        if not result.verification_reason:
+            result.verification_reason = str(data.get("verification_reason") or "")[:500] or "stated by the grader"
+        return
+    if result.verification:
+        return  # a conversion already settled it, with its reason
+    if coerced:
+        result.verification = "unknown"
+        result.verification_reason = "the grade was malformed and its verdict coerced; nothing in it was checked"
+        return
+    if result.verdict in ("retry", "escalate"):
+        result.verification = "unknown"
+        result.verification_reason = f"the grader returned {result.verdict}; the deliverable is not established"
+        return
+    gaps = [d.description or "(unnamed)" for d in result.deliverables if d.status in ("unmet", "partial", "unknown")]
+    if result.missing:
+        result.verification = "partial"
+        result.verification_reason = f"the grade names missing evidence: {result.missing[:200]}"
+    elif gaps:
+        result.verification = "partial"
+        result.verification_reason = "deliverables not established: " + ", ".join(gaps[:3])[:200]
+    else:
+        result.verification = "verified"
+        result.verification_reason = ""
+
+
+def apply_verification_receipts(result: ReflectResult, gate_results: list | None) -> None:
+    """Overlay what the DETERMINISTIC checks actually did.
+
+    Gates report their own execution facts, and those facts outrank a model's
+    self-assessment in both directions. A gate that could not run is an
+    unavailable check, so "verified" becomes "partial" no matter how confident
+    the grade was. A gate that ran and failed leaves nothing established. And a
+    gate that ran and passed is real evidence a grader who could not see the
+    transcript did not have — enough to move "unknown" to "partial", never
+    enough on its own to certify work the gate does not cover.
+    """
+    if not gate_results:
+        return
+    from core.gates import broken as _broken
+    from core.gates import failing as _failing
+
+    ran = [g for g in gate_results if not g.broken]
+    failed = _failing(gate_results)
+    unavailable = _broken(gate_results)
+    passed = [g for g in ran if g.passed]
+
+    def _names(gs) -> str:
+        return ", ".join(g.name for g in gs)
+
+    if failed:
+        result.verification = "unknown"
+        result.verification_reason = f"deterministic check(s) failing: {_names(failed)}"
+        return
+    if unavailable:
+        if result.verification == "verified":
+            result.verification = "partial"
+        result.verification_reason = (
+            f"deterministic check(s) could not run: {_names(unavailable)} — an unavailable "
+            "check is not a passing one"
+        ) + (f"; {_names(passed)} did pass" if passed else "")
+        return
+    if passed and result.verification == "unknown":
+        result.verification = "partial"
+        result.verification_reason = (
+            f"deterministic check(s) passed: {_names(passed)} — evidence the grader did not have, "
+            "but they cover only what they check"
+        )
+    elif passed and result.verification == "verified" and not result.verification_reason:
+        result.verification_reason = f"deterministic check(s) passed: {_names(passed)}"
 
 
 _SENTIMENTS = frozenset({"satisfied", "neutral", "frustrated", "unknown"})
@@ -1150,8 +1502,8 @@ def _sanitize_experience(raw: dict) -> dict:
     """Enforce the experience schema regardless of what the model emitted.
 
     Booleans absent or non-boolean are dropped (not coerced to False — an
-    unanswered question is not a "no", and Candor frequency observations must
-    only count real reads). Friction labels are normalized to snake_case so
+    unanswered question is not a "no", and downstream counts must only
+    count real reads). Friction labels are normalized to snake_case so
     the same failure mode can't split into a dozen categorical values on
     casing alone.
     """
@@ -1225,6 +1577,70 @@ def _sanitize_turn_digest(digest: dict) -> dict:
     return cleaned
 
 
+# Phantom-evidence guard (2026-09-15, session 399fd54cf7b6): the grader
+# twice invented evidence that was in nothing it was shown — a "402
+# payment_required compaction failure" on a turn that ended `complete` with a
+# 2,833-char answer (pushed a HIGH "Needs attention" alert), and a quoted
+# "user's next message" on a sync grade where no such message existed. Both
+# claims are mechanically checkable against the evidence blob, so check them.
+_PHANTOM_ENV_TOKENS = ("compaction", "payment_required", "402", "quota", "rate limit", "rate_limit")
+_PHANTOM_NO_OUTPUT_RE = re.compile(
+    r"could not produce (any )?(a )?response|no agent output|transcript has no agent output|"
+    r"produced no (final )?(response|output)|did not (produce|emit) (a|any) (final )?(response|answer)",
+    re.I,
+)
+_PHANTOM_NEXT_MSG_RE = re.compile(
+    r"user'?s? (own )?(next|follow-up|subsequent) (message|reply)|user now (says|reports)|the user reports",
+    re.I,
+)
+_NO_FINAL_MARKER = "(no final assistant message)"
+_NEXT_MSG_SECTION = "USER'S NEXT MESSAGE"
+
+
+def phantom_evidence_reason(result: "ReflectResult", evidence: str, termination_reason: str | None) -> str | None:
+    """Return why a non-pass verdict rests on evidence the grader was never shown, or None.
+
+    Two claims are checked, both against the exact ``evidence`` string the
+    grader received:
+
+    * an environment failure that supposedly stopped the agent from answering
+      (compaction / 402 / quota / "no agent output") on a turn that terminated
+      ``complete`` with a non-empty final response, when none of the failure
+      tokens the verdict names occur anywhere in the evidence;
+    * a "user's next message" the verdict quotes or relies on, when the
+      evidence carries no USER'S NEXT MESSAGE section (sync grades never do).
+
+    A verdict that fails either check is not a judgment about the turn — it
+    is a hallucination — so the caller downgrades it to pass-with-lessons
+    rather than retrying or paging the user.
+    """
+    if result.verdict not in ("retry", "escalate"):
+        return None
+    text = " ".join(x or "" for x in (result.reasoning, result.diagnostic, result.what_failed, result.missing))
+    if not text.strip():
+        return None
+    ev_lower = (evidence or "").lower()
+
+    if _PHANTOM_NEXT_MSG_RE.search(text) and _NEXT_MSG_SECTION not in (evidence or ""):
+        return "the verdict relies on a user's next message, but the evidence carries no such message"
+
+    has_final = bool(ev_lower) and _NO_FINAL_MARKER not in (evidence or "")
+    if termination_reason == "complete" and has_final:
+        low = text.lower()
+        env_hits = [t for t in _PHANTOM_ENV_TOKENS if t in low]
+        no_output = bool(_PHANTOM_NO_OUTPUT_RE.search(text))
+        if env_hits and not any(t in ev_lower for t in env_hits):
+            return (
+                "the verdict names an environment failure (" + ", ".join(env_hits) + ") that appears "
+                "nowhere in the evidence, on a turn that terminated complete with a final response"
+            )
+        if no_output and result.failure_cause == "env":
+            return (
+                "the verdict says the agent produced no output, but the turn terminated complete with a final response"
+            )
+    return None
+
+
 def _forced_cause(current: str, fallback: str) -> str:
     """Attribution for a verdict the harness forced, not the model.
 
@@ -1259,6 +1675,8 @@ def _write_post_mortem(
     reflect_mode: str = "sync",
     tool_summary_attempts: list | None = None,
     turn_user_msg_id: int | None = None,
+    outcome_source: str = "llm",
+    next_msg_correction: bool | None = None,
 ) -> None:
     """Persist a post-mortem artifact for this reflect invocation (Phase 2c).
 
@@ -1272,11 +1690,21 @@ def _write_post_mortem(
     blocking, retry-capable; "deferred" = observe-only background grade).
     The verdict sample now spans both, and a rate computed across the two
     without splitting them is meaningless.
+
+    outcome_source names what the verdict rests on: "llm" (the grader alone)
+    or "next_turn" (the grader plus the user's reply as evidence). A third
+    value, "user", is written later by core/feedback.py when a thumb lands on
+    the turn. next_msg_correction is the deterministic reading of that reply,
+    recorded whatever the grader concluded.
     """
     try:
         payload = {
             "verdict": result.verdict,
+            "failure_kind": result.failure_kind,
+            "failure_evidence": result.failure_evidence,
+            "correction_rejected": result.correction_rejected,
             "reflect_mode": reflect_mode,
+            "outcome_source": outcome_source,
             "reasoning": result.reasoning,
             "diagnostic": result.diagnostic,
             "what_worked": result.what_worked,
@@ -1390,13 +1818,15 @@ def _write_post_mortem(
                 ],
                 "from_cache": bool(getattr(scout_report, "from_cache", False)),
                 "from_fallback": bool(getattr(scout_report, "from_fallback", False)),
-                # Usage counted at scout submit-time; carried here so
-                # synthesis can attribute this turn's outcome to the hints.
-                "used_hints": list(getattr(scout_report, "used_hints", []) or []),
             }
-        if result.cited_policies:
-            payload["cited_policies"] = list(result.cited_policies)
-
+        if next_msg_correction is not None:
+            payload["next_msg_correction"] = bool(next_msg_correction)
+        # Turn anchor: the only handle that ties this grade to the message the
+        # user can put a thumb on. The time-window match it replaces stopped
+        # being reliable the moment a grade could land after the next turn's
+        # own user message.
+        if turn_user_msg_id is not None:
+            payload["turn_user_msg_id"] = int(turn_user_msg_id)
         pm_id = db.add_post_mortem(
             session_id=session_id,
             attempt=attempt,
@@ -1408,8 +1838,17 @@ def _write_post_mortem(
             scout_viability=scout_viability,
             execution_mode=execution_mode,
             payload_json=json.dumps(payload, ensure_ascii=False),
+            outcome_source=outcome_source,
         )
         result.artifact_id = pm_id
+        # A thumb that landed before the grade did: carry it onto the grade
+        # now, so synthesis sees the user's verdict rather than the model's.
+        try:
+            fb = db.feedback_for_turn(session_id, payload.get("turn_user_msg_id"))
+            if fb and fb.get("signal"):
+                db.stamp_post_mortem_user_signal(pm_id, fb["signal"])
+        except Exception as fe:
+            logger.debug("feedback carry-over failed for %s: %s", session_id, fe)
     except Exception as e:
         logger.warning("Failed to persist post-mortem for session %s: %s", session_id, e)
 
@@ -1419,8 +1858,7 @@ async def _save_user_observations(session_id: str, result: ReflectResult) -> Non
 
     Reflect reads every full transcript anyway; this makes it a sensor for
     the user model instead of only a verdict machine. Writes go through the
-    normal store path — add_entry's dedup gate absorbs repeats, and user.*
-    writes flow into Candor's user_fact attestations via the store hook.
+    normal store path — add_entry's dedup gate absorbs repeats.
     Never raises; a memory problem must not affect the verdict.
     """
     observations = (result.experience or {}).get("user_observations") or []
@@ -1465,6 +1903,8 @@ async def reflect_on_session(
     gate_results: list | None = None,
     reflect_mode: str = "sync",
     tool_summary_attempts: list | None = None,
+    turn_msg_id_range: tuple[int | None, int | None] | None = None,
+    next_user_message: str = "",
 ) -> ReflectResult:
     """Analyze a completed session turn and decide if the task was fulfilled.
 
@@ -1475,7 +1915,7 @@ async def reflect_on_session(
         tool_summary: Aggregate tool execution stats from the agent loop
         scout_report: Optional ScoutReport from the turn (for deliverables_plan)
         extra_evidence: Optional supplementary text appended to the evidence
-            blob (e.g. recall of past lessons, trial-hint proposals when stuck).
+            blob (e.g. recall of past lessons).
         turn_user_msg_id: Id of the user message that triggered this turn. When
             provided, reflect grades against THIS turn's request, not the latest
             user message in the DB (which may be a queued message for a future
@@ -1483,10 +1923,20 @@ async def reflect_on_session(
         reflect_mode: "sync" (blocking, gates the retry loop) or "deferred"
             (observe-only background grade). Stamped on the post-mortem so the
             two regimes stay separable in verdict-rate analysis.
+        turn_msg_id_range: Inclusive (first, last) message-id window of the
+            graded turn. Required when the grade runs after the next turn has
+            started, so the evidence slice cannot drift forward into it.
+        next_user_message: The user's reply to this turn, when one arrived
+            before the grade ran. Handed to the verifier as evidence and
+            reduced to a deterministic correction flag on the post-mortem.
 
     Returns:
         ReflectResult with verdict and optional lessons
     """
+    # Ground-truth stamps, computed before the grade so every write path
+    # below records the same pair — including the parse-failure soft pass.
+    outcome_source = "next_turn" if next_user_message else "llm"
+    correction = next_msg_correction(next_user_message) if next_user_message else None
     # Off-loop: evidence assembly loads the full transcript from the DB.
     grounding: dict = {}
     user_request, evidence = await asyncio.to_thread(
@@ -1500,6 +1950,8 @@ async def reflect_on_session(
         prior_termination_reasons=prior_termination_reasons,
         tool_summary_attempts=tool_summary_attempts,
         grounding_out=grounding,
+        turn_msg_id_range=turn_msg_id_range,
+        next_user_message=next_user_message,
     )
     if not user_request or not evidence:
         r = ReflectResult(verdict="pass", reasoning="No user request found to verify")
@@ -1513,6 +1965,8 @@ async def reflect_on_session(
             reflect_mode=reflect_mode,
             tool_summary_attempts=tool_summary_attempts,
             turn_user_msg_id=turn_user_msg_id,
+            outcome_source=outcome_source,
+            next_msg_correction=correction,
         )
         return r
 
@@ -1659,31 +2113,63 @@ async def reflect_on_session(
 
             result.grounding = dict(grounding)
 
-            # Defensive ceiling-loop guard: if the agent hit round_ceiling on
-            # this turn AND on at least one prior turn, retry is provably
-            # hopeless against the same hard wall. Override the LLM's verdict.
-            # Only round_ceiling is guarded; other terminal reasons (compaction,
-            # budget) often have legitimate retries — they get the prompt rule
-            # but not this code-level override.
+            # Defensive ceiling-loop guard: if the agent hit the SAME hard
+            # wall on this turn AND on at least one prior turn, retry is
+            # provably hopeless against it. Override the LLM's verdict.
+            # Only the two loop walls are guarded; other terminal reasons
+            # (compaction, budget) often have legitimate retries — they get the
+            # prompt rule but not this code-level override.
+            _loop_walls = ("round_ceiling", "stuck_loop")
             if (
-                termination_reason == "round_ceiling"
-                and any(r == "round_ceiling" for r in (prior_termination_reasons or []))
+                termination_reason in _loop_walls
+                and any(r == termination_reason for r in (prior_termination_reasons or []))
                 and result.verdict == "retry"
             ):
                 logger.info(
-                    "Reflect ceiling-loop guard: forcing escalate (was %s) for session %s",
+                    "Reflect ceiling-loop guard: forcing escalate (was %s) for session %s (%s)",
                     result.verdict,
                     session_id,
+                    termination_reason,
                 )
                 result.verdict = "escalate"
-                # The wall is the task's shape against the round budget, not a
-                # bad plan or a bad execution of one.
+                # The wall is the task's shape against the loop, not a bad plan
+                # or a bad execution of one.
                 result.failure_cause = _forced_cause(result.failure_cause, "task")
                 if not result.missing:
+                    # Distinct advice per wall: raising max_tool_rounds does
+                    # nothing for a stuck loop, which fires on repetition at
+                    # any round number.
                     result.missing = (
                         "Agent hit round_ceiling on consecutive attempts. Either split "
                         "the task into smaller pieces or raise max_tool_rounds in settings."
+                        if termination_reason == "round_ceiling"
+                        else "Agent was force-broken out of a repetition loop on consecutive "
+                        "attempts. The round budget is not the constraint — the approach is. "
+                        "Change tool or source, or narrow the step."
                     )
+
+            # Phantom-evidence guard: a non-pass verdict built on facts the
+            # grader was never shown is a hallucination, not a grade. Downgrade
+            # to pass-with-lessons (same shape as the confidence floor) so it
+            # neither retries the turn nor pages the user.
+            _phantom = phantom_evidence_reason(result, evidence, termination_reason)
+            if _phantom:
+                logger.warning(
+                    "Reflect phantom-evidence guard: %s -> pass for session %s (%s): %s",
+                    result.verdict,
+                    session_id,
+                    _phantom,
+                    (result.reasoning or "")[:160],
+                )
+                result.reasoning = (result.reasoning or "") + (
+                    f" [downgraded from {result.verdict} by the phantom-evidence guard: {_phantom}]"
+                )
+                result.verdict = "pass"
+                result.failure_cause = "none"
+                result.verification = "unknown"
+                result.verification_reason = f"downgraded: {_phantom}"
+
+            guard_factual_correction(result, evidence)
 
             # Gate clamp (plan 3a): a failing deterministic gate makes `pass`
             # unreachable — mechanically, AFTER the LLM call, BEFORE the
@@ -1712,9 +2198,15 @@ async def reflect_on_session(
                     if not result.missing:
                         result.missing = f"Make the failing gate(s) pass: {names}"
 
+            # Deterministic receipts, on top of the model's self-assessment and
+            # after the clamp — a check's own execution facts are not something
+            # confidence can stand in for, in either direction (H11).
+            apply_verification_receipts(result, gate_results)
+
             logger.info(
-                "Reflect verdict=%s for session %s (%dms, inner=%d): %s",
+                "Reflect verdict=%s verification=%s for session %s (%dms, inner=%d): %s",
                 result.verdict,
+                result.verification,
                 session_id,
                 latency_ms,
                 inner_attempt,
@@ -1758,6 +2250,8 @@ async def reflect_on_session(
                 reflect_mode=reflect_mode,
                 tool_summary_attempts=tool_summary_attempts,
                 turn_user_msg_id=turn_user_msg_id,
+                outcome_source=outcome_source,
+                next_msg_correction=correction,
             )
             await _save_user_observations(session_id, result)
             return result
@@ -1807,6 +2301,8 @@ async def reflect_on_session(
             reflect_mode=reflect_mode,
             tool_summary_attempts=tool_summary_attempts,
             turn_user_msg_id=turn_user_msg_id,
+            outcome_source=outcome_source,
+            next_msg_correction=correction,
         )
         return r
 
@@ -1823,5 +2319,7 @@ async def reflect_on_session(
             reflect_mode=reflect_mode,
             tool_summary_attempts=tool_summary_attempts,
             turn_user_msg_id=turn_user_msg_id,
+            outcome_source=outcome_source,
+            next_msg_correction=correction,
         )
         return r

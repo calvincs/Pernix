@@ -9,7 +9,7 @@ client disconnects, so the 5s query timeout can keep a cold model cold
 forever.
 
 Pinned here: a sustained failure episode produces ONE operator notification
-(repeat at most daily, cleared by a success), and a query-side timeout fires
+(repeat at most daily, resolved by a success), and a query-side timeout fires
 one detached long-timeout warm-up, rate-limited.
 """
 
@@ -40,6 +40,13 @@ def clock(monkeypatch):
     monkeypatch.setattr(emb, "_failing_since", 0.0)
     monkeypatch.setattr(emb, "_last_notified_at", 0.0)
     monkeypatch.setattr(emb, "_last_warm_at", 0.0)
+    # This file pins the no-fallback path (recall really is lexical-only).
+    # With fastembed installed the episode would switch to the local CPU
+    # model at 30 minutes and queries would stop failing mid-test; that path
+    # has its own regression (…remote_embeddings_down_means_no_semantic_recall…).
+    monkeypatch.setattr("config.settings.embedding_fallback_model", "")
+    monkeypatch.setattr(emb, "_degraded_since", 0.0)
+    monkeypatch.setattr(emb, "_outage_resolve_pending", False)
     return c
 
 
@@ -88,11 +95,17 @@ def test_sustained_failure_notifies_once_a_day_and_a_success_clears_it(clock, mo
     clock.t += 100
     assert emb.embed_query_sync("q") == [0.1, 0.2]  # recovery clears the episode
     assert emb._failing_since == 0.0
+    # Since v42 the outage is a bell row that resolves itself when the cause
+    # clears ("a successful embed clears it" in its body is now literal): it
+    # leaves the bell and stays in the activity log, marked resolved.
+    assert db.get_notifications() == []
+    logged = [n for n in db.list_notifications("log") if n["category"] == "system.embeddings_down"]
+    assert len(logged) == 1 and logged[0]["resolved_at"]
 
     monkeypatch.setattr(httpx, "post", _failing_post(calls))
     clock.t += 100
     assert emb.embed_query_sync("q") is None  # a fresh episode starts quietly
-    assert len(db.get_notifications()) == 1
+    assert db.get_notifications() == []
     # Every query honoured the 5s bound; nothing in this path waits longer.
     assert all(c["timeout"] == emb._QUERY_TIMEOUT_S for c in calls)
 

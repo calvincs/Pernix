@@ -133,29 +133,6 @@ def test_load_skill_healthy_no_warning(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Skillmaker contract writing
-# ---------------------------------------------------------------------------
-
-
-def test_upsert_script_contract(tmp_path):
-    from core.extensions.skillmaker import _upsert_script_contract
-    from core.skills.parser import parse_skill_md
-
-    d = _make_skill(tmp_path, "maker")
-    _upsert_script_contract(d, "scripts/go.sh", "does the thing", "bash scripts/go.sh")
-    fm, body = parse_skill_md(d / "SKILL.md")
-    assert fm["scripts"] == [{"path": "scripts/go.sh", "purpose": "does the thing", "usage": "bash scripts/go.sh"}]
-    assert "# Do things" in body
-
-    # Update in place, not duplicate.
-    _upsert_script_contract(d, "scripts/go.sh", "does it better", "")
-    fm, _ = parse_skill_md(d / "SKILL.md")
-    assert len(fm["scripts"]) == 1
-    assert fm["scripts"][0]["purpose"] == "does it better"
-    assert fm["scripts"][0]["usage"] == "bash scripts/go.sh"
-
-
-# ---------------------------------------------------------------------------
 # Snooze requirements install (Activity 2c)
 # ---------------------------------------------------------------------------
 

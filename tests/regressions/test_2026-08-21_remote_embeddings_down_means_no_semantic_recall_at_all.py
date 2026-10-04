@@ -94,7 +94,9 @@ def test_remote_outage_switches_to_the_local_model_and_back(clock, monkeypatch):
     clock.t += 11 * 60  # 31 min of failure → fallback
     assert emb.embed_query_sync("q") is None  # this call still went remote and failed …
     assert emb.degraded() and emb.active_model() == "local:BAAI/bge-small-en-v1.5"
-    titles = [n["title"] for n in db.get_notifications()]
+    # The switch is a log-tier row (system.embeddings_switched): the activity
+    # log records it, the bell does not light up for self-healing.
+    titles = [n["title"] for n in db.list_notifications("log")]
     assert "Embeddings switched to the local CPU fallback" in titles
 
     # … and from now on queries never touch httpx: they embed on the CPU.
@@ -119,7 +121,7 @@ def test_remote_outage_switches_to_the_local_model_and_back(clock, monkeypatch):
     clock.t += 31 * 60
     assert emb.check_remote_recovery() is True
     assert not emb.degraded() and emb.active_model() == "nomic-embed-text-v2-moe:latest"
-    assert "Embeddings back on the remote server" in [n["title"] for n in db.get_notifications()]
+    assert "Embeddings back on the remote server" in [n["title"] for n in db.list_notifications("log")]
 
     # A failed probe resets the window.
     emb._degraded_since = clock.t

@@ -1097,6 +1097,205 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_space_suggestions_status ON space_suggestions(status)",
         ],
     ),
+    (
+        36,
+        "ground truth: the user's own verdict on a turn, and where every outcome came from",
+        [
+            # One row per assistant message the user reacted to. message_id is
+            # UNIQUE because a thumb is a state, not an event log: pressing up
+            # after down replaces the row rather than appending to it, and
+            # removing the reaction deletes it. TEXT because the API addresses
+            # messages by path segment; rows store the canonical decimal form.
+            """CREATE TABLE IF NOT EXISTS message_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                message_id TEXT NOT NULL UNIQUE,
+                signal TEXT NOT NULL CHECK(signal IN ('up','down')),
+                note TEXT,
+                created_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_message_feedback_session ON message_feedback(session_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_message_feedback_signal ON message_feedback(signal)",
+            # The two columns that make self-grading auditable. user_signal is
+            # the thumb that landed on this turn, if any; outcome_source names
+            # what the recorded outcome actually rests on —
+            # 'llm' (the grader alone) < 'next_turn' (the grader plus the
+            # user's reply) < 'user' (the user said so). Precedence runs left
+            # to right, so the share of grounded outcomes is one GROUP BY.
+            "ALTER TABLE post_mortems ADD COLUMN user_signal TEXT",
+            "ALTER TABLE post_mortems ADD COLUMN outcome_source TEXT",
+            # Every existing row was graded by the model and nothing else.
+            "UPDATE post_mortems SET outcome_source = 'llm' WHERE outcome_source IS NULL",
+            "CREATE INDEX IF NOT EXISTS idx_postmortems_outcome_source ON post_mortems(outcome_source, created_at DESC)",
+        ],
+    ),
+    (
+        37,
+        "distillation coverage watermark: the newest message already distilled",
+        [
+            # Distillation ran at the end of EVERY turn over the whole
+            # session and sent the extractor the first 40,000 characters of
+            # it. Past that size the prefix is frozen: two consecutive runs
+            # shipped byte-identical input, burning a background call per
+            # turn for nothing, while every late correction sat outside it.
+            # 0 means nothing distilled yet, which is the correct reading for
+            # every existing row — a re-read of already-covered material is
+            # wasteful, never wrong.
+            "ALTER TABLE sessions ADD COLUMN distilled_up_to INTEGER NOT NULL DEFAULT 0",
+        ],
+    ),
+    (
+        38,
+        "worker retention: result consumption, abandonment, and a durable result manifest",
+        [
+            # Worker pruning selected on session_type and age alone. These two
+            # columns are the lifecycle facts it was missing: when a parent
+            # actually READ the result (get_worker_result), and when the task
+            # was explicitly given up on (cancel_worker). Until one of them is
+            # set, an aged worker is unfinished business, not residue.
+            "ALTER TABLE sessions ADD COLUMN result_consumed_at TEXT",
+            "ALTER TABLE sessions ADD COLUMN abandoned_at TEXT",
+            # Written BEFORE the transcript is deleted and outliving it by its
+            # own retention window. The old distill-before-delete digest kept
+            # id, title and date — enough to know a worker existed, not enough
+            # to recover a single finding it reported.
+            """CREATE TABLE IF NOT EXISTS worker_result_manifests (
+                worker_id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                title TEXT NOT NULL DEFAULT '',
+                worker_kind TEXT,
+                created_at TEXT,
+                last_active_at TEXT,
+                termination_reason TEXT,
+                result TEXT NOT NULL DEFAULT '',
+                result_source TEXT NOT NULL DEFAULT '',
+                archived_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_worker_manifests_parent ON worker_result_manifests(parent_session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_worker_manifests_archived ON worker_result_manifests(archived_at)",
+        ],
+    ),
+    (
+        39,
+        "goal continuation outbox: a debited continuation survives the crash that debited it",
+        [
+            # A goal continuation was debited durably (session_goals.
+            # continuations_used) and then dispatched from an in-memory deque.
+            # A crash between the two spent the allowance and ran nothing, and
+            # no boot path swept for it — the orphan sweep runs only at turn
+            # finalization or inside prompt(), so unattended operation stalled
+            # silently with the budget drained (measured: three cycles, zero
+            # continuations executed).
+            #
+            # The debit and the enqueue are now one transaction against this
+            # table. (goal_id, ordinal) is UNIQUE: that index is what makes a
+            # double debit impossible, whatever races or retries occur.
+            #
+            # status is the dispatch lifecycle:
+            #   pending    debited, nobody owns it yet — safe to dispatch
+            #   claimed    a dispatcher owns it; its side effects are UNKNOWN
+            #   dispatched the turn actually started
+            #   abandoned  settled without running (goal paused, user cancelled,
+            #              queued user direction, recovery limit)
+            # `recovered` marks a row that came back from a dead claim, so the
+            # prompt it is re-dispatched with tells the agent to verify state
+            # before repeating anything. Durable dispatch is not exactly-once
+            # side effects: a claimed row is never blindly replayed.
+            """CREATE TABLE IF NOT EXISTS goal_continuations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','claimed','dispatched','abandoned')),
+                prompt TEXT NOT NULL,
+                checkpoint TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                recovered INTEGER NOT NULL DEFAULT 0,
+                outcome TEXT,
+                created_at TEXT NOT NULL,
+                claimed_at TEXT,
+                settled_at TEXT
+            )""",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_continuations_ordinal "
+            "ON goal_continuations(goal_id, ordinal)",
+            "CREATE INDEX IF NOT EXISTS idx_goal_continuations_open " "ON goal_continuations(status, session_id)",
+        ],
+    ),
+    (
+        40,
+        "worker run record: which report a run owns, and where its transcript starts",
+        [
+            # JSON, like watched_worker_ids: nothing queries inside it, and the
+            # shape grows (seq, boundary, report pointer, retired artifacts,
+            # the grade bound to the bytes it graded) faster than columns would.
+            # NULL means a worker persisted before runs existed — the readers
+            # treat that as "no boundary known", never as "stale".
+            "ALTER TABLE sessions ADD COLUMN worker_run TEXT",
+        ],
+    ),
+    (
+        41,
+        "index the sidebar's own ordering: (archived_at, updated_at DESC)",
+        [
+            # Every sidebar page is "the live sessions, newest first" — and
+            # there was no index for it, so SQLite read the whole sessions
+            # table and sorted it in a temp B-tree before it could hand back
+            # 50 rows. `archived_at IS NULL` is an index-usable constraint,
+            # so the leading column turns the live page and the archived page
+            # into two ordered scans of the same index rather than two full
+            # table scans. Measured at 1,622 sessions: 0.204 ms -> 0.035 ms
+            # for the id page, and the cost is linear in the table without it.
+            "CREATE INDEX IF NOT EXISTS idx_sessions_recency ON sessions(archived_at, updated_at DESC)",
+        ],
+    ),
+    (
+        42,
+        "notifications become a tiered activity log (category, tier, read/dismissed/resolved)",
+        [
+            # The table was a bell and nothing else: 41 producers wrote into
+            # it, Dismiss hard-deleted the row, and in the 17 days before this
+            # migration ~95% of what landed needed nothing from the user. The
+            # new columns let one policy layer (core/notices.py) decide what a
+            # row IS (tier: interrupt | bell | log) and let Dismiss keep the
+            # row, so the same table is also the rolling activity log.
+            # Defaults make a surviving pre-v42 row a plain bell item.
+            "ALTER TABLE notifications ADD COLUMN category TEXT NOT NULL DEFAULT 'legacy'",
+            "ALTER TABLE notifications ADD COLUMN tier TEXT NOT NULL DEFAULT 'bell'",
+            "ALTER TABLE notifications ADD COLUMN subject TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE notifications ADD COLUMN occurrences INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE notifications ADD COLUMN updated_at TEXT",
+            "ALTER TABLE notifications ADD COLUMN read_at TEXT",
+            "ALTER TABLE notifications ADD COLUMN dismissed_at TEXT",
+            "ALTER TABLE notifications ADD COLUMN resolved_at TEXT",
+            "ALTER TABLE notifications ADD COLUMN link_json TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_notifications_open ON notifications(tier, dismissed_at, resolved_at, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_notifications_subject ON notifications(category, subject)",
+        ],
+    ),
+    (
+        43,
+        "resolve the open adaptive.* bell rows (the adaptive layer is retired)",
+        [
+            # Data only. The adaptive layer and its notice categories were
+            # removed in 3.2, so an open adaptive.tripwire_suspect (or any
+            # other adaptive.*) row would sit in the bell forever with no
+            # producer left to resolve it. Resolved, not dismissed or deleted:
+            # the activity log keeps the history. The adaptive_* tables stay.
+            """UPDATE notifications SET resolved_at = strftime('%Y-%m-%dT%H:%M:%S+00:00','now')
+               WHERE category LIKE 'adaptive.%' AND resolved_at IS NULL AND dismissed_at IS NULL""",
+        ],
+    ),
+    (
+        44,
+        "journal exact skill proposal backups and file revisions",
+        [
+            "ALTER TABLE skill_improvement_proposals ADD COLUMN backup_name TEXT",
+            "ALTER TABLE skill_improvement_proposals ADD COLUMN before_revision TEXT",
+            "ALTER TABLE skill_improvement_proposals ADD COLUMN after_revision TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_skill_proposals_pending ON skill_improvement_proposals(status, created_at, id)",
+        ],
+    ),
 ]
 
 

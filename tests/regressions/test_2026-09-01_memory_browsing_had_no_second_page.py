@@ -14,6 +14,13 @@ contains.
 Covers: paging (limit/offset/has_more), the file list's `updated`, the read
 endpoint's `mtime`, and the write endpoint's save / conflict / traversal
 behaviour.
+
+The version half of that contract grew a second, exact token in 2026-09-08:
+`revision` is a digest of the bytes the read handed out, and `base_revision`
+is compared inside the store's mutation lock instead of in the handler. The
+sequential cases live here beside the mtime ones they extend; the concurrent
+ones, where the old boundary actually failed, are in
+test_2026-09-08_two_memory_saves_both_said_they_won.py.
 """
 
 from __future__ import annotations
@@ -156,6 +163,71 @@ async def test_put_without_base_mtime_keeps_last_writer_wins(store):
     resp = await _put("/api/memory/files/pernix.paging", {"content": "# forced\n"})
     assert resp.status_code == 200
     assert "forced" in (await _get("/api/memory/files/pernix.paging")).json()["content"]
+
+
+async def test_read_also_returns_an_exact_revision_to_save_against(store):
+    _seed(store, n=1)
+    data = (await _get("/api/memory/files/pernix.paging")).json()
+    assert isinstance(data["revision"], str) and data["revision"].startswith("sha256:")
+    # Same bytes, same token — a read is repeatable while nothing writes.
+    again = (await _get("/api/memory/files/pernix.paging")).json()
+    assert again["revision"] == data["revision"]
+
+
+async def test_put_409s_on_a_stale_revision_and_keeps_the_other_writer(store):
+    _seed(store, n=1)
+    read = (await _get("/api/memory/files/pernix.paging")).json()
+
+    ok = await _put("/api/memory/files/pernix.paging", {"content": "# rewritten by the agent\n"})
+    assert ok.status_code == 200
+
+    late = await _put(
+        "/api/memory/files/pernix.paging",
+        {"content": "# what the editor had\n", "base_revision": read["revision"]},
+    )
+    assert late.status_code == 409
+    assert late.json()["detail"] == "changed_on_disk"
+    # The 409 names the version that IS there, both ways, so a client can say
+    # what it would have overwritten without going and looking (another race).
+    assert late.json()["revision"] == ok.json()["revision"]
+    assert late.json()["mtime"] > 0
+    assert "rewritten by the agent" in (await _get("/api/memory/files/pernix.paging")).json()["content"]
+
+
+async def test_a_save_hands_back_a_version_the_next_save_can_use(store):
+    """An editor that keeps saving must not have to re-read between saves."""
+    _seed(store, n=1)
+    read = (await _get("/api/memory/files/pernix.paging")).json()
+
+    first = await _put("/api/memory/files/pernix.paging", {"content": "# one\n", "base_revision": read["revision"]})
+    assert first.status_code == 200
+
+    second = await _put(
+        "/api/memory/files/pernix.paging",
+        {"content": "# two\n", "base_revision": first.json()["revision"]},
+    )
+    assert second.status_code == 200
+    assert (await _get("/api/memory/files/pernix.paging")).json()["content"] == "# two\n"
+
+    # And the version it superseded is now stale, as it must be.
+    stale = await _put(
+        "/api/memory/files/pernix.paging",
+        {"content": "# three\n", "base_revision": first.json()["revision"]},
+    )
+    assert stale.status_code == 409
+
+
+async def test_a_revision_wins_over_a_stale_mtime_sent_beside_it(store):
+    """The shipped editor sends both. The exact one decides."""
+    _seed(store, n=1)
+    read = (await _get("/api/memory/files/pernix.paging")).json()
+
+    resp = await _put(
+        "/api/memory/files/pernix.paging",
+        {"content": "# saved\n", "base_revision": read["revision"], "base_mtime": read["mtime"] - 500},
+    )
+    assert resp.status_code == 200, resp.text
+    assert (await _get("/api/memory/files/pernix.paging")).json()["content"] == "# saved\n"
 
 
 async def test_put_refuses_traversal_and_unknown_files(store):

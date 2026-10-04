@@ -92,6 +92,24 @@ def is_stream_retryable(error: str) -> bool:
     return any(k in error for k in _RETRYABLE_MARKERS)
 
 
+def serving_provider(client, model: str) -> str:
+    """The provider that actually served `model`, for the usage ledger.
+
+    `resolve_provider` reports the registry's intent, which is not always what
+    ran: the router downgrades an unavailable remote to Ollama. Booking usage
+    against the intent writes free local tokens into the paid column. Falls
+    back to the intent for clients that predate `effective_provider` (the
+    fakes, chiefly).
+    """
+    try:
+        resolver = getattr(client, "effective_provider", None)
+        if resolver is not None:
+            return resolver(model)
+    except Exception:
+        pass
+    return client.resolve_provider(model)
+
+
 @dataclass
 class StreamOutcome:
     """What one full ladder run produced.
@@ -240,6 +258,13 @@ async def stream_with_failover(
 
                 elif event.type == StreamEventType.USAGE and event.usage:
                     usage = event.usage
+                    # `current_model` is the model that served this response,
+                    # not the one the turn started with: the ladder owns
+                    # failover end to end, so the substitution it makes is the
+                    # only one there is. It used to be possible for the router
+                    # to swap the model a level lower without telling anyone,
+                    # and these rows then billed a local answer to the remote
+                    # primary's price list.
                     await asyncio.to_thread(
                         db.add_token_usage,
                         session_id=session_id,
@@ -255,7 +280,7 @@ async def stream_with_failover(
                             event.usage.completion_tokens,
                         ),
                         source="provider",
-                        provider=client.resolve_provider(current_model),
+                        provider=serving_provider(client, current_model),
                         goal_id=goal_id,
                     )
 

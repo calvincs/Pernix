@@ -6,7 +6,8 @@ Normally driven by run.sh, which boots a throwaway instance and seeds it first:
   check.py <base_url> <shots_dir> <tag> <main_sid> <parent_sid> [LEVEL]
 
 LEVEL: m1 (foundation: tiers, inert, bottom stack, model menu on-screen, desktop unchanged)
-       m2 (everything: + row sheet, editor, worker strip, targets, inputs, header hide)
+       m2 (everything: + row sheet, editor, worker strip, targets, inputs,
+            header hide, the composer and its expand editor)
 
 Exit 1 on any failed check at the requested level. Writes <shots>/<tag>-*.png and
 <shots>/../check-<tag>.json. The desktop baseline is desktop-baseline.json NEXT TO
@@ -39,6 +40,43 @@ VPS = [
 ]
 results = []  # (viewport, name, ok, detail, level)
 console_errors = []
+
+
+# The two routes that legitimately 404 until the trust-loop backend (W2)
+# merges: the client asks ONCE per page load whether this server can store a
+# message rating, and the Trust tab asks for the metrics. Chromium logs a
+# fetch that comes back 404 as a console error, so an unfiltered gate would
+# fail on the exact degradation path the client is written to handle — the
+# one message_feedback() below asserts. Once the routes exist nothing matches
+# this and the allowance costs nothing.
+PENDING_ROUTES = ("/feedback", "/api/trust")
+
+# Their settings siblings: rows registered here in the browser whose keys the
+# 3.2 backend adds. Same rule — until the server publishes them, they do not
+# render at all.
+PENDING_SETTINGS = (
+    "reflect_next_turn_grading",
+    "grader_holdout_enabled",
+    "grader_holdout_schedule",
+)
+
+
+def _pending_route_404(msg):
+    if "404" not in msg.text:
+        return False
+    url = ((msg.location or {}).get("url") or "").split("?")[0]
+    return any(url.endswith(suffix) for suffix in PENDING_ROUTES)
+
+
+def console_sink(prefix):
+    """Collect console errors for `prefix`, minus the expected 3.2 404s."""
+
+    def sink(msg):
+        if msg.type != "error" or _pending_route_404(msg):
+            return
+        console_errors.append(f"[{prefix}] {msg.text}")
+
+    return sink
 
 
 def check(vp, name, ok, detail="", level="m1"):
@@ -274,10 +312,103 @@ def suggestion_row_checks(pg, name):
     )
 
 
+# The composer's own floor is 44px, not the 28px the SMALL_JS sweep enforces
+# across the app: it is the control every session goes through, and Apple HIG
+# 44pt / Material 48dp is what a thumb actually needs. Measured on the real
+# card, so a control that is only 44px because nothing is beside it still
+# counts. .is-rest-inline folds the row away on an untouched phone composer,
+# so the pass types first — a folded row has no expand button to press and
+# hides the counter by design.
+COMPOSER_TOUCH_JS = r"""() => {
+  const row=document.getElementById('composer'); const out={small:[], n:0};
+  for (const id of ['stop-btn','attach-btn','expand-btn','voice-btn','send-btn']) {
+    const b=document.getElementById(id);
+    if(!b || b.hidden || !b.offsetParent) continue;
+    const r=b.getBoundingClientRect();
+    if(r.width===0||r.height===0) continue;
+    out.n++;
+    if(r.width<44||r.height<44) out.small.push(id+' '+Math.round(r.width)+'x'+Math.round(r.height));
+  }
+  const h=document.getElementById('composer-hint');
+  out.hint = !!(h && h.offsetParent && getComputedStyle(h).display !== 'none');
+  out.card = Math.round(row.getBoundingClientRect().width);
+  out.wrapper = Math.round(document.getElementById('input-wrapper').getBoundingClientRect().width);
+  return out; }"""
+
+
+def composer_touch(pg, name, shot):
+    """The composer and its expand sheet under a finger."""
+    # Typing drops .is-rest-inline, which is the state the controls are all
+    # in the row and the expand button exists.
+    pg.evaluate(
+        "() => { const t=document.getElementById('msg-input'); t.focus();"
+        " t.value='a draft worth expanding';"
+        " t.dispatchEvent(new Event('input', {bubbles: true})); }"
+    )
+    time.sleep(0.4)
+    m = pg.evaluate(COMPOSER_TOUCH_JS)
+    check(name, "m2: every composer button is >=44px on touch", m["n"] >= 3 and not m["small"], m, "m2")
+    check(name, "m2: no #composer-hint on touch (aria-description carries it)", not m["hint"], m, "m2")
+
+    pg.evaluate("() => document.getElementById('expand-btn').click()")
+    try:
+        pg.wait_for_selector("#compose-editor", timeout=4000)
+    except Exception:
+        check(name, "m2: expand opens the full-screen sheet", False, "no #compose-editor", "m2")
+        return
+    time.sleep(0.4)
+    sheet = pg.evaluate(
+        "() => { const c=document.getElementById('compose-editor'); const r=c.getBoundingClientRect();"
+        " const bar=[...c.querySelector('.compose-editor-top').children].map(n => n.textContent.trim());"
+        " const cl=document.getElementById('compose-editor-close').getBoundingClientRect();"
+        " const sd=document.getElementById('compose-editor-send').getBoundingClientRect();"
+        " return {sheet: c.classList.contains('compose-editor--sheet'), bar,"
+        "         w: Math.round(r.width), h: Math.round(r.height),"
+        "         vw: innerWidth, vh: innerHeight,"
+        "         value: document.getElementById('compose-editor-input').value,"
+        "         fs: parseFloat(getComputedStyle(document.getElementById('compose-editor-input')).fontSize),"
+        "         targets: [Math.round(cl.width)+'x'+Math.round(cl.height),"
+        "                   Math.round(sd.width)+'x'+Math.round(sd.height)]}; }"
+    )
+    shot("compose-editor")
+    check(
+        name,
+        "m2: expand opens a full-screen Cancel · Compose · Send sheet",
+        sheet["sheet"]
+        and sheet["bar"] == ["Cancel", "Compose", "Send"]
+        and sheet["w"] >= sheet["vw"] - 1
+        and sheet["h"] >= sheet["vh"] - 1
+        and sheet["value"] == "a draft worth expanding"
+        and sheet["fs"] >= 16
+        and all(int(t.split("x")[0]) >= 44 and int(t.split("x")[1]) >= 44 for t in sheet["targets"]),
+        sheet,
+        "m2",
+    )
+    # Cancel keeps the draft — the whole point of a shared buffer.
+    pg.evaluate("() => document.getElementById('compose-editor-close').click()")
+    time.sleep(0.4)
+    kept = pg.evaluate(
+        "() => ({gone: !document.getElementById('compose-editor'),"
+        "        value: document.getElementById('msg-input').value})"
+    )
+    check(
+        name,
+        "m2: Cancel closes the sheet and keeps the draft",
+        kept["gone"] and kept["value"] == "a draft worth expanding",
+        kept,
+        "m2",
+    )
+    pg.evaluate(
+        "() => { const t=document.getElementById('msg-input'); t.value='';"
+        " t.dispatchEvent(new Event('input', {bubbles: true})); t.blur(); }"
+    )
+    time.sleep(0.3)
+
+
 def run_vp(browser, name, w, h, opts):
     ctx = browser.new_context(viewport={"width": w, "height": h}, device_scale_factor=2, color_scheme="dark", **opts)
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[{name}] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink(name))
     pg.on("pageerror", lambda e: console_errors.append(f"[{name}] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
@@ -443,6 +574,8 @@ def run_vp(browser, name, w, h, opts):
         bs,
     )
     shot("chat")
+    if LEVEL == "m2":
+        composer_touch(pg, name, shot)
     # model menu on screen
     pg.tap("#status-model") if opts.get("has_touch") else pg.click("#status-model")
     time.sleep(1.0)
@@ -589,7 +722,7 @@ def run_vp(browser, name, w, h, opts):
         time.sleep(0.4)
         pg.evaluate("() => document.getElementById('fp-group-tuning')?.click()")
         time.sleep(0.6)
-        pg.evaluate("() => document.querySelectorAll('.fp-subtab-btn')[1]?.click()")
+        pg.evaluate("() => document.getElementById('fp-tab-canary')?.click()")
         time.sleep(0.8)
         ov = pg.evaluate(
             "() => { const bs=[...document.querySelectorAll('#file-panel .adaptive-head button, #file-panel .adaptive-head .adaptive-btn')].filter(b=>b.offsetParent); const rs=bs.map(b=>b.getBoundingClientRect()); let overlap=false; for(let i=0;i<rs.length;i++) for(let j=i+1;j<rs.length;j++){ const a=rs[i], c=rs[j]; if(a.left<c.right-1 && c.left<a.right-1 && a.top<c.bottom-1 && c.top<a.bottom-1) overlap=true; } return {n: rs.length, overlap, cut: rs.some(r=>r.right>innerWidth+1)}; }"
@@ -611,7 +744,7 @@ def run_vp(browser, name, w, h, opts):
 def desktop_layout(browser):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[desktop] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("desktop"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
     out = {}
@@ -619,7 +752,7 @@ def desktop_layout(browser):
     def grab(label):
         out[label] = pg.evaluate(
             """() => { const q=s=>{const e=document.querySelector(s); if(!e) return null; const r=e.getBoundingClientRect(); const cs=getComputedStyle(e); return [Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height), cs.position, cs.display, cs.fontSize, cs.padding];};
-            return {sidebar:q('#sidebar'), main:q('#main'), status:q('#status-bar'), input:q('#input-wrapper'), messages:q('#messages'), inner:q('.messages-inner'), fp:q('#file-panel'), modal:q('.modal-card'), toggle:q('#sidebar-toggle'), header:q('#session-header'), model:q('#status-model'), msg:q('#msg-input'), item:q('.session-item'), btn:q('#settings-btn'), sheets:[...document.styleSheets].map(s=>(s.href||'').split('/').pop()).filter(Boolean)}; }"""
+            return {sidebar:q('#sidebar'), main:q('#main'), status:q('#status-bar'), input:q('#input-wrapper'), composer:q('#composer'), row:q('#composer-row'), messages:q('#messages'), inner:q('.messages-inner'), fp:q('#file-panel'), modal:q('.modal-card'), toggle:q('#sidebar-toggle'), header:q('#session-header'), model:q('#status-model'), msg:q('#msg-input'), item:q('.session-item'), btn:q('#settings-btn'), sheets:[...document.styleSheets].map(s=>(s.href||'').split('/').pop()).filter(Boolean)}; }"""
         )
         pg.screenshot(path=f"{shots}/{tag}-desktop-{label}.png")
 
@@ -874,7 +1007,7 @@ def state_map_colours(browser):
 
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[state-map] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("state-map"))
     pg.on("pageerror", lambda e: console_errors.append(f"[state-map] pageerror: {e}"))
     vendor_reqs = []
     pg.on("request", lambda r: vendor_reqs.append(r.url) if "mermaid" in r.url else None)
@@ -900,9 +1033,10 @@ def state_map_colours(browser):
             problems.append(f"states drawn {drawn}")
         if m["svgs"] != 1:
             problems.append(f"{m['svgs']} svgs in the map container")
-        # The 31 edges of TRANSITIONS, of which the seeded arc took seven.
-        if len(m["edges"]) != 31:
-            problems.append(f"{len(m['edges'])} edges drawn, the table has 31")
+        # The 38 distinct (from, to) pairs of TRANSITIONS (2dee81b + the 09-14
+        # edges), of which the seeded arc took seven.
+        if len(m["edges"]) != 38:
+            problems.append(f"{len(m['edges'])} edges drawn, the table has 38")
         used = {k for k, v in m["edges"].items() if v["used"]}
         if used != set(MAP_USED_EDGES):
             problems.append(f"used edges {sorted(used)}")
@@ -1011,7 +1145,7 @@ def timeline_lane(browser, light=False):
     if light:
         ctx.add_init_script("try { localStorage.setItem('pernix_theme', 'light'); } catch (e) {}")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[lane-{theme}] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink(f"lane-{theme}"))
     pg.on("pageerror", lambda e: console_errors.append(f"[lane-{theme}] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
@@ -1085,7 +1219,7 @@ def timeline_lane_touch(browser):
         has_touch=True,
     )
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[lane-touch] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("lane-touch"))
     pg.on("pageerror", lambda e: console_errors.append(f"[lane-touch] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
@@ -1111,6 +1245,327 @@ def timeline_lane_touch(browser):
     ctx.close()
 
 
+# ---------------------------------------------------------------------------
+# The composer — the control the whole app exists for
+# ---------------------------------------------------------------------------
+# The 3.2 redesign (docs/dev/composer-plan.md) moved every part of this: the
+# card spans the chat column instead of a 960px pill, it rests at two lines
+# instead of one, the controls sit beneath the text rather than in it, Stop is
+# its own button, and the bindings, the size and the long-paste offer are all
+# stated on screen rather than in a tooltip. None of that is visible to the
+# baseline diff — which only knows where #input-wrapper's box is — so it gets
+# its own pass, on its own context, after the baseline has been recorded.
+
+COMPOSER_GEOM = r"""() => {
+  const t=document.getElementById('msg-input'), c=document.getElementById('composer'),
+        m=document.getElementById('main'), cs=getComputedStyle(t);
+  const r=c.getBoundingClientRect();
+  return {lh: parseFloat(cs.lineHeight), fs: parseFloat(cs.fontSize),
+          padY: (parseFloat(cs.paddingTop)||0)+(parseFloat(cs.paddingBottom)||0),
+          client: Math.round(t.clientHeight), scroll: Math.round(t.scrollHeight),
+          rows: t.getAttribute('rows'),
+          cardW: Math.round(r.width), mainW: Math.round(m.getBoundingClientRect().width),
+          vh: innerHeight}; }"""
+
+# The bindings, everywhere the composer states them at once.
+COMPOSER_HINT = r"""() => {
+  const h=document.getElementById('composer-hint'), t=document.getElementById('msg-input');
+  let stored=null; try { stored=localStorage.getItem('pernix:enter-sends'); } catch(e) {}
+  return {text: h ? h.textContent.trim() : null,
+          shown: !!(h && h.offsetParent && getComputedStyle(h).display !== 'none'),
+          ekh: t.getAttribute('enterkeyhint'), stored,
+          aria: t.getAttribute('aria-description')}; }"""
+
+# A paste the browser will not perform for us. The handler measures what
+# landed AFTER the fact (line endings are normalised on the way in), so the
+# event and the insertion both have to be faked, in that order.
+PASTE_JS = r"""(n) => {
+  const t=document.getElementById('msg-input'), big='x'.repeat(n);
+  t.focus(); t.setSelectionRange(t.value.length, t.value.length);
+  const start=t.value.length, dt=new DataTransfer();
+  dt.setData('text/plain', big);
+  t.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true}));
+  t.value = t.value.slice(0, start) + big;
+  t.dispatchEvent(new Event('input', {bubbles: true}));
+  return start; }"""
+
+
+def composer_desktop(browser):
+    """Everything the redesigned composer promises under a mouse."""
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
+    pg = ctx.new_page()
+    pg.on("console", console_sink("composer"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[composer] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.5)
+    pg.evaluate(f"() => document.querySelector('[data-sid=\"{MAIN}\"]')?.click()")
+    time.sleep(1.4)
+
+    # --- size and presence -------------------------------------------------
+    g = pg.evaluate(COMPOSER_GEOM)
+    check(
+        "composer",
+        "m2: rests at two lines on desktop, not one and not three",
+        g["client"] + 1 >= 2 * g["lh"] and g["client"] < 3 * g["lh"] + g["padY"] and g["rows"] == "2",
+        g,
+        "m2",
+    )
+    check(
+        "composer",
+        "m2: composer spans >=90% of #main",
+        g["cardW"] >= 0.90 * g["mainW"],
+        f"{g['cardW']}px of {g['mainW']}px = {g['cardW'] / max(g['mainW'], 1):.0%}",
+        "m2",
+    )
+    # The expand editor is the answer to a long draft; the composer's own job
+    # is to stop growing and start scrolling before it eats the transcript.
+    pg.fill("#msg-input", "\n".join(f"line {i}" for i in range(60)))
+    time.sleep(0.3)
+    gf = pg.evaluate(COMPOSER_GEOM)
+    check(
+        "composer",
+        "m2: 60 lines grow to <=40dvh, then scroll",
+        gf["client"] <= 0.40 * gf["vh"] + 1 and gf["scroll"] > gf["client"] + 10,
+        {**gf, "cap": round(0.40 * gf["vh"])},
+        "m2",
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-composer-full.png")
+    pg.fill("#msg-input", "")
+    time.sleep(0.2)
+
+    # --- the bindings, stated and flippable in place -----------------------
+    h0 = pg.evaluate(COMPOSER_HINT)
+    check(
+        "composer",
+        "m2: #composer-hint states the binding beside Send",
+        h0["shown"] and "Enter to send" in (h0["text"] or ""),
+        h0,
+        "m2",
+    )
+    check("composer", "m2: enterkeyhint follows the preference (on)", h0["ekh"] == "send", h0, "m2")
+    pg.click("#composer-hint")
+    time.sleep(0.3)
+    h1 = pg.evaluate(COMPOSER_HINT)
+    check(
+        "composer",
+        "m2: clicking the hint flips the preference, the text and enterkeyhint",
+        h1["text"] != h0["text"]
+        and "Ctrl+Enter to send" in (h1["text"] or "")
+        and h1["stored"] == "0"
+        and h1["ekh"] == "enter",
+        {"before": h0, "after": h1},
+        "m2",
+    )
+    pg.click("#composer-hint")
+    time.sleep(0.3)
+    h2 = pg.evaluate(COMPOSER_HINT)
+    check(
+        "composer",
+        "m2: and back again",
+        h2["text"] == h0["text"] and h2["stored"] == "1" and h2["ekh"] == "send",
+        h2,
+        "m2",
+    )
+    # Under 400px the row has no width for a sentence and the hint goes; the
+    # binding survives on the textarea's aria-description, which is the only
+    # reason dropping it is allowed at all.
+    pg.set_viewport_size({"width": 380, "height": 800})
+    time.sleep(0.6)
+    hn = pg.evaluate(COMPOSER_HINT)
+    check(
+        "composer",
+        "m2: hint gone under 400px, binding kept in aria-description",
+        (not hn["shown"]) and "Enter" in (hn["aria"] or ""),
+        hn,
+        "m2",
+    )
+    pg.set_viewport_size({"width": 1280, "height": 800})
+    time.sleep(0.6)
+
+    # --- Stop is its own act ----------------------------------------------
+    check(
+        "composer",
+        "m2: #stop-btn hidden while the agent is idle",
+        pg.evaluate("() => document.getElementById('stop-btn').hidden === true"),
+        "",
+        "m2",
+    )
+
+    # --- size feedback ------------------------------------------------------
+    pg.fill("#msg-input", "y" * 19999)
+    time.sleep(0.3)
+    c19 = pg.evaluate("() => document.getElementById('composer-count').hidden")
+    pg.fill("#msg-input", "y" * 20000)
+    time.sleep(0.3)
+    c20 = pg.evaluate(
+        "() => { const c=document.getElementById('composer-count');"
+        " return {hidden: c.hidden, text: c.textContent, warn: c.classList.contains('warn')}; }"
+    )
+    check(
+        "composer",
+        "m2: #composer-count appears at 20,000 characters and not before",
+        c19 is True and c20["hidden"] is False and c20["text"] == "20,000 characters" and not c20["warn"],
+        {"at19999_hidden": c19, "at20000": c20},
+        "m2",
+    )
+    pg.fill("#msg-input", "")
+    time.sleep(0.2)
+
+    # --- the long-paste offer ----------------------------------------------
+    pg.evaluate(PASTE_JS, 60000)
+    time.sleep(0.5)
+    banner = pg.evaluate(
+        "() => { const b=document.getElementById('composer-banner');"
+        " return {hidden: b.hidden, text: (document.getElementById('banner-text').textContent||'').slice(0,80),"
+        "         attach: (document.getElementById('banner-attach').textContent||'').trim()}; }"
+    )
+    check(
+        "composer",
+        "m2: a 60,000-character paste offers the file instead of ballooning the request",
+        banner["hidden"] is False and "60,000" in banner["text"] and "Attach" in banner["attach"],
+        banner,
+        "m2",
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-composer-paste.png")
+    pg.click("#banner-attach")
+    time.sleep(0.6)
+    after = pg.evaluate(
+        "() => ({chips: document.querySelectorAll('#file-chips .file-chip').length,"
+        "        chip: (document.querySelector('#file-chips .file-chip')||{}).textContent || '',"
+        "        left: document.getElementById('msg-input').value.length,"
+        "        banner: document.getElementById('composer-banner').hidden})"
+    )
+    check(
+        "composer",
+        "m2: taking the offer makes a chip and empties the textarea",
+        after["chips"] == 1 and after["left"] == 0 and after["banner"] is True and ".txt" in after["chip"],
+        after,
+        "m2",
+    )
+    pg.evaluate("() => { const x=document.querySelector('#file-chips .file-chip button'); x && x.click(); }")
+    time.sleep(0.3)
+
+    # --- the expand editor, round trip -------------------------------------
+    pg.fill("#msg-input", "the brief so far")
+    time.sleep(0.3)
+    check(
+        "composer",
+        "m2: #expand-btn is offered once the editor module has loaded",
+        pg.evaluate("() => document.getElementById('expand-btn').hidden === false"),
+        "",
+        "m2",
+    )
+    pg.click("#expand-btn")
+    pg.wait_for_selector("#compose-editor", timeout=4000)
+    time.sleep(0.4)
+    ed = pg.evaluate(
+        "() => { const c=document.getElementById('compose-editor'), i=document.getElementById('compose-editor-input');"
+        " const r=c.getBoundingClientRect();"
+        " return {value: i.value, role: c.getAttribute('role'), modal: c.getAttribute('aria-modal'),"
+        "         focused: document.activeElement.id, w: Math.round(r.width), h: Math.round(r.height),"
+        "         count: document.getElementById('compose-editor-count').textContent,"
+        "         inert: document.getElementById('app').hasAttribute('inert')}; }"
+    )
+    check(
+        "composer",
+        "m2: expand opens a 70vw x 70vh modal holding the composer's text",
+        ed["value"] == "the brief so far"
+        and ed["role"] == "dialog"
+        and ed["modal"] == "true"
+        and ed["focused"] == "compose-editor-input"
+        and abs(ed["w"] - 896) <= 2
+        and abs(ed["h"] - 560) <= 2
+        and ed["inert"] is True,
+        ed,
+        "m2",
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-compose-editor.png")
+    pg.keyboard.type(" and a second sentence")
+    time.sleep(0.4)
+    pg.click("#compose-editor-close")
+    time.sleep(0.4)
+    back = pg.evaluate(
+        "() => ({gone: !document.getElementById('compose-editor'),"
+        "        value: document.getElementById('msg-input').value,"
+        "        focused: document.activeElement.id,"
+        "        inert: document.getElementById('app').hasAttribute('inert')})"
+    )
+    check(
+        "composer",
+        "m2: closing the editor keeps the text and hands focus back",
+        back["gone"]
+        and back["value"] == "the brief so far and a second sentence"
+        and back["focused"] == "msg-input"
+        and back["inert"] is False,
+        back,
+        "m2",
+    )
+    pg.fill("#msg-input", "")
+    ctx.close()
+
+
+def composer_streaming(browser):
+    """While a turn runs, the composer says where the text is going.
+
+    Its own context and its own stubs: /status is what tells the client a turn
+    was already in flight when the session opened, and EventSource is replaced
+    so nothing arriving from the real (idle) server can clear the state again
+    mid-assertion. This is the one composer state the seeded instance cannot
+    reach on its own — it has no model configured, so no turn ever runs.
+    """
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
+    ctx.add_init_script(
+        "window.EventSource = class { constructor(u){ this.url=u; this.readyState=1; }"
+        " addEventListener(){} removeEventListener(){} close(){ this.readyState=2; } };"
+    )
+    ctx.route(
+        "**/api/sessions/*/status",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"status": "processing", "state": "processing", "event_seq": 0}),
+        ),
+    )
+    pg = ctx.new_page()
+    pg.on("console", console_sink("composer-run"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[composer-run] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.5)
+    pg.evaluate(f"() => document.querySelector('[data-sid=\"{MAIN}\"]')?.click()")
+    # Wait for the state, not for a stopwatch: opening a session is four awaited
+    # round trips (messages, context, workers, status) and only the last one
+    # carries the verdict. A fixed sleep here measured the composer mid-load and
+    # read the idle state a tenth of a second before it changed.
+    pg.wait_for_function(
+        "() => document.getElementById('composer')?.classList.contains('is-streaming')",
+        timeout=8000,
+    )
+    time.sleep(0.3)
+
+    st = pg.evaluate(
+        "() => { const c=document.getElementById('composer'), s=document.getElementById('stop-btn'),"
+        "        t=document.getElementById('msg-input');"
+        " const sr=s.getBoundingClientRect(), br=document.getElementById('send-btn').getBoundingClientRect();"
+        " return {streaming: c.classList.contains('is-streaming'), stopHidden: s.hidden,"
+        "         placeholder: t.placeholder, stopW: Math.round(sr.width), stopH: Math.round(sr.height),"
+        "         separate: Math.round(sr.left) !== Math.round(br.left)}; }"
+    )
+    check(
+        "composer-run",
+        "m2: a running turn shows Stop, marks the card and says where the text goes",
+        st["streaming"]
+        and st["stopHidden"] is False
+        and st["placeholder"].startswith("Reply now")
+        and st["separate"]
+        and st["stopW"] >= 28
+        and st["stopH"] >= 28,
+        st,
+        "m2",
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-composer-streaming.png")
+    ctx.close()
+
+
 def sidebar_resizer(browser):
     """The desktop tier's own control: drag the sidebar's edge to resize it.
 
@@ -1120,7 +1575,7 @@ def sidebar_resizer(browser):
     """
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[resizer] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("resizer"))
     pg.on("pageerror", lambda e: console_errors.append(f"[resizer] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
@@ -1236,7 +1691,7 @@ def sidebar_scale(browser):
         "try { localStorage.setItem('pernix:sidebar', JSON.stringify({showArchived: true})); } catch (e) {}"
     )
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[scale] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("scale"))
     pg.on("pageerror", lambda e: console_errors.append(f"[scale] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
@@ -1398,7 +1853,7 @@ CLEAR_DECLINED_JS = r"""(label) => {
 def space_suggestions_flow(browser):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[suggest] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("suggest"))
     pg.on("pageerror", lambda e: console_errors.append(f"[suggest] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(2.0)
@@ -1518,6 +1973,832 @@ def space_suggestions_flow(browser):
     ctx.close()
 
 
+# ---------------------------------------------------------------------------
+# The thumbs on an assistant answer, and the Trust tab beside them
+# ---------------------------------------------------------------------------
+# Both surfaces call routes that arrive with the trust-loop backend (W2), so
+# these passes supply the routes themselves with page.route(). That is not a
+# workaround: stubbing is the only way to drive the whole loop — a stored
+# rating, a toggle, an undo, an optional note — deterministically, without a
+# turn actually running. The un-stubbed half (this server has neither route)
+# is asserted by trust_loop_absent() at the end, because "the controls are
+# simply not there" is what the client promises on an older server.
+
+TRUST_PAYLOAD = {
+    "grader": {
+        "agreement": 0.72,
+        "n": 25,
+        "holdout": {"accuracy": 0.9, "n": 10, "ran_at": "2026-09-04T00:00:00Z", "model": "qwen3-27b"},
+    },
+    "outcomes": {
+        "by_source": {"llm": 140, "next_turn": 31, "user": 9},
+        "graded_7d": 180,
+        "user_turns_7d": 190,
+    },
+    "canaries": {"contaminated_14d": 0, "runs_14d": 44, "fails_14d": 1},
+}
+
+# The toolbar (or sheet trigger) on the first assistant answer and the first
+# user message: what each carries, what it is named, and how big it is.
+ACTIONS_JS = r"""() => {
+  const read = (m) => m ? [...m.querySelectorAll('.msg-actions button')].map(b => {
+      const r = b.getBoundingClientRect();
+      const svg = b.querySelector('svg');
+      return {cls: b.className, label: b.getAttribute('aria-label'),
+              pressed: b.getAttribute('aria-pressed'),
+              icon: svg ? svg.getAttribute('class') : '',
+              w: Math.round(r.width), h: Math.round(r.height)};
+  }) : null;
+  const a = document.querySelector('#messages-inner .message.assistant[data-message-id]');
+  const u = document.querySelector('#messages-inner .message.user[data-message-id]');
+  return {mid: a ? a.dataset.messageId : null, assistant: read(a), user: read(u),
+          anyThumb: document.querySelectorAll('.msg-feedback-btn').length};
+}"""
+
+SHEET_ROWS_JS = r"""() => {
+  const card = document.querySelector('.sheet-card');
+  if (!card) return null;
+  return {title: (card.querySelector('.sheet-title')||{textContent:''}).textContent.trim(),
+          items: [...card.querySelectorAll('.sheet-item')].map(i =>
+              (i.querySelector('.sheet-item-label')||{textContent:''}).textContent.trim()),
+          hints: [...card.querySelectorAll('.sheet-item-hint')].map(h => h.textContent.trim())};
+}"""
+
+TRUST_JS = r"""() => {
+  const c = document.getElementById('fp-trust');
+  if (!c) return null;
+  const t = (n) => (n ? n.textContent.trim() : '');
+  // A number pushed against the panel's own edge is the shape of a tab that
+  // forgot to take the Explorer's padding — which is exactly what happened
+  // the first time this tab was written.
+  const panel = document.getElementById('file-panel');
+  const edge = panel ? panel.getBoundingClientRect().right : 0;
+  return {children: c.children.length,
+          cut: [...c.querySelectorAll('.trust-stat-row')]
+                 .filter(r => r.getBoundingClientRect().right > edge - 2).length,
+          stats: [...c.querySelectorAll('.trust-stat')].map(s => ({
+              label: t(s.querySelector('.trust-stat-label')),
+              value: t(s.querySelector('.trust-stat-value')),
+              note: t(s.querySelector('.trust-stat-note'))})),
+          empties: [...c.querySelectorAll('.adaptive-empty')].map(x => x.textContent.trim()),
+          text: c.textContent}; }"""
+
+
+def _settle(probe, timeout=8.0, step=0.15):
+    """Poll `probe` until it answers with something truthy, or give up.
+
+    Every surface here waits on a fetch the page made, and a flat sleep long
+    enough to be safe on a loaded machine is a flat sleep wasted on every
+    other run. On a timeout the caller re-reads the raw state, so a genuine
+    failure still reports what was actually on screen.
+    """
+    deadline = time.time() + timeout
+    value = probe()
+    while not value and time.time() < deadline:
+        time.sleep(step)
+        value = probe()
+    return value
+
+
+def _actions(pg, thumbs=True):
+    """The message toolbar, once the transcript has actually rendered."""
+
+    def probe():
+        r = pg.evaluate(ACTIONS_JS)
+        if not r or not r["assistant"]:
+            return None
+        if thumbs and not r["anyThumb"]:
+            return None
+        return r
+
+    return _settle(probe) or pg.evaluate(ACTIONS_JS)
+
+
+def _writes(posts, n):
+    """Wait for the client's nth write to reach the stub."""
+    _settle(lambda: len(posts) >= n or None)
+    return posts
+
+
+def _stub_feedback(ctx, posts, items=None):
+    """Answer both feedback routes, and record every write the client makes."""
+    body = json.dumps({"items": items or []})
+
+    def handler(route):
+        req = route.request
+        if req.method != "POST":
+            route.fulfill(status=200, content_type="application/json", body=body)
+            return
+        try:
+            payload = json.loads(req.post_data or "{}")
+        except Exception:
+            payload = {"unparsed": req.post_data}
+        posts.append(payload)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "message_id": req.url.rstrip("/").split("/")[-2],
+                    "signal": payload.get("signal"),
+                    "note": payload.get("note"),
+                }
+            ),
+        )
+
+    ctx.route("**/feedback", handler)
+
+
+def _stub_trust(ctx, state):
+    ctx.route(
+        "**/api/trust",
+        lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(state["payload"])),
+    )
+
+
+def _open_trust_tab(pg):
+    pg.click("#files-btn")
+    time.sleep(0.9)
+    pg.evaluate("() => document.getElementById('fp-group-tuning')?.click()")
+    time.sleep(0.6)
+    pg.evaluate("() => document.getElementById('fp-tab-trust')?.click()")
+    time.sleep(1.0)
+
+
+def message_feedback(browser):
+    """m2 (mouse): the thumbs live in the hover toolbar, and they toggle."""
+    posts = []
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+    _stub_feedback(ctx, posts)
+    pg = ctx.new_page()
+    pg.on("console", console_sink("feedback"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[feedback] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    open_session(pg, MAIN, False)
+
+    a = _actions(pg)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-feedback-rest.png")
+    check(
+        "feedback",
+        "m2: an assistant answer carries copy plus both thumbs, unpressed",
+        bool(a)
+        and a["mid"]
+        and [b["label"] for b in a["assistant"]] == ["Copy message", "Helpful", "Not helpful"]
+        and [b["pressed"] for b in a["assistant"]] == [None, "false", "false"],
+        a,
+        "m2",
+    )
+    check(
+        "feedback",
+        "m2: a user message is never rated",
+        bool(a) and all("msg-feedback" not in b["cls"] for b in (a["user"] or [])),
+        a["user"] if a else None,
+        "m2",
+    )
+
+    pg.evaluate("() => document.querySelector('.msg-feedback-up').click()")
+    _writes(posts, 1)
+    up = _settle(lambda: (lambda r: r if r["assistant"][1]["pressed"] == "true" else None)(pg.evaluate(ACTIONS_JS)))
+    up = up or pg.evaluate(ACTIONS_JS)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-feedback-up.png")
+    check(
+        "feedback",
+        "m2: thumbs-up presses, fills its icon and posts signal=up",
+        up["assistant"][1]["pressed"] == "true"
+        and "thumb-up-filled" in up["assistant"][1]["icon"]
+        and up["assistant"][2]["pressed"] == "false"
+        and posts == [{"signal": "up"}],
+        {"btn": up["assistant"][1], "posts": posts},
+        "m2",
+    )
+
+    pg.evaluate("() => document.querySelector('.msg-feedback-up').click()")
+    _writes(posts, 2)
+    off = _settle(lambda: (lambda r: r if r["assistant"][1]["pressed"] == "false" else None)(pg.evaluate(ACTIONS_JS)))
+    off = off or pg.evaluate(ACTIONS_JS)
+    check(
+        "feedback",
+        "m2: pressing it again clears the rating and posts signal=null",
+        off["assistant"][1]["pressed"] == "false"
+        and "thumb-up-filled" not in off["assistant"][1]["icon"]
+        and posts[-1] == {"signal": None},
+        {"btn": off["assistant"][1], "posts": posts[-1:]},
+        "m2",
+    )
+
+    focusable = pg.evaluate(
+        "() => { const b=document.querySelector('.msg-feedback-down'); b.focus();"
+        " return document.activeElement === b; }"
+    )
+    check("feedback", "m2: a thumb takes keyboard focus", focusable, "", "m2")
+
+    pg.evaluate("() => document.querySelector('.msg-feedback-down').click()")
+    _writes(posts, 3)
+    note = _settle(
+        lambda: pg.evaluate(
+            "() => { const c=document.querySelector('.msg-note-card'); if(!c) return null;"
+            " return {heading: c.querySelector('h2').textContent.trim(),"
+            "  focused: document.activeElement === c.querySelector('.msg-note-input'),"
+            "  buttons: [...c.querySelectorAll('.modal-footer button')].map(b=>b.textContent.trim())}; }"
+        )
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-feedback-note.png")
+    check(
+        "feedback",
+        "m2: thumbs-down saves first, then offers a skippable note",
+        bool(note) and note["focused"] and note["buttons"] == ["Skip", "Save note"] and posts[-1] == {"signal": "down"},
+        {"note": note, "posts": posts[-1:]},
+        "m2",
+    )
+    pg.fill(".msg-note-input", "it answered a different question")
+    pg.evaluate(
+        "() => [...document.querySelectorAll('.msg-note-card .modal-footer button')]"
+        ".find(b => b.textContent.trim() === 'Save note').click()"
+    )
+    _writes(posts, 4)
+    gone = _settle(lambda: pg.evaluate("() => !document.querySelector('.msg-note-card')"))
+    check(
+        "feedback",
+        "m2: the note closes the prompt and rides a second write",
+        gone and posts[-1] == {"signal": "down", "note": "it answered a different question"},
+        {"posts": posts[-1:]},
+        "m2",
+    )
+    ctx.close()
+
+
+def message_feedback_touch(browser):
+    """m2 (finger): one overflow button instead of a toolbar, thumbs as rows."""
+    posts = []
+    ctx = browser.new_context(
+        viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True, color_scheme="dark"
+    )
+    _stub_feedback(ctx, posts)
+    pg = ctx.new_page()
+    pg.on("console", console_sink("feedback-touch"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[feedback-touch] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    open_session(pg, MAIN, True)
+
+    a = _actions(pg, thumbs=False)
+    check(
+        "feedback-touch",
+        "m2: an assistant answer collapses to one 36px overflow button",
+        bool(a)
+        and len(a["assistant"] or []) == 1
+        and "msg-menu-btn" in a["assistant"][0]["cls"]
+        and a["assistant"][0]["w"] >= 36
+        and a["assistant"][0]["h"] >= 36,
+        a["assistant"] if a else None,
+        "m2",
+    )
+    pg.evaluate("() => document.querySelector('.msg-menu-btn').click()")
+    sheet = _settle(lambda: pg.evaluate(SHEET_ROWS_JS))
+    pg.screenshot(path=f"{shots}/{tag}-phone-feedback-sheet.png")
+    check(
+        "feedback-touch",
+        "m2: its sheet holds copy and both thumbs, named in words",
+        bool(sheet) and sheet["items"] == ["Copy message", "Helpful", "Not helpful"],
+        sheet,
+        "m2",
+    )
+    pg.evaluate(
+        "() => [...document.querySelectorAll('.sheet-item')]"
+        ".find(i => i.textContent.trim().startsWith('Helpful')).click()"
+    )
+    _writes(posts, 1)
+    closed = _settle(lambda: pg.evaluate("() => !document.querySelector('.sheet-card')"))
+    check(
+        "feedback-touch",
+        "m2: picking Helpful writes the rating and closes the sheet",
+        posts == [{"signal": "up"}] and closed,
+        posts,
+        "m2",
+    )
+    pg.evaluate("() => document.querySelector('.msg-menu-btn').click()")
+    again = _settle(lambda: (lambda r: r if r and r["hints"] else None)(pg.evaluate(SHEET_ROWS_JS)))
+    again = again or pg.evaluate(SHEET_ROWS_JS)
+    check(
+        "feedback-touch",
+        "m2: the sheet marks the rating already given",
+        bool(again) and again["hints"] == ["your rating"],
+        again,
+        "m2",
+    )
+    pg.keyboard.press("Escape")
+    time.sleep(0.3)
+    ctx.close()
+
+
+HOVER_ROW_JS = r"""(sel) => {
+  const it = document.querySelector(sel); if(!it) return null;
+  const r = it.getBoundingClientRect();
+  const cx = Math.round(r.left + r.width/2), cy = Math.round(r.top + r.height/2);
+  const hit = document.elementFromPoint(cx, cy);
+  const a = it.querySelector('.session-actions');
+  const cs = a ? getComputedStyle(a) : null;
+  const t = it.querySelector('.session-title');
+  const box = b => { const q=b.getBoundingClientRect(); return Math.round(q.width)+'x'+Math.round(q.height); };
+  return {
+    hit: hit ? (hit.tagName.toLowerCase() + (hit.className && typeof hit.className==='string' ? '.'+hit.className.trim().split(/\s+/)[0] : '')) : null,
+    hitInTitle: !!(hit && hit.closest && hit.closest('.session-title')),
+    hitIsControl: !!(hit && hit.closest && hit.closest('.session-actions, button')),
+    stripW: a ? Math.round(a.getBoundingClientRect().width) : -1,
+    stripOpacity: cs ? cs.opacity : null,
+    controls: a ? [...a.children].map(b => b.className.split(/\s+/)[0] + ' ' + box(b)) : null,
+    rowW: Math.round(r.width),
+    titleW: t ? Math.round(t.getBoundingClientRect().width) : -1,
+  }; }"""
+
+
+def hover_row_actions(browser):
+    """m2 (mouse): what a click at the centre of a hovered session row hits.
+
+    The overlay grew to seven 24px buttons — 184px of a 253px row, starting at
+    x=57 — so the title collapsed to about four characters on hover and
+    `elementFromPoint` at the row's centre was `button.session-pin`. Pointing
+    at a row to click it pinned it, and Delete sat under the cursor at the top
+    right. Two controls now, and the numbers that made it wrong are the ones
+    pinned here. (L02)
+    """
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
+    pg = ctx.new_page()
+    pg.on("console", console_sink("hover-row"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    sel = ".session-item:not(.worker)"
+    pg.hover(sel)
+    time.sleep(0.5)
+    m = _settle(lambda: (lambda r: r if r and r["stripOpacity"] == "1" else None)(pg.evaluate(HOVER_ROW_JS, sel)))
+    m = m or pg.evaluate(HOVER_ROW_JS, sel)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-row-hover.png")
+    check(
+        "hover-row",
+        "m2: a hovered row's strip is pin plus overflow, 24px each, <=64px wide",
+        bool(m) and m["controls"] == ["session-pin 24x24", "session-more 24x24"] and 0 < m["stripW"] <= 64,
+        m,
+        "m2",
+    )
+    check(
+        "hover-row",
+        "m2: the element at a hovered row's centre is the title, not a control",
+        bool(m) and m["hitInTitle"] and not m["hitIsControl"],
+        m,
+        "m2",
+    )
+    check(
+        "hover-row",
+        "m2: the title keeps >=60% of the row while it is hovered",
+        bool(m) and m["rowW"] > 0 and m["titleW"] >= 0.6 * m["rowW"],
+        m,
+        "m2",
+    )
+    ctx.close()
+
+
+ADAPTIVE_HEAD_JS = r"""() => {
+  const heads = [...document.querySelectorAll('#file-panel .adaptive-head')];
+  const out = [];
+  for (const h of heads) {
+    const hr = h.getBoundingClientRect();
+    const kids = [...h.children].map(c => { const r = c.getBoundingClientRect();
+      return { t: (c.textContent || '').trim().slice(0, 16) || c.className,
+               l: Math.round(r.left), r: Math.round(r.right),
+               tp: Math.round(r.top), b: Math.round(r.bottom), w: Math.round(r.width) }; });
+    const overlaps = [];
+    for (let i = 0; i < kids.length; i++) for (let j = i + 1; j < kids.length; j++) {
+      const a = kids[i], b = kids[j];
+      if (a.l < b.r - 1 && b.l < a.r - 1 && a.tp < b.b - 1 && b.tp < a.b - 1) overlaps.push(a.t + ' / ' + b.t);
+    }
+    out.push({
+      kids: kids.length,
+      overlaps,
+      overflow: kids.filter(k => k.r > Math.round(hr.right) + 1).map(k => k.t),
+      lines: [...new Set(kids.map(k => k.tp))].length,
+      headW: Math.round(hr.width),
+      wrap: getComputedStyle(h).flexWrap,
+    });
+  }
+  return { heads: heads.length, out }; }"""
+
+
+def adaptive_head_wrap(browser):
+    """m2 (mouse): the Self-checks toolbar does not overlap its own buttons.
+
+    `.adaptive-head` wrapped only under body[data-compact] and
+    body[data-touch]. The DOCKED desktop Explorer is the same 360px as the
+    tablet one and sets neither attribute, so on a plain desktop browser the
+    heartbeat chip and four buttons were squeezed into one unwrappable line
+    and overlapped. The Trust head uses the same class (the Learning tab
+    went with the adaptive layer in 3.2). (L04)
+    """
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+    pg = ctx.new_page()
+    pg.on("console", console_sink("adaptive-head"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    pg.click("#files-btn")
+    time.sleep(0.9)
+    pg.evaluate("() => document.getElementById('fp-group-tuning')?.click()")
+    time.sleep(0.6)
+    for tab in ("canary",):
+        pg.evaluate(f"() => document.getElementById('fp-tab-{tab}')?.click()")
+        time.sleep(1.0)
+        m = _settle(lambda: (lambda r: r if r and r["heads"] else None)(pg.evaluate(ADAPTIVE_HEAD_JS)))
+        m = m or pg.evaluate(ADAPTIVE_HEAD_JS)
+        pg.screenshot(path=f"{shots}/{tag}-desktop-head-{tab}.png")
+        heads = (m or {}).get("out") or []
+        check(
+            "adaptive-head",
+            f"m2: the {tab} head wraps on a docked desktop Explorer and overlaps nothing",
+            bool(heads)
+            and all(h["wrap"] == "wrap" for h in heads)
+            and all(not h["overlaps"] for h in heads)
+            and all(not h["overflow"] for h in heads),
+            m,
+            "m2",
+        )
+    ctx.close()
+
+
+def trust_tab(browser):
+    """m2: the Trust tab is counts, each with its sample size."""
+    state = {"payload": json.loads(json.dumps(TRUST_PAYLOAD))}
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+    _stub_trust(ctx, state)
+    _stub_feedback(ctx, [])
+    pg = ctx.new_page()
+    pg.on("console", console_sink("trust"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[trust] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    _open_trust_tab(pg)
+
+    t = _settle(lambda: (lambda r: r if r and r["stats"] else None)(pg.evaluate(TRUST_JS)))
+    t = t or pg.evaluate(TRUST_JS) or {}
+    pg.screenshot(path=f"{shots}/{tag}-desktop-trust.png")
+    want = [
+        ("Reflect agrees with the user", "72%"),
+        ("Hold-out accuracy", "90%"),
+        ("You said so", "9"),
+        ("Your next message", "31"),
+        ("Reflect said so", "140"),
+        ("Turns graded (7d)", "180"),
+        ("Runs", "44"),
+        ("Failures", "1"),
+        ("Contaminated", "0"),
+    ]
+    got = [(s["label"], s["value"]) for s in t.get("stats", [])]
+    check(
+        "trust",
+        "m2: every /api/trust number renders, with its sample size beside it",
+        got == want
+        and "25 turns" in t["stats"][0]["note"]
+        and "10 fixtures" in t["stats"][1]["note"]
+        and "190 turns you sent" in t["stats"][5]["note"],
+        {"got": got, "notes": [s["note"] for s in t.get("stats", [])][:6]},
+        "m2",
+    )
+    check(
+        "trust",
+        "m2: no number is pushed against the panel edge",
+        t.get("cut") == 0,
+        {"cut": t.get("cut")},
+        "m2",
+    )
+    # The adaptive entries and trial arms left the payload in 3.2; a server
+    # that still sends them must not bring the sections back.
+    state["payload"]["entries"] = {"by_status": {"active": 12}, "unfounded": 2}
+    state["payload"]["trials"] = [{"entry_id": "x", "title": "Old trial"}]
+    pg.evaluate(
+        "() => [...document.querySelectorAll('#fp-trust .adaptive-btn')]"
+        ".find(b => b.textContent.trim().endsWith('Refresh')).click()"
+    )
+    time.sleep(1.0)
+    again = pg.evaluate(TRUST_JS) or {}
+    check(
+        "trust",
+        "m2: no adaptive-entry or trial section renders, even from an old payload",
+        "Adaptive entries" not in again.get("text", "")
+        and "Trial arms" not in again.get("text", "")
+        and "Old trial" not in again.get("text", ""),
+        again.get("text", "")[:200],
+        "m2",
+    )
+    ctx.close()
+
+
+def trust_loop_absent(browser):
+    """m2: on a server without the 3.2 routes, neither surface breaks."""
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+    pg = ctx.new_page()
+
+    # This scenario must exercise the "no 3.2 backend" path whether or not the
+    # server under test ships the routes: the two trust-loop routes are made
+    # to 404 here and the pending settings keys are stripped from whatever the
+    # server publishes. On a 3.1 server every interceptor is a no-op.
+    def _gone(route, request=None):
+        route.fulfill(status=404, content_type="application/json", body='{"detail":"Not Found"}')
+
+    # Fetched once up front and served from memory: routing through
+    # route.fetch() adds a round trip per request, and the settings modal
+    # draws its rows from whichever payload has arrived by then.
+    def _stripped(path):
+        try:
+            data = pg.request.get(base + path).json()
+        except Exception:
+            return None
+        holders = [data] if isinstance(data, dict) else []
+        if isinstance(data, dict):
+            holders += [v for v in data.values() if isinstance(v, dict)]
+        for holder in holders:
+            for k in PENDING_SETTINGS:
+                holder.pop(k, None)
+        return json.dumps(data)
+
+    _canned = {"/api/settings/schema": _stripped("/api/settings/schema"), "/api/settings": _stripped("/api/settings")}
+
+    def _strip(route, request=None):
+        req = request or route.request
+        path = req.url.split("?", 1)[0]
+        path = path[path.index("/api/") :] if "/api/" in path else path
+        body = _canned.get(path) if req.method == "GET" else None
+        if body is None:
+            route.continue_()
+            return
+        route.fulfill(status=200, content_type="application/json", body=body)
+
+    pg.route("**/api/trust", _gone)
+    pg.route("**/api/sessions/*/feedback", _gone)
+    pg.route("**/api/sessions/*/messages/*/feedback", _gone)
+    pg.route("**/api/settings/schema", _strip)
+    pg.route("**/api/settings", _strip)
+    pg.on("console", console_sink("absent"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[absent] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    open_session(pg, MAIN, False)
+
+    a = _actions(pg, thumbs=False)
+    check(
+        "absent",
+        "m2: no rating store means no thumbs, and copy is untouched",
+        bool(a) and a["anyThumb"] == 0 and [b["label"] for b in a["assistant"]] == ["Copy message"],
+        a["assistant"] if a else None,
+        "m2",
+    )
+    _open_trust_tab(pg)
+    t = _settle(lambda: (lambda r: r if r and r["children"] else None)(pg.evaluate(TRUST_JS)))
+    t = t or pg.evaluate(TRUST_JS)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-trust-absent.png")
+    check(
+        "absent",
+        "m2: the Trust tab says one line and draws nothing else",
+        bool(t) and t["children"] == 1 and t["text"].strip() == "Trust metrics need the 3.2 backend",
+        t,
+        "m2",
+    )
+
+    # The same question in Settings, and the sharper edge of it. A row for a
+    # key this server does not publish cannot be saved — and, because an unset
+    # key is undefined where an unticked box is false, collectChanges() reads
+    # it as an edit, so Escape asks whether to discard changes nobody made and
+    # the modal never closes. The rows land on their own once the server has
+    # the keys.
+    pg.evaluate("() => document.querySelector('.fp-close')?.click()")
+    time.sleep(0.4)
+    pg.click("#settings-btn")
+    time.sleep(1.2)
+    rows = pg.evaluate("() => [...document.querySelectorAll('.setting-row')].map(r => r.id)")
+    pg.keyboard.press("Escape")
+    time.sleep(0.7)
+    closed = pg.evaluate("() => !document.querySelector('.settings-card') && !document.querySelector('.confirm-card')")
+    pending = [r for r in rows if r.split("row-")[-1] in PENDING_SETTINGS]
+    check(
+        "absent",
+        "m2: Settings hides a row this server has no key for, and still closes",
+        closed and not pending and "row-reflect_enabled" in rows,
+        {"closed": closed, "pending_rows": pending, "rows": len(rows)},
+        "m2",
+    )
+    ctx.close()
+
+
+BELL_JS = r"""() => {
+  const b = document.getElementById('bell-badge');
+  const cs = b ? getComputedStyle(b) : null;
+  const items = [...document.querySelectorAll('#bell-items .notif-item')].map(r => ({
+    key: r.getAttribute('data-key') || '',
+    title: r.querySelector('.notif-item-type')?.textContent || '',
+    occ: r.querySelector('.notif-occ')?.textContent || '',
+    quiet: r.classList.contains('is-quiet'),
+    state: r.querySelector('.notif-state')?.textContent || '',
+    isNew: r.classList.contains('is-new'),
+  }));
+  const tabs = [...document.querySelectorAll('.bell-panel [role=tab]')].map(t => ({
+    id: t.id, selected: t.getAttribute('aria-selected')}));
+  return {
+    badgeText: b ? b.textContent : null,
+    badgeShown: !!cs && cs.display !== 'none',
+    dot: !!b && b.classList.contains('is-dot'),
+    label: document.getElementById('notification-bell')?.getAttribute('aria-label') || '',
+    open: !!document.querySelector('.bell-panel'),
+    items, tabs,
+    days: [...document.querySelectorAll('#bell-items .notif-day')].map(d => d.textContent),
+    chips: [...document.querySelectorAll('#bell-items .bell-chip')].map(c => c.textContent),
+    newText: document.querySelector('#bell-items .bell-new-count')?.textContent || '',
+  };
+}"""
+
+BELL_FIT_JS = r"""() => {
+  const card = document.querySelector('.bell-panel');
+  if (!card) return null;
+  const r = card.getBoundingClientRect();
+  const vis = el => { const b = el.getBoundingClientRect(); const cs = getComputedStyle(el);
+    return b.width > 0 && b.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
+  const small = [];
+  card.querySelectorAll('button, a[href], [role=tab]').forEach(el => {
+    if (!vis(el)) return;
+    const b = el.getBoundingClientRect();
+    if (b.height < 44 || b.width < 44) small.push((el.getAttribute('data-act') || el.className || el.tagName) + ' ' + Math.round(b.width) + 'x' + Math.round(b.height));
+  });
+  const wide = [...card.querySelectorAll('*')].filter(el => el.getBoundingClientRect().right > innerWidth + 1).length;
+  return {
+    docScroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    cardLeft: Math.round(r.left), cardRight: Math.round(r.right), vw: innerWidth,
+    bodyScroll: (() => { const m = card.querySelector('.modal-body'); return m ? m.scrollWidth - m.clientWidth : 0; })(),
+    wide, small,
+  };
+}"""
+
+
+def _bell(pg):
+    return pg.evaluate(BELL_JS)
+
+
+def _api(pg, path):
+    return pg.evaluate("(p) => fetch(p).then(r => r.json())", path)
+
+
+def bell_tiers(browser):
+    """m2: the bell counts what needs the user and logs the rest (v42).
+
+    seed.py writes one interrupt row, two open bell rows (one of them a
+    repeat folded three times), a log row, and a bell row already dismissed.
+    The badge must count only the interrupt (there are no questions), the
+    panel's Needs you tab must hold the three open rows and neither of the
+    others, Dismiss must be soft — the row leaves Needs you and is still in
+    Activity — and with only the quiet rows left the badge is a dot, not 0.
+    Mutates state (a dismiss, read-all), so it runs after every read-only pass.
+    """
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+    pg = ctx.new_page()
+    pg.on("console", console_sink("bell"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[bell] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+
+    counts = _api(pg, "/api/notifications/counts")
+    questions = len(_api(pg, "/api/questions").get("questions") or [])
+    b = _settle(lambda: (lambda r: r if r["badgeShown"] else None)(_bell(pg))) or _bell(pg)
+    check(
+        "bell",
+        "m2: the badge counts questions + interrupt rows only, not bell or log rows",
+        counts.get("needs_you") == 1
+        and counts.get("bell", 0) >= 2
+        and b["badgeText"] == str(questions + counts["needs_you"])
+        and not b["dot"],
+        {"badge": b["badgeText"], "counts": counts, "questions": questions},
+        "m2",
+    )
+
+    pg.click("#notification-bell")
+    time.sleep(1.2)
+    b = _bell(pg)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-bell-needs.png")
+    titles = [i["title"] for i in b["items"]]
+    coalesced = next((i for i in b["items"] if i["title"] == "Canary sweep: 1 of 4 failed (deploy)"), None)
+    check(
+        "bell",
+        "m2: Needs you lists the interrupt first, then the open bell rows, with x3 on the repeat",
+        b["open"]
+        and titles[:1] == ["Job failed: nightly-backup"]
+        and "Embeddings are down" in titles
+        and coalesced is not None
+        and coalesced["occ"] == "×3"
+        and "Dream: 2 memory correction(s) applied" not in titles
+        and "MCP server boxpriv unreachable" not in titles,
+        {"titles": titles, "coalesced": coalesced},
+        "m2",
+    )
+
+    # Dismiss is soft.
+    key = next((i["key"] for i in b["items"] if i["title"] == "Job failed: nightly-backup"), "")
+    pg.click(f'#bell-items [data-key="{key}"] [data-act="dismiss"]')
+    time.sleep(1.2)
+    b = _bell(pg)
+    titles = [i["title"] for i in b["items"]]
+    check(
+        "bell",
+        "m2: with only quiet rows open the badge is a dot, not a number",
+        "Job failed: nightly-backup" not in titles and b["dot"] and b["badgeShown"] and b["badgeText"] == "",
+        {"titles": titles, "badge": b["badgeText"], "dot": b["dot"], "label": b["label"]},
+        "m2",
+    )
+
+    pg.click("#bell-tab-activity")
+    time.sleep(1.4)
+    b = _bell(pg)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-bell-activity.png")
+    by = {i["title"]: i for i in b["items"]}
+    sel = {t["id"]: t["selected"] for t in b["tabs"]}
+    check(
+        "bell",
+        "m2: Activity lists the log row, the dismissed row and the just-dismissed one, by day",
+        sel.get("bell-tab-activity") == "true"
+        and "Dream: 2 memory correction(s) applied" in by
+        and by.get("MCP server boxpriv unreachable", {}).get("quiet") is True
+        and by.get("Job failed: nightly-backup", {}).get("state") == "Dismissed"
+        and b["days"][:2] == ["Today", "Yesterday"]
+        and "All" in b["chips"]
+        and len(b["chips"]) >= 4,
+        {"titles": list(by), "days": b["days"], "chips": b["chips"], "tabs": sel},
+        "m2",
+    )
+    had_new = b["newText"]
+    pg.click('#bell-items [data-act="read-all"]')
+    time.sleep(0.8)
+    b = _bell(pg)
+    after = _api(pg, "/api/notifications/counts")
+    check(
+        "bell",
+        "m2: Activity says what is new, and Mark all read clears it",
+        had_new.endswith("new since your last visit")
+        and not had_new.startswith("Nothing")
+        and b["newText"] == "Nothing new since your last visit"
+        and after.get("unread") == 0
+        and not any(i["isNew"] for i in b["items"]),
+        {"before": had_new, "after": b["newText"], "unread": after.get("unread")},
+        "m2",
+    )
+
+    # An area chip filters the log to that area.
+    pg.evaluate(
+        "() => [...document.querySelectorAll('#bell-items .bell-chip')].find(c => c.textContent === 'Canary')?.click()"
+    )
+    time.sleep(1.0)
+    b = _bell(pg)
+    titles = [i["title"] for i in b["items"]]
+    check(
+        "bell",
+        "m2: an area chip narrows Activity to that area and keeps the other chips",
+        titles == ["Canary sweep: 1 of 4 failed (deploy)"] and len(b["chips"]) >= 4,
+        {"titles": titles, "chips": b["chips"]},
+        "m2",
+    )
+    pg.keyboard.press("Escape")
+    time.sleep(0.5)
+    check("bell", "m2: Escape closes the bell panel", not _bell(pg)["open"], "", "m2")
+    ctx.close()
+
+    # Phone: 375px, touch. No sideways scroll on either tab, 44px targets.
+    ctx = browser.new_context(
+        viewport={"width": 375, "height": 812}, is_mobile=True, has_touch=True, color_scheme="light"
+    )
+    pg = ctx.new_page()
+    pg.on("console", console_sink("bell-touch"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    pg.evaluate("() => document.getElementById('notification-bell')?.click()")
+    time.sleep(1.2)
+    fits = {}
+    for tab in ("needs", "activity"):
+        pg.evaluate(f"() => document.getElementById('bell-tab-{tab}')?.click()")
+        time.sleep(1.2)
+        pg.screenshot(path=f"{shots}/{tag}-phone375-bell-{tab}.png")
+        fits[tab] = pg.evaluate(BELL_FIT_JS)
+    check(
+        "bell-touch",
+        "m2: the bell panel fits 375px with no sideways scroll on either tab",
+        all(
+            f and f["docScroll"] <= 0 and f["bodyScroll"] <= 0 and f["wide"] == 0 and f["cardRight"] <= f["vw"]
+            for f in fits.values()
+        ),
+        fits,
+        "m2",
+    )
+    check(
+        "bell-touch",
+        "m2: every control in the bell panel is at least 44px on touch",
+        all(f and not f["small"] for f in fits.values()),
+        {k: (v or {}).get("small") for k, v in fits.items()},
+        "m2",
+    )
+    ctx.close()
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch()
     for name, w, h, opts in VPS:
@@ -1577,6 +2858,11 @@ with sync_playwright() as p:
             check(
                 "timeline-lane", "m2: lane touch pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2"
             )
+        for fn, vp in ((composer_desktop, "composer"), (composer_streaming, "composer-run")):
+            try:
+                fn(browser)
+            except Exception as e:
+                check(vp, "m2: composer pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
         try:
             sidebar_resizer(browser)
         except Exception as e:
@@ -1592,6 +2878,20 @@ with sync_playwright() as p:
             space_suggestions_flow(browser)
         except Exception as e:
             check("suggestions", "m2: suggestion pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
+        for fn, vp in (
+            (hover_row_actions, "hover-row"),
+            (adaptive_head_wrap, "adaptive-head"),
+            (message_feedback, "feedback"),
+            (message_feedback_touch, "feedback-touch"),
+            (trust_tab, "trust"),
+            (trust_loop_absent, "absent"),
+            # Last: dismisses a row and marks the log read.
+            (bell_tiers, "bell"),
+        ):
+            try:
+                fn(browser)
+            except Exception as e:
+                check(vp, "m2: pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
     browser.close()
 
 check("all", "no console errors", len(console_errors) == 0, console_errors[:6])

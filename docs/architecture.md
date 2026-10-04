@@ -55,8 +55,7 @@ Before the main agent runs, a **scout** runs first. Scout runs on the Background
 What scout does:
 
 - Reads the user's new message
-- Searches your persistent memory for relevant prior facts
-- Lists available tools and skills
+- Gets a preloaded baseline: memory search results, relevant tools and skills, cross-session findings, workspace state and available models
 - Decides which tools the main agent should be aware of, which skills to load, and what the high-level approach should be
 - Submits a `ScoutReport` — the structured plan handed off to the main agent
 
@@ -66,7 +65,7 @@ Why this matters:
 - Scout has a fresh context, so its judgment isn't biased by long conversation history.
 - If you have 30 skills installed, scout decides which 1–2 to load full instructions for, rather than always paying that token cost.
 
-Scout is a real LLM agent — it can call its own (read-only) tools to investigate before submitting the report. It's defined in `core/scout/runner.py`.
+By default scout gets **one round** (`scout_max_rounds = 1`): everything it needs is preloaded and it is offered only `submit_report`, because the turn waits on it — on the reference box a one-round scout ran at a p50 of about 9 s, against about 30 s when it was allowed six rounds of searching. Raise `scout_max_rounds` (up to 6) and scout becomes a multi-round LLM agent again: it can call its own read-only tools (`search_memory`, `search_skills`, `read_skill_instructions`, `search_post_mortems`, …) and a self-check can send its report back for revision before it submits. Either way, if scout produces nothing usable the turn runs on a deterministic fallback report, and the `scout.done` event records why (`fallback_reason`: `bypass` or `degraded`). It's defined in `core/scout/runner.py`.
 
 The tool list scout curates isn't limited to Pernix's own extensions: Pernix ships a native **MCP** (Model Context Protocol) client, on by default (`mcp_enabled=true`) but inert with zero servers configured — connect one under Settings → Integrations → MCP Servers and its tools register as ordinary entries (`mcp_<server>_<tool>`) that scout picks from and the safety gate governs exactly like a builtin. See `core/extensions/mcp/` and [mcp.md](mcp.md).
 
@@ -113,7 +112,6 @@ When no sessions are actively processing, **Snooze** runs background maintenance
 - **User profile extraction** — pulls preferences and recurring patterns into a profile memory
 - **Post-mortem cleanup** — old failure logs get summarized and archived
 - **Run-directory retention** — old RLM run directories (and their DB rows) are purged past their retention windows
-- **Candor maintenance** — when enabled, runs the admission gate over recorded tool outcomes and checkpoints the operational-memory store
 - **Dream step** — when enabled, one increment of idle-time introspection: hypotheses about the agent's own memory and behavior, validated against recorded outcomes (see [internals/dream.md](internals/dream.md))
 
 A cycle runs until the full activity ladder completes; Snooze cancels instantly when you start a new session — your work always takes priority — and the interrupted activity resumes next cycle. `core/snooze.py` owns the lifecycle, the idle gate and the ladder; the work itself lives next to the store it touches — memory-store surgery in `core/memory/sweeps.py`, retention pruners in `core/retention.py`.
@@ -304,7 +302,6 @@ Concurrency is controlled per-provider via semaphores: `llm_max_concurrent` for 
 | Sessions, messages, tool calls | `data/sessions.db` | SQLite |
 | State machine transition log | `data/sessions.db` (`session_state_log` table) | SQLite |
 | RLM run index + residue | `data/sessions.db` (`rlm_runs` table) + `data/workspace/rlm/<run_id>/` | SQLite + filesystem |
-| Candor operational-memory store (when enabled) | `data/candor/` | SQLite |
 | Dream hypotheses + report index (when enabled) | `data/sessions.db` (`dream_hypotheses`, `dream_reports` tables) | SQLite |
 | Dream reports | `data/workspace/dreams/DREAM-<date>.md` | Markdown |
 | Memory entries (long-term) | `data/memories/*.md` | Markdown |
@@ -336,6 +333,15 @@ Key event types:
 - `worker.started` / `worker.done` / `worker.failed` — worker lifecycle
 
 Every event has a `_seq` (monotonically increasing sequence number). On reconnect, the client sends `Last-Event-ID: <last_seq>` and the server replays anything it missed.
+
+A view's content is `snapshot(B) ⊕ every event after B`, and **B is read before
+the transcript, not after it.** Reading the boundary afterwards loses any
+answer that completes between the two reads — the client would mark those
+events consumed without ever having rendered them, and a later cursor advance
+then hides the gap from reconciliation permanently. A cursor-bearing stream
+opens with a `stream.resume` frame saying whether the server could actually
+honour the cursor; when it could not, the client re-reads rather than assuming
+it is merely behind.
 
 Full event catalog: [api.md](api.md#real-time-events-sse).
 

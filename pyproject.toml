@@ -30,7 +30,7 @@ omit = [
     "docs/*",
     # Hard-to-test without heavy external deps (Playwright, git, SSL).
     # NOTE (adaptation plan 1e): core/extensions/* is deliberately NOT
-    # omitted anymore — orchestration, scheduling, RLM, and toolmaker are
+    # omitted anymore — orchestration, scheduling and RLM are
     # the largest, most concurrent code in the repo and the gate must see
     # them. fail_under was re-baselined in the same commit; ratchet upward.
     "run.py",                   # app entrypoint (integration-level)
@@ -76,6 +76,7 @@ ignore = [
     "E501",   # line-too-long — black handles line length
     "E402",   # module-level import not at top — intentional in some files
     "E741",   # ambiguous-variable-name — noisy for math-style vars
-    "F401",   # unused-import — too many intentional re-exports
-    "F841",   # unused-variable — common in tests and debug scaffolding
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["F401", "F841"]

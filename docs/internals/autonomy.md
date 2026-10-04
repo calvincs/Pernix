@@ -1,14 +1,13 @@
-# Autonomy — Gates, Goals, Heartbeats, and the Session Kernel
+# Autonomy — Gates, Goals, and the Session Kernel
 
-Four subsystems that together let Pernix run long, unattended tasks without
+Three subsystems that together let Pernix run long, unattended tasks without
 lying to itself about progress: **gates** (deterministic checks Reflect cannot
-overrule), **goals** (persistent cross-turn objectives with budgets),
-**heartbeats** (recurring instructions steered into running work), and the
+overrule), **goals** (persistent cross-turn objectives with budgets), and the
 **session kernel** (a persistent per-session Python REPL whose state survives
 everything shorter than the task itself).
 
-All four are off by default. Enable them in Settings → Autonomy & idle work →
-Autonomy (Gates, Goals, Heartbeats, Kernel); each flag registers its tools at
+All three are off by default. Enable them in Settings → Autonomy & idle work →
+Autonomy (Gates, Goals, Kernel); each flag registers its tools at
 startup, so flipping one takes a restart. Each is useful alone; the last
 section explains how they compose into an autonomous task.
 
@@ -60,8 +59,8 @@ the expected type spelled out, enum membership included (checked *after*
 coercion, so `"5"` still matches an integer enum) and per-element array item
 types. It runs on every call regardless of `gates_enabled` — dispatch
 hygiene, not a user-authored check — and emits
-`tool.call.intercepted {name, action, reason}` so the UI and the adaptive
-layer can see what it corrected.
+`tool.call.intercepted {name, action, reason}` so the UI can show what it
+corrected.
 
 ## Goals — intent that outlives a turn
 
@@ -100,8 +99,9 @@ blown, emits `goal.budget_exceeded {reason}`, sets
 round is enough to bound the overshoot without paying for a DB read per
 round.
 
-**When a budget runs out**, the goal moves to `budget_limited` and a
-high-urgency notification is written and broadcast (`Goal #N budget-limited`,
+**When a budget runs out**, the goal moves to `budget_limited` and an
+interrupt-tier notification (`sessions.goal_budget`; a bell item in a cron
+session) is written and broadcast (`Goal #N budget-limited`,
 with the reason — e.g. `continuation budget spent (5/5)`). Token, time and
 continuation exhaustion all take the same path, and it fires once: later
 turns short-circuit on the goal no longer being `active`. Nothing fails
@@ -176,35 +176,9 @@ hook:
   constraint instead of a suggestion. Both the exclusion set and the retry
   counter reset on every genuine user turn.
 
-## Heartbeats — steering without interrupting
-
-Cron spawns *new* turns. A **heartbeat** nudges the *current* one: a
-recurring instruction delivered into a running session. With
-`heartbeats_enabled`:
-
-- **`steer`** (default) injects the instruction as a system row picked up at
-  the next round boundary of the running turn — mid-flight course correction
-  without spawning a competing turn.
-- **`follow_up`** queues it as a normal prompt for the next idle moment.
-- A session parked where no round boundary can arrive (awaiting workers,
-  awaiting user input) degrades `steer` to `follow_up` automatically.
-- A heartbeat whose previous firing is still undelivered coalesces — they
-  never stack.
-- **A no-op tick writes nothing.** A tick that finds no session, no
-  instruction, or that coalesces against an already-steered turn or a still-
-  queued prior tick returns *before* any `cron_runs` row is inserted. A 30-second
-  heartbeat would otherwise write ~2,880 rows a day, almost all of them
-  recording that nothing happened, and drown the real cron history.
-
-There are two strictly separated namespaces. The agent's tools
-(`set_heartbeat`, `clear_heartbeat`, `list_heartbeats`) operate only on its
-own `agent`-owned heartbeats for its own session. **Your** heartbeat — one
-per session — is set only via the UI or the API
-(`GET`/`PUT`/`DELETE /api/sessions/{id}/heartbeat`), and the agent can
-neither see nor clear it. `every` accepts durations (`30s`, `5m`, `2h`;
-floor 30 s) or a 5-field cron expression. Heartbeat jobs persist in
-`data/cron_jobs.json` and survive restarts; heartbeat rows are machine text
-and are excluded from reflect/distill evidence.
+Heartbeats (recurring instructions steered into running work) were removed
+in 3.2; leftover heartbeat entries in `data/cron_jobs.json` are dropped on
+the next start.
 
 ## The session kernel — state that survives the context window
 
@@ -284,6 +258,13 @@ session, and run under the same rlimits as `bash`. The pattern composes with
 everything above: start the solver as a job, keep working the goal, read the
 log when the gate is ready to check it.
 
+Running detached-job records reconcile in pages of 100 on each maintenance tick
+(about 60 seconds), including the first tick after startup. Reconciliation reads
+exit sidecars and process state without sending signals, and cannot overwrite a
+concurrent kill. New wrappers atomically publish exit status and a UTC finish
+time. Legacy sidecars without that timestamp retain an unknown completion time;
+inspection time is never substituted as the job's duration.
+
 Scheduled cron jobs have a separate, unrelated validate-and-dry-run
 mechanism (`POST /api/jobs/{name}/validate`, `POST /api/jobs/{name}/test`) —
 see [../guides/scheduling-cron.md](../guides/scheduling-cron.md). This
@@ -341,8 +322,8 @@ Every turn on a `normal` or `cron` session opens with a
 workers and background jobs that finished since the agent last looked, the
 Reflect verdict on the agent's *own* previous turn (which otherwise lands
 about five minutes after the turn ends, so without the ledger the agent
-learns its own grade a turn late or never), self-modifications the adaptive
-layer applied, canary regressions, platform restarts. It is delta-based and
+learns its own grade a turn late or never), questions it asked that are
+still open, canary regressions, platform restarts. It is delta-based and
 silent when nothing changed — a quiet system renders nothing, and the block
 is the empty string when the setting is off. Canary sessions never see it
 (platform state leaking into a synthetic measurement turn would contaminate
@@ -352,8 +333,7 @@ The `agent_state` tool (`core/extensions/session_tools/__init__.py`) is the
 on-demand companion for everything the ledger doesn't push automatically:
 one call answers what used to take several separate lookups — work in
 flight (sessions, background jobs, RLM runs), this session's recent Reflect
-verdicts, recent notifications, adaptive-layer counts, recent canary
-gate-fails, cron health, memory-store size, open Telos alarms.
+verdicts, recent notifications, recent canary gate-fails, cron health and memory-store size.
 `data/workspace/SYSTEM-MAP.md` (`core/context/system_map.py`, regenerated at
 every boot) goes deeper still: the real schema of the tables the agent is
 likely to query, the data-directory layout, and the live FastAPI route
@@ -363,13 +343,11 @@ inventory, so "where do I look" costs a read instead of a guess.
 
 A long-running autonomous task is not one feature — it is:
 
-> **a goal with `continuation_budget > 0` + goal-scoped gates +
-> (optionally) a steer heartbeat.**
+> **a goal with `continuation_budget > 0` + goal-scoped gates.**
 
 The goal carries intent and budgets across turns; continuations drive
 re-entry when a turn runs out of rounds or clock; gates are the deterministic
-finish line Reflect cannot overrule and `goal_complete` cannot bypass; the
-heartbeat steers course mid-flight without spawning competing turns; and the
+finish line Reflect cannot overrule and `goal_complete` cannot bypass; and the
 kernel carries working state across every compaction and restart in between.
 
 `AWAITING_USER` blocks continuations *by design* — a question to the human is
@@ -378,10 +356,10 @@ a legitimate block. The push-notification path alerts you, the goal stays
 is guided to prefer `notify_user` for progress reports and reserve `ask_user`
 for genuine decisions.
 
-The [canary suite](canary-and-adaptive.md) is built to coexist with this:
+The [canary suite](canary.md) is built to coexist with this:
 canary sweeps are snooze-transparent and workspace-isolated, so an overnight
-autonomous goal and the nightly measurement baseline can share the box.
+autonomous goal and a post-deploy sweep can share the box.
 
 ## Settings
 
-See [configuration.md](../configuration.md#autonomy-gates-goals-heartbeats-session-kernel).
+See [configuration.md](../configuration.md#autonomy-gates-goals-session-kernel).

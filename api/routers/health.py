@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
 
 from config import APP_VERSION, Settings, settings
 
@@ -13,6 +12,7 @@ router = APIRouter(tags=["health"])
 @router.get("/api/health")
 async def health():
     from api.app import BUILD_ID
+    from core.push import push_stats
     from maintenance import get_maintenance
     from sessions.manager import get_manager
 
@@ -31,6 +31,9 @@ async def health():
         "sessions_active": manager.busy_count(),
         "sessions_loaded": manager.active_count(),
         "maintenance": maint.get_stats(),
+        # Web Push outcomes since boot. push_rejected climbing while
+        # push_sent_ok stays flat is our VAPID credentials being refused.
+        "push": push_stats(),
     }
 
 
@@ -68,6 +71,7 @@ async def health_detailed(request: Request):
         provider_health["has_error"] = True
 
     from core.snooze import get_snooze
+    from sessions import state_v2 as sv2
 
     snooze = get_snooze()
 
@@ -78,6 +82,10 @@ async def health_detailed(request: Request):
         "providers": provider_health,
         "sessions": {
             "active": manager.active_count(),
+            # Undeclared (state, reason) pairs the state machine refused. Any
+            # non-zero count is a code defect that stalls a turn until the
+            # reaper — see sessions/state_v2.transition().
+            "rejected_transitions": sv2.rejected_transition_stats(),
         },
         "database": db_stats,
         "tools": {
@@ -127,7 +135,69 @@ async def get_settings():
     # Redacted, so the value never leaves the server; the flag is what lets the
     # UI distinguish "no webhook configured" from "configured but hidden".
     data["notify_webhook_url_set"] = bool(settings.notify_webhook_url)
+    # Read-only: what the Notifications rows need to show each area's default
+    # tier(s), computed from the registry so a new category appears on its own.
+    data["notify_areas"] = _notify_areas()
     return data
+
+
+def _notify_areas() -> dict:
+    """{area: {"default_tiers": [...], "categories": [...]}} from core.notices.CATEGORIES.
+
+    default_tiers is the set of registry tiers in the area for a normal
+    session (session-type exceptions are not tuning the user does), in TIERS
+    order.
+    """
+    from core.notices import CATEGORIES, TIERS, area_of
+
+    areas: dict[str, dict] = {}
+    for name, cat in CATEGORIES.items():
+        entry = areas.setdefault(area_of(name), {"tiers": set(), "categories": []})
+        entry["tiers"].add(cat.tier)
+        entry["categories"].append(name)
+    return {
+        area: {"default_tiers": [t for t in TIERS if t in e["tiers"]], "categories": e["categories"]}
+        for area, e in areas.items()
+    }
+
+
+def _validate_notify_settings(body: dict) -> None:
+    """400 on a malformed notify_tiers_enabled / notify_tier_overrides; normalise in place.
+
+    An override key is a registered category or its area; a value is one of
+    core.notices.TIERS. "", None and "default" mean "no override" and are
+    dropped before saving. No key is protected: the user owns his notifications.
+    A key in a retired area (core.notices.RETIRED_AREAS) is dropped silently —
+    a cached client may still send one.
+    """
+    if "notify_tiers_enabled" in body and not isinstance(body["notify_tiers_enabled"], bool):
+        raise HTTPException(400, detail="notify_tiers_enabled must be true or false")
+    if "notify_tier_overrides" not in body:
+        return
+    from core.notices import CATEGORIES, RETIRED_AREAS, TIERS, area_of
+
+    raw = body["notify_tier_overrides"]
+    if not isinstance(raw, dict):
+        raise HTTPException(400, detail="notify_tier_overrides must be an object of {area or category: tier}")
+    known = set(CATEGORIES) | {area_of(c) for c in CATEGORIES}
+    clean = {}
+    for key, value in raw.items():
+        if key not in known and area_of(key) in RETIRED_AREAS:
+            continue
+        if key not in known:
+            raise HTTPException(
+                400,
+                detail=f"notify_tier_overrides: unknown area or category {key!r}",
+            )
+        if value is None or value == "" or value == "default":
+            continue
+        if value not in TIERS:
+            raise HTTPException(
+                400,
+                detail=f"notify_tier_overrides[{key!r}]: tier must be one of {', '.join(TIERS)} or default",
+            )
+        clean[key] = value
+    body["notify_tier_overrides"] = clean
 
 
 def is_local_client(host: str) -> bool:
@@ -173,14 +243,15 @@ _SETTING_BOUNDS = {
     "max_fetch_size": (1024, 10_000_000),
     "browser_timeout": (5, 120),
     "scout_timeout": (5, 300),
+    "scout_max_rounds": (1, 6),
+    "skill_proposal_auto_apply_after_hours": (0, 168),
+    "skill_proposal_max_auto_applies_per_day": (1, 50),
     "compaction_threshold": (0.1, 0.95),
     "context_critical_threshold": (0.5, 0.99),
-    "plan_review_timeout": (10, 600),
     "max_pending_messages": (1, 100),
     "notify_webhook_timeout": (1, 60),
     "port": (1024, 65535),
     "post_mortem_retention_days": (7, 3650),
-    "candor_max_obs_per_turn": (10, 10_000),
     "rlm_max_iterations": (3, 1000),  # raised 100->1000 with max_tool_rounds (same request)
     "rlm_max_depth": (1, 3),
     "rlm_max_subcalls": (5, 500),
@@ -215,33 +286,10 @@ _SETTING_BOUNDS = {
     "dream_journal_retention_days": (2, 365),
     "dream_rlm_probe_interval_days": (1, 90),
     "canary_retention_days": (1, 365),
-    "canary_baseline_runs": (1, 20),
-    "canary_regression_delta": (0.01, 1.0),
-    "canary_heartbeat_per_night": (1, 10),
-    "canary_post_batch_max": (1, 12),
-    "canary_park_after_passes": (3, 200),
-    "adaptive_max_entries_per_kind": (1, 100),
     # Mirrors scripts/backup.py's KEEP_MIN/KEEP_MAX so the API rejects what the
     # backup run would have clamped anyway. 0 disables scheduled backups.
     "backup_keep_count": (0, 90),
-    "adaptive_max_auto_applies_per_day": (0, 50),
-    "adaptive_edit_cooldown_hours": (0, 720),
-    "adaptive_tripwire_window_turns": (5, 200),
-    "adaptive_usage_retire_days": (0, 365),
-    "adaptive_prompt_note_ttl_days": (0, 365),
-    "adaptive_suspect_ttl_days": (0, 90),
     "notification_retention_days": (0, 365),
-    "telos_serendipity_budget": (0.05, 0.5),
-    "telos_eig_floor": (0.0, 1.0),
-    "telos_hypotheses_per_question": (1, 10),
-    "telos_max_gated_backlog": (1, 100),
-    "telos_max_eval_tokens": (1000, 200_000),
-    "telos_question_max_attempts": (1, 10),
-    "telos_soup_context_entries": (4, 40),
-    # 0 disables each horizon (keep forever) — retention here archives and
-    # only the archive's own horizon deletes, so long values are cheap.
-    "telos_soup_retention_days": (0, 3650),
-    "telos_soup_archive_retention_days": (0, 3650),
     "mcp_call_timeout": (5, 3600),
     "mcp_connect_timeout": (5, 300),
     "mcp_idle_seconds": (0, 86_400),  # 0 = never suspend
@@ -283,7 +331,6 @@ _SETTING_UNITS = {
     "max_tokens": "tokens",
     "ollama_num_ctx_cap": "tokens",
     "compaction_keep_tokens": "tokens",
-    "telos_max_eval_tokens": "tokens",
     "max_fetch_size": "bytes",
     "max_file_write_size": "bytes",
     "max_edit_read_size": "bytes",
@@ -396,12 +443,17 @@ async def update_settings(body: dict):
     if settings.network_enabled:
         locked |= {"llm_base_url", "openrouter_base_url"}
     valid_fields = {f.name for f in fields(settings)} - _NO_PERSIST - locked
+    # Rejected outright (not skipped) before anything is applied, so a bad
+    # override never half-saves the rest of the request.
+    _validate_notify_settings(body)
     updated = []
     for key, value in body.items():
         if key not in valid_fields:
             continue
         # Validate ssl_mode enum
         if key == "ssl_mode" and value not in ("self_signed", "custom"):
+            continue
+        if key == "push_urgency_floor" and value not in ("low", "normal", "high", "urgent"):
             continue
         # Validate voice enums — a typo'd mode would silently kill the mic button
         if key == "voice_mode" and value not in (
@@ -508,14 +560,14 @@ async def update_settings(body: dict):
         settings.save()
 
     # A different llm_model is a different agent: re-baseline the whole
-    # canary suite (parked included). Same hook as POST /api/models/switch.
+    # canary suite. Same hook as POST /api/models/switch.
     if "llm_model" in updated:
         try:
             from core.extensions.scheduling import enqueue_full_sweep
 
             enqueue_full_sweep("model-swap", delay_s=60)
         except Exception:
-            pass  # Non-critical — the nightly heartbeat still measures
+            pass  # Non-critical — the next deploy or a manual run still measures
 
     restart_required = bool(_RESTART_FIELDS & set(updated))
 

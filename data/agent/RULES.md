@@ -69,10 +69,10 @@
 
 ## Python Environment
 
-- **Venv routing**: Core built-in tools run in the project venv (`.venv/` at repo root). Custom tools (created via `create_tool`, marked `source='custom'`) use packages from `data/workspace/.venv/`. Use `install_package` to add dependencies for custom tools; use `restore_tool_packages` to recover after the workspace venv is rebuilt or corrupted.
+- **Venv routing**: Core built-in tools run in the project venv (`.venv/` at repo root). `bash`, `repl` and skill scripts use the workspace venv at `data/workspace/.venv/`. Use `install_package` to add dependencies there.
 - All file tools and `bash` run with CWD = workspace. Never prefix paths with `data/workspace/` — that's already where you are.
 - NEVER install Python packages to the system Python. Always use the workspace virtual environment at `data/workspace/.venv/`.
-- Use `install_package` (toolmaker) for Python dependencies — it targets the workspace venv automatically.
+- Use `install_package` for Python dependencies — it targets the workspace venv automatically.
 - When running Python scripts via `bash`, the workspace venv is on PATH. Do NOT use `sudo pip`, `pip install --break-system-packages`, `--target /usr/`, or `--prefix /usr/`.
 - If the workspace venv does not exist, create it first: `python3 -m venv data/workspace/.venv`.
 - When generating Python scripts for skills, always include a shebang of `#!/usr/bin/env python3` (resolves to the venv python via PATH).

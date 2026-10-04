@@ -52,7 +52,7 @@ def register(reg) -> None:
                 },
                 "category": {
                     "type": "string",
-                    "description": "Optional category filter (core, web, vcs, orchestration, scheduling, evaluation, custom, etc.)",
+                    "description": "Optional category filter (core, web, vcs, orchestration, scheduling, evaluation, etc.)",
                 },
                 "limit": {
                     "type": "integer",

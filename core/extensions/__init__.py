@@ -9,8 +9,6 @@ from __future__ import annotations
 import importlib
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Callable
 
 from core.tools.registry import ToolRegistry
 
@@ -22,14 +20,10 @@ BUNDLED_EXTENSIONS = [
     "core.extensions.orchestration",
     "core.extensions.evaluation",
     "core.extensions.scheduling",
-    "core.extensions.toolmaker",
+    "core.extensions.packages",
     "core.extensions.model_mgmt",
     "core.extensions.session_tools",
-    "core.extensions.planning",
-    "core.extensions.skillmaker",
-    "core.extensions.candor",
     "core.extensions.rlm",
-    "core.extensions.telos",
     "core.extensions.mcp",
 ]
 

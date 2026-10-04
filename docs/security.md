@@ -179,8 +179,6 @@ Tools classified as `dangerous` require explicit per-invocation user confirmatio
 | Tool | Why |
 |---|---|
 | `search_web`, `browse_web` | Outbound traffic and untrusted page content entering the context |
-| `create_tool`, `update_tool` | Writes model-authored Python into the server's own source tree and imports it **into the server process** — see [Toolmaker](#toolmaker-model-authored-code-in-the-server-process) below |
-| `create_skill`, `add_skill_script` | Authors instructions the agent will later load and follow, and scripts `load_skill` then tells it to run under `bash` |
 | `add_gate` | Registers shell that re-runs unattended at every turn end for the life of the session |
 
 You can promote or demote any tool via `POST /api/tools/set-safety` or the Explorer → Capabilities → Tools panel.
@@ -189,7 +187,7 @@ You can promote or demote any tool via `POST /api/tools/set-safety` or the Explo
 
 **The gate surfaces intent. It is not a containment boundary.**
 
-`bash` and `repl` stay at the `caution` level, which does not prompt. That is a deliberate choice, not an oversight: they are the product's core utility, and prompting on every call would make the agent unusable for ordinary work. The consequence has to be stated plainly — **every dangerous-gated action has an ungated equivalent through `bash`.** `create_skill` prompts; `bash` writing the same SKILL.md does not. `create_tool` prompts; `bash` writing the same file and waiting for a restart does not.
+`bash` and `repl` stay at the `caution` level, which does not prompt. That is a deliberate choice, not an oversight: they are the product's core utility, and prompting on every call would make the agent unusable for ordinary work. The consequence has to be stated plainly — **every dangerous-gated action has an ungated equivalent through `bash`.**
 
 So the gate's real job is to make a consequential action *visible and deliberate* at the moment the agent takes it — it stops a careless tool call, not a determined one. **The VM or container Pernix runs in is the actual boundary.** This is the same posture [internals/rlm.md](internals/rlm.md) states for the RLM child sandbox, and the same one the shell denylist below is labeled with.
 
@@ -240,25 +238,9 @@ If a tool you rely on needs a variable that is not on the allowlist (a proxy set
 
 ---
 
-## Toolmaker: Model-Authored Code in the Server Process
+## Agent-Authored Tools (retired)
 
-The `create_tool` / `update_tool` tools are the highest-authority surface in the system, and the documentation was previously silent about them. What actually happens:
-
-1. The model supplies a Python source string.
-2. It is written to `core/tools/builtin/custom_<name>.py` — **inside Pernix's own source tree**, via a raw `Path.write_text` that does not go through the workspace path-safety layer at all.
-3. It is immediately `importlib.import_module`'d and `register(reg)` is called **in the server process** — with the full server environment (every API key), no resource limits, no separate process group.
-4. `core/tools/builtin/__init__.py` re-imports every `custom_*.py` on **every boot**, so the code persists across restarts.
-
-Module-level statements in that file execute at import time. There is no sandbox on this path.
-
-**`PROHIBITED_PATTERNS` is a typo-guard, not a control.** It is an 11-entry substring scan over the submitted source. It is trivially bypassed — `os.popen` for `os.system`, `subprocess.run` for `subprocess.Popen`, double quotes for the single-quoted `open('/etc` patterns — and it is moot regardless, because it looks for *call sites* while module-level code needs none of them. Treat it as a lint that catches obvious mistakes, and do not reason about it as a security property.
-
-What has been tightened:
-
-- Both `create_tool` and `update_tool` are now `dangerous`, so they require the `ask_user` + `approve_dangerous_tool` handshake. Gating only `create_tool` would have left a one-call detour: create a benign tool once, then replace its body.
-- Tool names are validated as `[a-z][a-z0-9_]{0,39}` **before** being interpolated into any path, in `create_tool`, `update_tool`, and `restore_tool_packages`.
-
-What remains true, and is the reason to run Pernix in a container: **an approved `create_tool` call is arbitrary code execution in the server process, and it persists.** Relocating custom tools out of the source tree and into a sandboxed loader is the real fix and has not been done. Review `list_custom_tools` output and the contents of `core/tools/builtin/custom_*.py` if you ever approve one.
+The toolmaker extension (`create_tool` / `update_tool`) wrote model-authored Python into Pernix's own source tree and imported it into the server process. It was removed in 3.2. Leftover `core/tools/builtin/custom_*.py` files are never imported: the builtin loader logs `legacy custom tool <name> ignored` and skips them. Delete them at your convenience. New capabilities go into skills (`data/skills/<name>/SKILL.md` plus scripts run under `bash`) or an MCP server.
 
 ---
 
@@ -291,11 +273,7 @@ A gate that policy refuses to run is recorded as a **failure**, not skipped — 
 
 ## Skill Authoring
 
-`create_skill` and `add_skill_script` are `dangerous`. A skill is an instruction package the agent will later load and follow, and `add_skill_script` writes an executable file that `load_skill` then advertises to the agent as `bash <skill>/scripts/<file>` — write-then-run, previously ungated at every step.
-
-These two tools no longer take an `approved` argument. It was a **model-supplied boolean**: the first call posted an `ask_user` question and returned, and the model was told to call again with `approved=true` — but nothing correlated that argument with an actual user response, so the model could simply set it on the first call. Authorization now goes through the executor's server-side gate, which keeps approval state on the session where no argument can reach it.
-
-The remaining skillmaker tools (`update_skill`, `add_skill_reference`, `remove_skill_script`, `remove_skill_reference`) still take `approved`. They edit markdown inside an existing skill, so the prompt is a speed bump rather than a control — but it is an honor-system speed bump, and should be read that way.
+The skillmaker tools (`create_skill`, `update_skill`, `add_skill_script`, …) were removed in 3.2. Skills are plain files: a human edits them in the Explorer → Capabilities → Skills panel (or `PUT /api/skills/{name}`), and the agent writes `data/skills/<name>/SKILL.md` and its `scripts/` with `bash`. Neither path prompts. A skill is an instruction package the agent will later load and follow, and its scripts are what `load_skill` advertises as `bash <skill>/scripts/<file>`, so treat `data/skills/` as code you review, the same as the workspace.
 
 ---
 

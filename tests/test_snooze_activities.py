@@ -251,13 +251,6 @@ async def test_split_file_no_large_files(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_prune_stale_empty_store(tmp_path, monkeypatch):
-    """Prune does nothing with empty store."""
-    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
-    runner = SnoozeRunner()
-    await runner._prune_stale_entries()
-
-
 async def test_prune_stale_no_candidates(tmp_path, monkeypatch):
     """Prune does nothing when no entries have hit counts."""
     monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))

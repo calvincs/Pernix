@@ -1,5 +1,7 @@
 # Adaptation plan — prime-agent-inspired upgrades (kernel, gates, goals, adaptive layer)
 
+> **Adaptive layer RETIRED 2026-10.** Phase 4 (the adaptive layer) was removed in 3.2 (644 proposals and 29 trials in its last month, none significant); its sections are kept as history only. The kernel, gates, goals and canary phases are unaffected. See [../upgrade.md](../upgrade.md).
+
 Status: **ALL PHASES (1, 2, 3, 3.5, 4) IMPLEMENTED** (2026-08-05/06, branch
 `next-phase-features`) — Phase 1: 1a/1c/1d/1e/1f/1g; Phase 2: §10.11
 socket fix, 2a scaffold modes + snapshot/restore + lock, 2b SessionKernel

@@ -44,17 +44,20 @@ def test_transition_writes_state_v2_only(monkeypatch):
     session = AgentSession(session_id=sid)
 
     writes: list[dict] = []
-    real_update = db.update_session
+    real_log = db.add_state_log
 
     def spy(session_id, **fields):
         writes.append(fields)
-        return real_update(session_id, **fields)
+        return real_log(session_id, **fields)
 
-    monkeypatch.setattr(db, "update_session", spy)
+    monkeypatch.setattr(db, "add_state_log", spy)
 
     sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
 
-    assert writes == [{"state_v2": "scouting"}]
+    assert len(writes) == 1
+    assert writes[0]["persist_state"] is True
+    assert writes[0]["to_state"] == "scouting"
+    assert "state" not in writes[0]
     assert db.get_session(sid)["state_v2"] == "scouting"
 
 

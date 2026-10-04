@@ -7,7 +7,10 @@ AND the deliberate `raise FailoverError(CONTEXT_OVERFLOW, ...)`. Every one of
 them was downgraded to a StreamEvent(ERROR), so:
 
   - ProviderRouter.chat_stream's whole failover block never fired — streaming
-    fallback to Ollama, documented as layer 1 of 3, did not exist;
+    fallback, documented as layer 1 of 3, did not exist. (Failover has since
+    moved up to stream_with_failover, which is model-aware; what this file
+    still pins is that the signal REACHES the layer above instead of dying as
+    an ERROR event inside the adapter.);
   - agent.py's `except FailoverError ... CONTEXT_OVERFLOW -> compact and
     retry` was unreachable from any streaming call, so an overflow burned the
     turn's fallback model instead of compacting.
@@ -137,7 +140,7 @@ async def test_overflow_after_tokens_terminates_instead_of_raising(factory):
 
 
 # ---------------------------------------------------------------------------
-# Router: the failover block is now reachable
+# Router: the typed signal now escapes the router too
 # ---------------------------------------------------------------------------
 
 
@@ -155,20 +158,30 @@ def _router_with_real_openrouter(handler, monkeypatch):
     return router, local
 
 
-async def test_router_streaming_failover_reaches_ollama(monkeypatch):
+async def test_router_streaming_failover_signal_reaches_the_ladder(monkeypatch):
     """End-to-end proof the swallowing is gone: a 429 from the real provider
-    stream now falls back to Ollama. Before the fix the router saw a clean
-    generator and this fell through with a single ERROR event."""
+    stream comes out of the router as a typed, classified error. Before the
+    2026-08-07 fix the router saw a clean generator and this fell through with
+    a single ERROR event.
+
+    Where that error goes changed on 2026-09-08 (S10): the router used to
+    catch it here and stream Ollama's answer instead, without telling the
+    caller which model had replied. stream_with_failover owns that decision
+    now — it knows the fallback's provider, budget and tools — so what the
+    router must do is release its slot and let the signal past."""
 
     def _rate_limited(request):
         return httpx.Response(429, text="rate limited")
 
     router, local = _router_with_real_openrouter(_rate_limited, monkeypatch)
 
-    events = await _drain(router.chat_stream([{"role": "user", "content": "hi"}], model="vendor/big-model"))
+    with pytest.raises(FailoverError) as exc:
+        await _drain(router.chat_stream([{"role": "user", "content": "hi"}], model="vendor/big-model"))
 
-    assert len(local.stream_calls) == 1
-    assert "local " in "".join(e.content or "" for e in events if e.type == StreamEventType.TOKEN)
+    assert exc.value.reason == FailoverReason.RATE_LIMIT
+    assert "429" in exc.value.message, "the ladder's backoff keys on the status in the text"
+    assert local.stream_calls == [], "the router no longer picks a backup of its own"
+    assert router._semaphores["openrouter"].available == router._semaphores["openrouter"].capacity
 
 
 async def test_router_does_not_fail_over_on_context_overflow(monkeypatch):

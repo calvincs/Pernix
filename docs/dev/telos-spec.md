@@ -1,5 +1,7 @@
 # TELOS — A Teleological Operational Layer for Pernix
 
+> **RETIRED 2026-10.** Telos was removed in 3.2 (zero tool calls in its last month on the reference box); this spec is kept as history only. See [../upgrade.md](../upgrade.md).
+
 **Status:** Draft 0.1 · **Target stack:** Pernix (execution) · HyperKB (memory) · CANDOR (calibrated claims) · Provenas (provenance)
 **Purpose:** Derive the essay + conversation ("Intelligence, Knowledge, Purpose, and Personhood") into an executable control layer: a non-convergent drive with correction machinery, a testability-gated intelligence loop, and dual-ledger identity with external ground truth.
 

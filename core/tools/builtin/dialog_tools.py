@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
+from collections import deque
 
 from db import models as db
 
@@ -34,14 +37,19 @@ def ask_user(
     # job indefinitely (the reaper never reaps AWAITING_USER by design).
     # Mirrors the dangerous-tool gate in core/tools/executor.py, which skips
     # the ask_user → approve flow for the same reason.
-    from core.tools.executor import _is_unattended_session
+    # This is by-design unavailability, not a failure: nothing went wrong and
+    # the tool is working exactly as intended. It opened as "Error:" until
+    # 2026-09-04, which taught the whole trust loop that ask_user was a broken
+    # tool (see UNAVAILABLE_PREFIX in core/tools/executor.py).
+    from core.tools.executor import UNAVAILABLE_PREFIX, _is_unattended_session
 
     if _is_unattended_session(session_id):
         return (
-            "Error: This session runs unattended (cron-initiated) — no user is "
-            "present to answer, and waiting would stall the job indefinitely. "
-            "Make a reasonable decision autonomously and proceed with the task. "
-            "Use notify_user to tell the user what you decided and why."
+            f"{UNAVAILABLE_PREFIX} This session runs unattended — no "
+            "user is present to answer, and waiting would stall it indefinitely. "
+            "Nothing has gone wrong: proceed without user input. Make a reasonable "
+            "decision autonomously and continue with the task. Use notify_user to tell "
+            "the user what you decided and why."
         )
 
     # Get session title for display
@@ -88,8 +96,11 @@ def ask_user(
     # Emit on global bus (for headless/webhook consumers)
     from core.events import get_event_bus
 
-    bus = get_event_bus()
-    bus.emit({**event_payload, "session_id": session_id})
+    # A statement has nothing to answer, so it must not push the phone the way
+    # a real question does; it still reaches the panel and open browsers above.
+    if question_type != "statement":
+        bus = get_event_bus()
+        bus.emit({**event_payload, "session_id": session_id})
 
     # Statements are informational — deliver them to the question panel but do
     # NOT park the session in AWAITING_USER. Pausing on announcements ("I'll
@@ -110,7 +121,6 @@ def ask_user(
     session_obj = manager.get(session_id)
     if session_obj is not None:
         from core.events import call_on_loop
-        from db import models as _db_models
         from sessions import state_v2 as sv2
 
         try:
@@ -132,6 +142,65 @@ def ask_user(
     return f"Question posted (id={qid}). You will be notified when the user responds."
 
 
+# Session types with nobody watching the conversation: a notify_user from one
+# of these is the only way its result reaches the user, so it pushes.
+_BACKGROUND_SESSION_TYPES = ("cron", "snooze", "rlm")
+# notify_user pushes allowed per session per hour before later ones go quiet.
+# A loop that calls notify_user every round must not buzz the phone every round.
+_URGENT_PER_HOUR = 3
+_URGENT_WINDOW_S = 3600.0
+_URGENT_MAX_SESSIONS = 256
+_urgent_sent: dict[str, deque] = {}
+_urgent_lock = threading.Lock()
+
+
+def _session_type_of(session_id: str) -> str:
+    if not session_id:
+        return ""
+    try:
+        from sessions.manager import get_manager
+
+        live = get_manager().get(session_id)
+        if live is not None:
+            return getattr(live, "session_type", "") or ""
+    except Exception:
+        pass
+    try:
+        return (db.get_session(session_id) or {}).get("session_type") or ""
+    except Exception:
+        return ""
+
+
+def _take_urgent_slot(session_id: str) -> bool:
+    """True when this session may push now (and records the push)."""
+    now = time.monotonic()
+    with _urgent_lock:
+        # Prune sessions whose pushes have all aged out, and cap the table so
+        # a stream of one-shot sessions cannot grow it without bound.
+        for sid in [k for k, q in _urgent_sent.items() if not q or now - q[-1] > _URGENT_WINDOW_S]:
+            del _urgent_sent[sid]
+        while len(_urgent_sent) >= _URGENT_MAX_SESSIONS and session_id not in _urgent_sent:
+            _urgent_sent.pop(next(iter(_urgent_sent)))
+        q = _urgent_sent.setdefault(session_id, deque())
+        while q and now - q[0] > _URGENT_WINDOW_S:
+            q.popleft()
+        if len(q) >= _URGENT_PER_HOUR:
+            return False
+        q.append(now)
+        return True
+
+
+def _connected_clients() -> int:
+    """Clients a broadcast reaches (global subscribers + live session streams)."""
+    try:
+        from sessions.manager import get_manager
+
+        m = get_manager()
+        return len(m._global_subscribers) + sum(1 for s in list(m._sessions.values()) if s.subscribers)
+    except Exception:
+        return 0
+
+
 def notify_user(
     title: str = "",
     body: str = "",
@@ -143,30 +212,30 @@ def notify_user(
         return "Error: 'title' is required."
     session_id = (_context or {}).get("session_id", "")
 
-    # Persist in DB so the bell panel can display it
-    nid = db.add_notification(session_id=session_id, title=title, body=body, urgency=urgency)
+    # The user reading an attended session already sees the message there, so
+    # a normal notice is a quiet bell item; a background session (or an agent
+    # that says it is urgent) is the case a push exists for.
+    session_type = _session_type_of(session_id)
+    urgent = session_type in _BACKGROUND_SESSION_TYPES or (urgency or "").lower() in ("high", "urgent")
+    quieted = False
+    if urgent and not _take_urgent_slot(session_id or "-"):
+        urgent, quieted = False, True
 
-    event_payload = {
-        "type": "dialog.notification",
-        "notification_id": nid,
-        "title": title,
-        "body": body,
-        "urgency": urgency,
-        "source_session_id": session_id,
-    }
+    from core import notices
 
-    # Broadcast to ALL sessions with active SSE subscribers so every
-    # connected browser/device receives the notification.
-    from sessions.manager import get_manager
+    notices.notify(
+        "agent.notify_user_urgent" if urgent else "agent.notify_user",
+        title,
+        body,
+        session_id=session_id,
+        link={"kind": "session", "id": session_id} if session_id else None,
+        session_type=session_type or None,
+    )
 
-    manager = get_manager()
-    reached = manager.broadcast(event_payload)
-
-    from core.events import get_event_bus
-
-    get_event_bus().emit({**event_payload, "session_id": session_id})
-
-    return f"Notification broadcast to {reached} connected client(s)."
+    reply = f"Notification broadcast to {_connected_clients()} connected client(s)."
+    if quieted:
+        reply += " Push limit reached for this hour: further notices this hour are delivered quietly."
+    return reply
 
 
 _APPROVALS_PATH = None  # resolved lazily from settings
@@ -267,6 +336,7 @@ def approve_dangerous_tool(
         # user was shown what the agent intends to do.
         import json as _json
 
+        from core.llm.types import is_rejected_call as _is_rejected_call
         from db import models as _db
 
         messages = _db.get_messages(session_id, last=40)
@@ -284,7 +354,10 @@ def approve_dangerous_tool(
                     try:
                         tcs = _json.loads(tool_calls_raw)
                         if isinstance(tcs, list):
-                            found = any(isinstance(tc, dict) and tc.get("name") == "ask_user" for tc in tcs)
+                            found = any(
+                                isinstance(tc, dict) and tc.get("name") == "ask_user" and not _is_rejected_call(tc)
+                                for tc in tcs
+                            )
                     except (ValueError, TypeError):
                         pass
                 # Fallback: content field (legacy or alternative message formats)

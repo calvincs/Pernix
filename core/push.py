@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 logger = logging.getLogger("pernix.push")
 
@@ -38,20 +40,65 @@ def generate_vapid_keys() -> None:
     settings.save()
 
 
-async def send_push(subscription: dict, title: str, body: str, session_id: str = "") -> bool:
+# Process-lifetime outcome counters, published on /api/health. A phone that
+# never buzzes is otherwise indistinguishable from a push service that never
+# accepts our pushes: neither leaves a trace without these.
+_STATS: dict[str, int] = {"push_sent_ok": 0, "push_rejected": 0, "push_gone": 0, "push_failed": 0}
+
+
+def push_stats() -> dict[str, int]:
+    """Snapshot of the send counters since process start."""
+    return dict(_STATS)
+
+
+@dataclass(frozen=True)
+class PushResult:
+    """Outcome of one send. Truthy only on success, so `if not result` still reads as "did not arrive".
+
+    gone     -- 404/410: the browser dropped the subscription; delete it.
+    rejected -- 401/403: the push service refused OUR credentials (usually the
+                VAPID subject). The subscription is fine; deleting it would
+                destroy a good phone registration and hide the mis-configuration.
+    """
+
+    ok: bool
+    gone: bool = False
+    rejected: bool = False
+    status: int | None = None
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def endpoint_host(endpoint: str) -> str:
+    """Host part of a push endpoint. The path is a per-device capability token, so it is never logged."""
+    return urlsplit(endpoint or "").hostname or "?"
+
+
+def _response_reason(response) -> str:
+    try:
+        text = (response.text or "").strip() or (response.reason or "")
+    except Exception:
+        text = ""
+    return " ".join(str(text).split())[:200]
+
+
+async def send_push(subscription: dict, title: str, body: str, session_id: str = "") -> PushResult:
     """Send a single Web Push message.
 
-    Returns True on success, False if the subscription is stale (410 Gone).
     subscription: {"endpoint": ..., "p256dh": ..., "auth": ...}
-    Raises on other network errors.
+    Returns a PushResult for any answer the push service gave (success, gone,
+    rejected). Raises on network errors and on other HTTP failures, as before.
     """
     from pywebpush import WebPushException, webpush
 
     from config import settings
 
+    host = endpoint_host(subscription.get("endpoint", ""))
     payload = json.dumps({"title": title, "body": body, "session_id": session_id})
     try:
-        await asyncio.to_thread(
+        response = await asyncio.to_thread(
             webpush,
             subscription_info={
                 "endpoint": subscription["endpoint"],
@@ -64,9 +111,24 @@ async def send_push(subscription: dict, title: str, body: str, session_id: str =
             vapid_private_key=settings.vapid_private_key,
             vapid_claims={"sub": settings.vapid_subject},
         )
-        return True
     except WebPushException as e:
-        if e.response is not None and e.response.status_code in (401, 403, 410):
-            return False  # credentials mismatch or expired — caller should delete
-        logger.warning("WebPush failed for %s…: %s", subscription["endpoint"][:40], e)
+        status = e.response.status_code if e.response is not None else None
+        reason = _response_reason(e.response) if e.response is not None else " ".join(str(e).split())[:200]
+        if status in (404, 410):
+            _STATS["push_gone"] += 1
+            logger.warning("WebPush to %s: HTTP %s (subscription gone) %s", host, status, reason)
+            return PushResult(ok=False, gone=True, status=status, reason=reason)
+        if status in (401, 403):
+            _STATS["push_rejected"] += 1
+            logger.warning("WebPush to %s rejected our credentials: HTTP %s %s", host, status, reason)
+            return PushResult(ok=False, rejected=True, status=status, reason=reason)
+        _STATS["push_failed"] += 1
+        logger.warning("WebPush to %s failed: HTTP %s %s", host, status, reason)
         raise
+    except Exception as e:
+        _STATS["push_failed"] += 1
+        logger.warning("WebPush to %s failed: %s", host, " ".join(str(e).split())[:200])
+        raise
+    _STATS["push_sent_ok"] += 1
+    logger.debug("WebPush to %s sent: HTTP %s", host, getattr(response, "status_code", None))
+    return PushResult(ok=True, status=getattr(response, "status_code", None))

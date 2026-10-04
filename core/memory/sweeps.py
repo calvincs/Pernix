@@ -15,11 +15,12 @@ Returns are stat deltas the caller folds into its own counters.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Callable
 
@@ -202,6 +203,8 @@ def _pairwise_dedup(entries: list, is_cancelled: Callable[[], bool]) -> set[int]
         if entries[i].epoch in archived:
             continue
         for j in range(i + 1, len(entries)):
+            if is_cancelled():
+                return archived
             if entries[j].epoch in archived:
                 continue
             sm = SequenceMatcher(None, entries[i].content, entries[j].content)
@@ -224,6 +227,52 @@ def _pairwise_dedup(entries: list, is_cancelled: Callable[[], bool]) -> set[int]
 # Activity 3b: cross-file consolidation
 # ---------------------------------------------------------------------------
 
+# A cluster the provider refused for length is quarantined this long. The
+# prompt budget should make that unreachable; the marker is the backstop for
+# the case it does not (a provider whose real window is below what the
+# registry reports), because without it ONE bad cluster blocks every
+# consolidation forever — the sweep always picks clusters[0].
+CONSOLIDATION_SKIP_DAYS = 7
+# Clusters tried in one cycle. Still one MERGE per cycle; this only lets the
+# sweep step past a cluster the provider just refused instead of ending the
+# cycle having done nothing.
+_MAX_CLUSTER_ATTEMPTS = 3
+
+
+def _cluster_key(cluster: list[str]) -> str:
+    """Stable short key for a cluster, order-independent."""
+    return hashlib.sha1("|".join(sorted(cluster)).encode("utf-8")).hexdigest()[:12]
+
+
+def _consolidation_skipped(db, cluster: list[str]) -> bool:
+    """True while this cluster's skip marker is live. Expired markers lapse
+    on their own — snooze_state has no TTL, so the value IS the expiry."""
+    raw = db.get_snooze_state(f"consolidation_skip:{_cluster_key(cluster)}")
+    if not raw:
+        return False
+    try:
+        expires = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) < expires
+
+
+def _drop_skipped(db, clusters: list[list[str]]) -> list[list[str]]:
+    return [c for c in clusters if not _consolidation_skipped(db, c)]
+
+
+def _mark_consolidation_skip(db, cluster: list[str]) -> None:
+    expiry = datetime.now(timezone.utc) + timedelta(days=CONSOLIDATION_SKIP_DAYS)
+    db.set_snooze_state(f"consolidation_skip:{_cluster_key(cluster)}", expiry.isoformat())
+
+
+def _is_context_overflow(err: Exception) -> bool:
+    """A provider refusal that names the context length (vLLM/OpenAI 400)."""
+    msg = str(err).lower()
+    return "context length" in msg or "maximum context" in msg or "context_length_exceeded" in msg
+
 
 async def consolidate_files(
     store,
@@ -239,13 +288,15 @@ async def consolidate_files(
     Returns (used_llm, files_consolidated).
     """
     from core.memory.consolidate import (
-        build_llm_merge_prompt,
+        build_budgeted_merge_prompt,
         build_signatures,
         execute_merge,
         find_clusters,
+        largest_overlap_pair,
         parse_llm_merge_response,
         plan_trivial_merge,
         prioritize_clusters,
+        scan_cluster_batch,
     )
 
     if not store:
@@ -269,65 +320,116 @@ async def consolidate_files(
     # The pairwise SequenceMatcher in find_clusters is CPU-heavy on realistic
     # stores — push it onto a worker thread so the asyncio loop stays
     # responsive (HTTP, SSE heartbeats, snooze timeout).
-    signatures = await asyncio.to_thread(build_signatures, store)
+    signatures = await run_background(build_signatures, store, is_cancelled)
+    if is_cancelled():
+        return False, 0
     if len(signatures) < 2:
         db.set_snooze_state("last_consolidation_scan", datetime.now(timezone.utc).isoformat())
         return False, 0
 
     sig_map = {s.name: s for s in signatures}
-    clusters = await asyncio.to_thread(find_clusters, signatures, None, is_cancelled)
+    scanning = False
+    if len(signatures) > 64:
+        try:
+            cursor = json.loads(db.get_snooze_state("consolidation_cursor") or "{}")
+        except (ValueError, TypeError):
+            cursor = {}
+        clusters, cursor, finished = await run_background(scan_cluster_batch, signatures, cursor, is_cancelled)
+        db.set_snooze_state("consolidation_cursor", "{}" if finished else json.dumps(cursor))
+        scanning = not finished
+        logger.info("Snooze consolidation batch: %d candidate pairs, remaining=%s", len(clusters), scanning)
+    else:
+        clusters = await run_background(find_clusters, signatures, None, is_cancelled)
 
     if not clusters:
-        db.set_snooze_state("last_consolidation_scan", datetime.now(timezone.utc).isoformat())
+        if not scanning and not is_cancelled():
+            db.set_snooze_state("last_consolidation_scan", datetime.now(timezone.utc).isoformat())
         return False, 0
 
     clusters = prioritize_clusters(clusters, sig_map)
+    clusters = await asyncio.to_thread(_drop_skipped, db, clusters)
+    if not clusters:
+        if not scanning and not is_cancelled():
+            db.set_snooze_state("last_consolidation_scan", datetime.now(timezone.utc).isoformat())
+        return False, 0
 
     if is_cancelled():
         return False, 0
 
-    # Phase 2: Process ONE cluster per cycle
-    cluster = clusters[0]
-    logger.info("Snooze: consolidating cluster %s (%d files)", cluster, len(cluster))
-
     used_llm = False
     consolidated = 0
 
-    # Try trivial merge first (no LLM). Also CPU-heavy when a cluster has many
-    # entries — same offload reasoning as Phase 1.
-    decision = await asyncio.to_thread(plan_trivial_merge, cluster, store)
+    # Phase 2: ONE merge per cycle, from the first cluster that can produce
+    # one. A cluster the provider refuses for length is marked and the next
+    # one is tried, so a cluster that cannot be described inside the window
+    # no longer costs every later cluster its turn.
+    for cluster in clusters[:_MAX_CLUSTER_ATTEMPTS]:
+        if is_cancelled():
+            return used_llm, consolidated
+        logger.info("Snooze: consolidating cluster %s (%d files)", cluster, len(cluster))
 
-    if decision is None and not did_llm_already and llm_ready():
-        # Need LLM for ambiguous merge
-        prompt = build_llm_merge_prompt(cluster, store)
-        try:
-            from core.llm.client import get_llm_client
+        # Try trivial merge first (no LLM). Also CPU-heavy when a cluster has
+        # many entries — same offload reasoning as Phase 1.
+        decision = await run_background(plan_trivial_merge, cluster, store, is_cancelled)
 
-            client = get_llm_client()
-            response = await client.chat(
-                messages=[
-                    {"role": "system", "content": "You are a memory consolidation agent."},
-                    {"role": "user", "content": prompt},
-                ],
-                model=settings.background_model or settings.llm_model,
-                max_tokens=2000,
+        if is_cancelled():
+            return used_llm, consolidated
+        if decision is None and not did_llm_already and llm_ready():
+            # Need LLM for ambiguous merge. The prompt is budgeted to the
+            # model's real window; when even the floor does not fit, merge
+            # the cluster's largest-overlap PAIR instead — a partial merge
+            # is progress and the cluster shrinks for the next cycle.
+            prompt, fits = await asyncio.to_thread(build_budgeted_merge_prompt, cluster, store)
+            if not fits and len(cluster) > 2:
+                pair = await asyncio.to_thread(largest_overlap_pair, cluster, sig_map)
+                logger.info(
+                    "Snooze: cluster %s exceeds the merge prompt budget at the floor — "
+                    "consolidating its largest-overlap pair %s this cycle",
+                    cluster,
+                    pair,
+                )
+                cluster = pair
+                prompt, fits = await asyncio.to_thread(build_budgeted_merge_prompt, cluster, store)
+            try:
+                from core.llm.client import get_llm_client
+
+                client = get_llm_client()
+                response = await client.chat(
+                    messages=[
+                        {"role": "system", "content": "You are a memory consolidation agent."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    model=settings.background_model or settings.llm_model,
+                    max_tokens=2000,
+                )
+                decision = parse_llm_merge_response(response.content.strip(), cluster)
+                used_llm = True
+            except Exception as e:
+                if _is_context_overflow(e):
+                    await asyncio.to_thread(_mark_consolidation_skip, db, cluster)
+                    logger.warning(
+                        "Snooze: provider refused the merge prompt for cluster %s on context length (%s) — "
+                        "skipping it for %d days and moving to the next cluster",
+                        cluster,
+                        e,
+                        CONSOLIDATION_SKIP_DAYS,
+                    )
+                    continue
+                logger.warning("Snooze: consolidation LLM call failed: %s", e)
+
+        if decision:
+            await asyncio.to_thread(execute_merge, store, decision)
+            consolidated = len(decision.source_files)
+            logger.info(
+                "Snooze: consolidated %d files into %s (%s)",
+                consolidated,
+                decision.target_file,
+                decision.strategy,
             )
-            decision = parse_llm_merge_response(response.content.strip(), cluster)
-            used_llm = True
-        except Exception as e:
-            logger.warning("Snooze: consolidation LLM call failed: %s", e)
+        break
 
-    if decision:
-        await asyncio.to_thread(execute_merge, store, decision)
-        consolidated = len(decision.source_files)
-        logger.info(
-            "Snooze: consolidated %d files into %s (%s)",
-            consolidated,
-            decision.target_file,
-            decision.strategy,
-        )
-
-    db.set_snooze_state("last_consolidation_scan", datetime.now(timezone.utc).isoformat())
+    if not scanning and not is_cancelled():
+        db.set_snooze_state("last_consolidation_scan", datetime.now(timezone.utc).isoformat())
     return used_llm, consolidated
 
 
@@ -389,7 +491,7 @@ def build_file_keywords(files) -> dict[str, set[str]]:
     return file_keywords
 
 
-def classify_entry(entry, src_file: str, file_keywords: dict[str, set[str]]) -> dict | None:
+def classify_entry(entry, src_file: str, file_keywords: dict[str, set[str]], is_cancelled=lambda: False) -> dict | None:
     """Judge one entry's placement. Returns a candidate dict, or None to keep.
 
     Two checks, in order: type-file consistency (high confidence), then
@@ -409,12 +511,18 @@ def classify_entry(entry, src_file: str, file_keywords: dict[str, set[str]]) -> 
 
     tag_str = " ".join(entry.tags).lower()
     content_lower = entry.content.lower()
+    # A nonzero source score already proves this is not a routing candidate.
+    # Avoid comparing a correctly placed entry against the entire catalogue.
+    if any(kw in tag_str or kw in content_lower for kw in file_keywords.get(src_file, ())):
+        return None
 
     # Space-bucket boundary (v33): reroute targets stay inside the entry's
     # own bucket — a space entry never moves to a global file or another
     # space, and global entries never get pulled into a space.
     scores: dict[str, float] = {}
     for fname, fkws in file_keywords.items():
+        if is_cancelled():
+            return None
         if space_bucket(fname) != src_bucket:
             continue
         tag_hits = sum(2.0 for kw in fkws if kw in tag_str)
@@ -445,6 +553,10 @@ def scan_for_reroute_candidates(
     file_keywords: dict[str, set[str]],
     max_epoch: int,
     is_cancelled: Callable[[], bool],
+    progress: dict | None = None,
+    *,
+    entry_limit: int = 200,
+    seconds: float = 10,
 ) -> tuple[list[dict], list[dict]]:
     """Score every settled entry against every file. Returns (high, medium).
 
@@ -456,9 +568,19 @@ def scan_for_reroute_candidates(
 
     high: list[dict] = []
     medium: list[dict] = []
-    for mem_file in files:
-        if is_cancelled():
-            break
+    deadline = time.monotonic() + seconds
+    checked = 0
+    resume_file = (progress or {}).get("file", "")
+    resume_epoch = (progress or {}).get("epoch", -1)
+
+    def stopped():
+        return is_cancelled() or (progress is not None and time.monotonic() >= deadline)
+
+    for mem_file in sorted(files, key=lambda f: f.name):
+        if progress is not None and mem_file.name < resume_file:
+            continue
+        if stopped():
+            return high, medium
         if mem_file.entry_count < 2:
             continue
 
@@ -466,15 +588,24 @@ def scan_for_reroute_candidates(
         if not md_content:
             continue
 
-        for entry in parse_entries_from_markdown(mem_file.name, md_content):
-            if is_cancelled():
-                break
+        for entry in sorted(parse_entries_from_markdown(mem_file.name, md_content), key=lambda e: e.epoch):
+            if progress is not None and mem_file.name == resume_file and entry.epoch <= resume_epoch:
+                continue
+            if stopped() or (progress is not None and checked >= entry_limit):
+                return high, medium
             if entry.epoch > max_epoch:
                 continue
-            candidate = classify_entry(entry, mem_file.name, file_keywords)
+            candidate = classify_entry(entry, mem_file.name, file_keywords, stopped)
+            if stopped():
+                return high, medium
+            if progress is not None:
+                progress.update(file=mem_file.name, epoch=entry.epoch, finished=False)
+            checked += 1
             if candidate is None:
                 continue
             (high if candidate["confidence"] == "high" else medium).append(candidate)
+    if progress is not None:
+        progress["finished"] = True
     return high, medium
 
 
@@ -524,12 +655,23 @@ async def reroute_misplaced_entries(
     file_keywords = build_file_keywords(files)
     one_day_ago = int(time.time()) - 86400
 
-    high_conf, medium_conf = await asyncio.to_thread(
-        scan_for_reroute_candidates, store, files, file_keywords, one_day_ago, is_cancelled
+    try:
+        progress = json.loads(db.get_snooze_state("reroute_cursor") or "{}")
+    except (ValueError, TypeError):
+        progress = {}
+    progress["finished"] = False
+    high_conf, medium_conf = await run_background(
+        scan_for_reroute_candidates, store, files, file_keywords, one_day_ago, is_cancelled, progress
     )
+    if is_cancelled():
+        return False, 0
+    scanning = not progress["finished"]
+    db.set_snooze_state("reroute_cursor", json.dumps(progress) if scanning else "{}")
+    logger.info("Snooze reroute batch: %d candidates, remaining=%s", len(high_conf) + len(medium_conf), scanning)
 
     if not high_conf and not medium_conf:
-        db.set_snooze_state("last_reroute_scan", datetime.now(timezone.utc).isoformat())
+        if not scanning:
+            db.set_snooze_state("last_reroute_scan", datetime.now(timezone.utc).isoformat())
         return False, 0
 
     used_llm = False
@@ -668,7 +810,8 @@ async def reroute_misplaced_entries(
     if rerouted:
         logger.info("Snooze: rerouted %d misplaced entries", rerouted)
 
-    db.set_snooze_state("last_reroute_scan", datetime.now(timezone.utc).isoformat())
+    if not scanning and not is_cancelled():
+        db.set_snooze_state("last_reroute_scan", datetime.now(timezone.utc).isoformat())
     return used_llm, rerouted
 
 
@@ -863,16 +1006,45 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
     if not store:
         return False, 0
 
-    # Find the most bloated file (>= 80 active entries)
+    from db import models as db
+
     target = None
+    retry_state = {}
     _all_files = await asyncio.to_thread(store.list_files)
     for f in sorted(_all_files, key=lambda x: x.entry_count, reverse=True):
-        if f.entry_count >= 80:
-            target = f
-            break
+        if f.entry_count < 80:
+            continue
+        key = "split_retry:" + hashlib.sha256(f.name.encode()).hexdigest()[:20]
+        revision = str((getattr(f, "updated_at", ""), f.entry_count))
+        try:
+            state = json.loads(db.get_snooze_state(key) or "{}")
+        except (ValueError, TypeError):
+            state = {}
+        if state.get("revision") != revision:
+            state = {}
+        if state.get("until", 0) > time.time():
+            continue
+        target, retry_state = f, state
+        break
 
     if not target or is_cancelled():
         return False, 0
+
+    failures = min(int(retry_state.get("failures", 0)) + 1, 8)
+    batch = max(12, 50 // (2 ** min(failures - 1, 2)))
+
+    def record_failure(reason):
+        db.set_snooze_state(
+            key,
+            json.dumps(
+                {
+                    "revision": revision,
+                    "failures": failures,
+                    "until": time.time() + min(86400, 1800 * 2 ** (failures - 1)),
+                    "reason": reason,
+                }
+            ),
+        )
 
     logger.info("Snooze: splitting bloated file %s (%d entries)", target.name, target.entry_count)
 
@@ -884,10 +1056,8 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
     if len(entries) < 80:
         return False, 0
 
-    # Cap at 150 entries per cycle to keep the LLM prompt manageable;
-    # subsequent cycles will continue shrinking the file.
-    sample = entries[:150]
-    entry_summaries = [f"{i}: [{e.entry_type}] {e.content[:150]}" for i, e in enumerate(sample)]
+    # Start small and shrink after failures; later cycles continue the work.
+    sample = entries[:batch]
 
     _existing = await asyncio.to_thread(store.list_files)
     # Only files in the source's own bucket are candidates: listing global
@@ -898,55 +1068,68 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
 
     from core.llm.client import get_llm_client
 
-    prompt = (
-        f"These {len(sample)} memory entries are currently all stored in '{target.name}'. "
-        f"Re-group them into 2-4 more specific files.\n\n"
-        f"EXISTING FILES — prefer routing to these where they fit; "
-        f"only propose a NEW name if multiple entries share a coherent topic not covered by any existing file:\n"
-        f"{', '.join(existing_files)}\n\n"
-        f"Entries:\n" + "\n".join(entry_summaries) + "\n\n"
-        f"Rules:\n"
-        f"- Every entry must appear in exactly one group.\n"
-        f"- New file names must use dot-separated lowercase (e.g., pernix.workers, pernix.automation).\n"
-        f"- A small residual group may remain in '{target.name}'.\n\n"
-        f'Output JSON only: {{"groups": [{{"file": "name.here", "entries": [0, 1, 5]}}]}} /no_think'
-    )
+    def make_prompt():
+        entry_summaries = [f"{i}: [{e.entry_type}] {e.content[:150]}" for i, e in enumerate(sample)]
+        return (
+            f"These {len(sample)} memory entries are currently all stored in '{target.name}'. "
+            f"Re-group them into 2-4 more specific files.\n\n"
+            f"EXISTING FILES — prefer routing to these where they fit; "
+            f"only propose a NEW name if multiple entries share a coherent topic not covered by any existing file:\n"
+            f"{', '.join(existing_files)}\n\n"
+            f"Entries:\n" + "\n".join(entry_summaries) + "\n\n"
+            f"Rules:\n"
+            f"- Every entry must appear in exactly one group.\n"
+            f"- New file names must use dot-separated lowercase (e.g., pernix.workers, pernix.automation).\n"
+            f"- A small residual group may remain in '{target.name}'.\n\n"
+            f'Output JSON only: {{"groups": [{{"file": "name.here", "entries": [0, 1, 5]}}]}} /no_think'
+        )
 
     from core.llm.jsonx import extract_json
 
     # One retry on an unparseable response: the background model's MTP tag
     # sometimes early-stops mid-JSON (empty or cut-off output), which no
     # parser can recover — a fresh sample usually lands. On the live box this
-    # site failed dozens of times a day with nothing logged about WHAT came
-    # back, so the failure line now carries the head of the response.
+    # site failed repeatedly; record finish reason and batch size without
+    # copying private memory content into the logs.
     data = None
+    record_failure("interrupted")  # Cancellation/restart must also back off this file.
     for attempt in (1, 2):
         try:
             response = await get_llm_client().chat(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": make_prompt()}],
                 model=settings.background_model or settings.llm_model,
-                max_tokens=2000,
+                max_tokens=4000,
             )
         except Exception as e:
+            record_failure(type(e).__name__)
             logger.warning("Snooze: file split LLM call failed: %s", e)
-            return True, 0  # LLM was attempted; count against maintenance budget
-
+            return True, 0
         if is_cancelled():
             return True, 0
-
         data = extract_json(response.content)
-        if data is not None:
-            break
-        logger.warning(
-            "Snooze: could not parse file split response (attempt %d, %d chars): %r",
-            attempt,
-            len(response.content or ""),
-            (response.content or "")[:160],
+        groups = data.get("groups") if isinstance(data, dict) else None
+        valid = (
+            isinstance(groups, list)
+            and bool(groups)
+            and all(
+                isinstance(g, dict)
+                and isinstance(g.get("file"), str)
+                and isinstance(g.get("entries"), list)
+                and all(type(i) is int and 0 <= i < len(sample) for i in g["entries"])
+                for g in groups
+            )
         )
-
-    if not isinstance(data, dict):
+        if valid:
+            break
+        reason = "empty" if not response.content else "invalid_groups"
+        finish = str(getattr(response, "finish_reason", "unknown"))
+        record_failure(f"{reason}:{finish}")
+        logger.warning(
+            "Snooze: split failed (%s, finish=%s, attempt=%d, batch=%d)", reason, finish, attempt, len(sample)
+        )
+        sample = sample[: max(12, len(sample) // 2)]
+    else:
         return True, 0
-    groups = data.get("groups", [])
 
     # Build per-target-file epoch lists; deduplicate so each epoch goes to at most one file.
     seen_epochs: set[int] = set()
@@ -974,6 +1157,7 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
             epochs_by_file[file_name] = unique_epochs
 
     if not epochs_by_file:
+        record_failure("no_progress")
         return True, 0
 
     # Move entries: write to target files, then archive in source.
@@ -983,7 +1167,7 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
     for file_name, epoch_list in epochs_by_file.items():
         if is_cancelled():
             break
-        count = store.move_entries(target.name, file_name, epoch_list)
+        count = await asyncio.to_thread(store.move_entries, target.name, file_name, epoch_list)
         if count > 0:
             all_moved_epochs.update(epoch_list)
             moved += count
@@ -998,6 +1182,10 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
             len(epochs_by_file),
         )
 
+    if moved:
+        db.set_snooze_state(key, "{}")
+    else:
+        record_failure("no_progress")
     return True, moved
 
 

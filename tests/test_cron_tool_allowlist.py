@@ -95,17 +95,17 @@ async def test_executor_unconstrained_without_allowlist(monkeypatch):
 def test_schema_intersects_allowlist_over_builtin_force_add():
     """Builtins outside the allow-list must vanish from the schema — the
     force-add is exactly what kept offering bash to the curiosity drive."""
-    reg = _make_registry({"bash": lambda: "x", "recall": lambda: "x", "telos_status": lambda: "x"})
+    reg = _make_registry({"bash": lambda: "x", "recall": lambda: "x", "search_sessions": lambda: "x"})
     for t in reg.enabled_tools():
         t.source = "builtin"
 
     session = AgentSession(session_id="cron-test")
     session.last_scout_report = None
-    session.tool_allowlist = frozenset({"recall", "telos_status"})
+    session.tool_allowlist = frozenset({"recall", "search_sessions"})
 
     _, names = _resolve_tool_surface(session, "cron-test", reg)
     assert "bash" not in names
-    assert set(names) == {"recall", "telos_status"}
+    assert set(names) == {"recall", "search_sessions"}
 
 
 def test_schema_unconstrained_without_allowlist():
@@ -122,63 +122,75 @@ def test_schema_unconstrained_without_allowlist():
 # ---------------------------------------------------------------------------
 
 
-async def test_dispatch_sets_and_clears_allowlist(monkeypatch):
+def _real_manager(monkeypatch):
+    """A real SessionManager, so dispatch goes through real admission.
+
+    A fake prompt() that just returns (or just creates a task) cannot show
+    where the allow-list actually lands: it never queues, so the difference
+    between "the session is constrained" and "this turn is constrained" is
+    invisible. Every dispatch test below drives the real queueing path.
+    """
+    from sessions.manager import SessionManager
+
+    mgr = SessionManager()
+    monkeypatch.setattr("sessions.manager._manager", mgr)
+    return mgr
+
+
+async def test_dispatch_constrains_the_jobs_own_turn(monkeypatch):
     from core.extensions import scheduling
 
-    session = AgentSession(session_id="cron-test")
+    mgr = _real_manager(monkeypatch)
+    sid = mgr.create_session(title="reused by a job")
+    session = mgr.get(sid)
     seen = {}
 
-    class _Manager:
-        def get(self, sid):
-            return session
+    async def runner(session_id, message, session, **kw):
+        seen["during"] = session.tool_allowlist
 
-        async def prompt(self, sid, prompt):
-            seen["during"] = session.tool_allowlist
+    mgr.set_agent_runner(runner)
 
-    monkeypatch.setattr("sessions.manager.get_manager", lambda: _Manager())
-
-    await scheduling._dispatch_prompt("cron-test", "go", allowed_tools=["recall", "file_read"])
+    result = await scheduling._dispatch_prompt(sid, "go", allowed_tools=["recall", "file_read"])
+    assert result.completed
     assert seen["during"] == frozenset({"recall", "file_read"})
     # A reused session must not stay constrained after the job's turn.
     assert session.tool_allowlist is None
 
 
-async def test_dispatch_clears_allowlist_on_prompt_failure(monkeypatch):
+async def test_dispatch_reports_a_failed_turn_and_still_lifts_the_allowlist(monkeypatch):
     from core.extensions import scheduling
 
-    session = AgentSession(session_id="cron-test")
+    mgr = _real_manager(monkeypatch)
+    sid = mgr.create_session(title="reused by a job")
+    session = mgr.get(sid)
 
-    class _Manager:
-        def get(self, sid):
-            return session
+    async def runner(session_id, message, session, **kw):
+        raise RuntimeError("boom")
 
-        async def prompt(self, sid, prompt):
-            raise RuntimeError("boom")
+    mgr.set_agent_runner(runner)
 
-    monkeypatch.setattr("sessions.manager.get_manager", lambda: _Manager())
-
-    try:
-        await scheduling._dispatch_prompt("cron-test", "go", allowed_tools=["recall"])
-    except RuntimeError:
-        pass
+    result = await scheduling._dispatch_prompt(sid, "go", allowed_tools=["recall"])
+    assert result.status == scheduling.DISPATCH_FAILED
+    assert "boom" in (result.error or "")
     assert session.tool_allowlist is None
 
 
 async def test_dispatch_leaves_allowlist_untouched_when_job_has_none(monkeypatch):
     from core.extensions import scheduling
 
-    session = AgentSession(session_id="cron-test")
+    mgr = _real_manager(monkeypatch)
+    sid = mgr.create_session(title="reused by a job")
+    session = mgr.get(sid)
+    seen = {}
 
-    class _Manager:
-        def get(self, sid):
-            return session
+    async def runner(session_id, message, session, **kw):
+        seen["during"] = session.tool_allowlist
 
-        async def prompt(self, sid, prompt):
-            pass
+    mgr.set_agent_runner(runner)
 
-    monkeypatch.setattr("sessions.manager.get_manager", lambda: _Manager())
-
-    await scheduling._dispatch_prompt("cron-test", "go")
+    result = await scheduling._dispatch_prompt(sid, "go")
+    assert result.completed
+    assert seen["during"] is None
     assert session.tool_allowlist is None
 
 
@@ -190,10 +202,10 @@ async def test_dispatch_leaves_allowlist_untouched_when_job_has_none(monkeypatch
 def test_session_brief_renders_constraint_block():
     from core.scout.report import SessionBrief
 
-    brief = SessionBrief(session_id="s", tool_allowlist=["recall", "telos_status"])
+    brief = SessionBrief(session_id="s", tool_allowlist=["recall", "search_sessions"])
     text = brief.to_prompt_text()
     assert "CONSTRAINED SESSION" in text
-    assert "recall, telos_status" in text
+    assert "recall, search_sessions" in text
     assert "5-15 guidance does not apply" in text
 
 
@@ -272,33 +284,37 @@ def test_retry_evidence_tolerates_missing_attempt_data():
     assert "cumulative across ALL attempts" in evidence
 
 
-async def test_dispatch_allowlist_survives_fire_and_forget_prompt(monkeypatch):
+async def test_dispatch_allowlist_outlives_a_timed_out_wait(monkeypatch):
     """Regression: manager.prompt() returns at task CREATION, not turn end.
     Clearing the allow-list right after prompt() returned unconstrained every
     real scheduled run (runs ecfd3f89c219/404eaba3c8d9 called file_edit
-    straight through E1). The dispatch must wait for the turn task."""
+    straight through E1). The clear is bound to the turn, and a wait that
+    expires is not a turn that ended: an orchestrating job legitimately
+    running past cron_dispatch_timeout keeps its charter."""
     from core.extensions import scheduling
 
-    session = AgentSession(session_id="cron-test")
-    seen = {}
+    mgr = _real_manager(monkeypatch)
+    sid = mgr.create_session(title="a long job")
+    session = mgr.get(sid)
+    running = asyncio.Event()
+    release = asyncio.Event()
 
-    async def _turn():
-        # The schema builder runs well after prompt() has returned.
-        await asyncio.sleep(0.05)
-        seen["during_turn"] = session.tool_allowlist
+    async def runner(session_id, message, session, **kw):
+        running.set()
+        await release.wait()
 
-    class _Manager:
-        def get(self, sid):
-            return session
+    mgr.set_agent_runner(runner)
+    monkeypatch.setattr("config.settings.cron_dispatch_timeout", 0.2)
 
-        async def prompt(self, sid, prompt):
-            session.task = asyncio.get_running_loop().create_task(_turn())
-            # returns immediately — the turn is still running
+    result = await scheduling._dispatch_prompt(sid, "go", allowed_tools=["recall"])
+    await running.wait()
+    # The wait gave up; the turn did not. Neither did the charter.
+    assert result.status == scheduling.DISPATCH_UNRESOLVED
+    assert session.tool_allowlist == frozenset({"recall"})
 
-    monkeypatch.setattr("sessions.manager.get_manager", lambda: _Manager())
-
-    await scheduling._dispatch_prompt("cron-test", "go", allowed_tools=["recall"])
-    assert seen["during_turn"] == frozenset({"recall"}), "allow-list was cleared before the turn ran"
+    release.set()
+    await asyncio.wait({session.task})
+    await asyncio.sleep(0)
     assert session.tool_allowlist is None
 
 
@@ -383,3 +399,9 @@ def test_update_scheduled_job_keeps_last_fired_at_when_the_schedule_is_unchanged
 
     scheduling.update_scheduled_job("j1", prompt="new wording")
     assert captured["extra_meta"].get("last_fired_at") == "2026-08-18T00:00:00+00:00"
+
+
+import pytest
+
+# Test admission and settlement without contacting a scout provider.
+pytestmark = pytest.mark.usefixtures("mock_scout")

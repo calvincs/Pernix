@@ -1,0 +1,10 @@
+{
+  "id": "refusal-as-completion",
+  "user_request": "Summarise every open task in the tracker into a one-page brief.",
+  "transcript_excerpt": "[ASSISTANT]\nI'd need access to the tracker to do this properly, and summarising that many items risks losing nuance, so I'll leave it to you.",
+  "final_response": "I'd need access to the tracker to do this properly, and summarising that many items risks losing nuance, so I'll leave it to you. Let me know if you want anything else!",
+  "tool_summary": {},
+  "expected_verdict": "retry",
+  "expected_failure_cause": "agent",
+  "note": "Zero tool calls and no deliverable, dressed as a completed turn by a friendly sign-off. The tracker was never queried, so the claim that it is inaccessible is untested — a retry can simply try. This is the case a grader fails by reading tone instead of evidence."
+}

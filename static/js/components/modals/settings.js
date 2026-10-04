@@ -46,7 +46,7 @@ const LOCKED_NOTE = 'Edit-locked. The settings API rejects changes to this field
 // Which keys those are is already declared, per field, as the `restart` string
 // that renders the badge beside the control. A second hand-maintained list
 // drifted from the badges the moment one was added: every RESTART_TOOLS field
-// (web_search_enabled, candor_enabled, rlm_enabled, telos_enabled, …) wore a
+// (web_search_enabled, rlm_enabled, …) wore a
 // "restart" badge and then saved with a plain "Saved". Derive it instead. (S5)
 const RESTART_EXTRA_KEYS = new Set([
     // List-valued editors with no field entry of their own. The Allowed
@@ -140,6 +140,12 @@ const SECTIONS = [
             { key: 'max_tool_rounds', label: 'Max Tool Rounds', type: 'number' },
             { key: 'scout_enabled', label: 'Scout Enabled', type: 'bool' },
             { key: 'scout_timeout', label: 'Scout Timeout (seconds)', type: 'number' },
+            {
+                key: 'scout_max_rounds',
+                label: 'Scout Rounds',
+                type: 'number',
+                hint: 'Rounds the planner may use before the turn starts. 1 is fastest.',
+            },
             { key: 'forced_followup_enabled', label: 'Forced Follow-up Nudge', type: 'bool' },
             { key: 'forced_followup_max_per_turn', label: 'Max Forced Follow-ups / Turn', type: 'number', min: 0, max: 5 },
         ],
@@ -235,14 +241,14 @@ const SECTIONS = [
     {
         title: 'Background Work (Snooze)',
         tab: 'autonomy',
-        description: 'The master switch for everything the agent does while you are idle: memory maintenance and distillation, dreaming, telos loops, canary sweeps, adaptive edits and embedding sweeps all run inside a snooze cycle. Turning Background Work off stops all of it and is the one control that reliably ends idle-time LLM spend, whatever the individual feature toggles say. Cooldown is how long the machine must be quiet before a cycle may start; the tick interval paces how often the scheduler even looks. The cycle time limit is a hang backstop, not a scheduler — a cycle normally ends when its activity ladder finishes or you start typing; raise it for slow local models.',
+        description: 'The master switch for everything the agent does while you are idle: memory maintenance and distillation, dreaming, canary sweeps, skill proposals and embedding sweeps all run inside a snooze cycle. Turning Background Work off stops all of it and is the one control that reliably ends idle-time LLM spend, whatever the individual feature toggles say. Cooldown is how long the machine must be quiet before a cycle may start; the tick interval paces how often the scheduler even looks. The cycle time limit is a hang backstop, not a scheduler — a cycle normally ends when its activity ladder finishes or you start typing; raise it for slow local models.',
         fields: [
             {
                 key: 'snooze_enabled',
                 label: 'Background Work Enabled',
                 type: 'bool',
                 risk: 'autonomy',
-                hint: 'Off = no idle-time LLM spend at all: memory maintenance, dream, telos, canary, adaptive and embedding sweeps are all skipped.',
+                hint: 'Off = no idle-time LLM spend at all: memory maintenance, dream, canary, refine and embedding sweeps are all skipped.',
             },
             { key: 'snooze_cooldown_minutes', label: 'Idle Cooldown (min)', type: 'number', min: 0 },
             {
@@ -253,17 +259,6 @@ const SECTIONS = [
                 hint: 'One tick is 60s of maintenance loop, so 10 = a check roughly every 10 minutes.',
             },
             { key: 'snooze_max_cycle_seconds', label: 'Cycle Time Limit (seconds)', type: 'number', min: 60 },
-        ],
-    },
-    {
-        title: 'Operational memory (Candor)',
-        tab: 'integrations',
-        term: 'Internal name: Candor. Settings keys are candor_*.',
-        description: 'Calibrated reliability tracking: tool outcomes and reflect verdicts feed an auditable evidence ledger, and scout receives an operational-intel brief flagging degraded tools, discovered conditions, and open questions. Observation capture, snooze maintenance, and the scout brief toggle immediately; the agent-facing tools (predict_reliability, why_reliability, reliability_questions) register at startup, so they appear/disappear after a restart.',
-        fields: [
-            { key: 'candor_enabled', label: 'Candor Enabled', type: 'bool', restart: RESTART_TOOLS },
-            { key: 'candor_scout_brief', label: 'Scout Intel Brief', type: 'bool' },
-            { key: 'candor_max_obs_per_turn', label: 'Max Observations / Turn', type: 'number' },
         ],
     },
     {
@@ -302,7 +297,7 @@ const SECTIONS = [
     {
         title: 'Dream (Introspection)',
         tab: 'autonomy',
-        description: 'Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems, generates typed hypotheses about itself (contradictions, stale lessons, tool patterns), validates them against recorded outcomes, and writes a periodic dream report to workspace/dreams/. Hypotheses influence nothing until validated; replays/day bounds the counterfactual scout-replay spend (0 disables replay). All settings apply immediately.',
+        description: 'Idle-time introspection: during snooze the agent examines its own memory and post-mortems, generates typed hypotheses about itself (contradictions, stale memories, stale lessons), validates them against recorded outcomes, and writes a periodic dream report to workspace/dreams/. Hypotheses influence nothing until validated; replays/day bounds the counterfactual scout-replay spend (0 disables replay). All settings apply immediately.',
         fields: [
             { key: 'dream_enabled', label: 'Dreaming Enabled', type: 'bool' },
             { key: 'dream_hypotheses_per_cycle', label: 'Max Hypotheses / Step', type: 'number' },
@@ -359,166 +354,73 @@ const SECTIONS = [
             { key: 'reflect_deferred_normal', label: 'Defer Grading (Interactive)', type: 'bool' },
             { key: 'reflect_defer_idle_s', label: 'Defer Delay (seconds)', type: 'number' },
             {
+                key: 'reflect_next_turn_grading',
+                label: 'Grade on Your Next Message',
+                type: 'bool',
+                hint: 'A turn whose deferred grade is still pending when you send the next message is graded '
+                    + 'then, with that message as the evidence — a correction or a repeated request reads as a '
+                    + 'miss, moving on reads as a pass. Off, the grade is simply dropped.',
+            },
+            {
                 key: 'reflect_nonpass_confidence_floor',
                 label: 'Non-pass Confidence Floor (0–1 fraction)',
                 type: 'number', min: 0, max: 1, step: 0.05,
                 hint: 'A retry/escalate verdict the grader itself rates below this confidence is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous", and ambiguity should not burn a retry or fire an escalation. Malformed grades stay conservative. 0 disables.',
             },
-            { key: 'post_mortem_retention_days', label: 'Post-mortem retention (days)', type: 'number' },
             {
-                key: 'notification_retention_days',
-                label: 'Notification retention (days)',
-                type: 'number', min: 0, max: 365,
-                hint: 'The bell is a recent-events surface, not an archive. 0 = keep forever (pre-v3.1 behavior).',
+                key: 'grader_holdout_enabled',
+                label: 'Grader Hold-out Run',
+                type: 'bool',
+                hint: 'Runs the reflect grader nightly over the fixtures in data/eval/grader — cases with a known '
+                    + 'right answer that never reach memory or the workspace. Its accuracy is the only check on '
+                    + 'the grader itself, and it shows in the Explorer’s Self-tuning → Trust tab.',
             },
-        ],
-    },
-    {
-        title: 'Evaluation',
-        tab: 'agent',
-        description: 'Feature-level QA against acceptance criteria in the feature registry (data/registry.json). When auto-evaluate is enabled, runs after each task to score registered features. Browser screenshots provide visual verification evidence.',
-        fields: [
-            { key: 'eval_auto', label: 'Auto-Evaluate', type: 'bool' },
-            { key: 'eval_threshold', label: 'Pass Threshold (0–1 fraction)', type: 'number', step: 0.1 },
-            { key: 'eval_max_retries', label: 'Max Retries', type: 'number' },
-            { key: 'eval_browser_verify', label: 'Browser Screenshots', type: 'bool' },
+            { key: 'grader_holdout_schedule', label: 'Grader Hold-out Schedule (cron)', type: 'text' },
+            { key: 'post_mortem_retention_days', label: 'Post-mortem retention (days)', type: 'number' },
         ],
     },
     {
         title: 'Orchestration',
         tab: 'agent',
-        description: 'Controls for multi-worker task decomposition. Max workers limits parallel sub-agents. Stall threshold detects stuck workers. Plan review timeout is how long you have to approve a generated plan before it auto-proceeds.',
+        description: 'Controls for multi-worker task decomposition. Max workers limits parallel sub-agents.',
         fields: [
             { key: 'max_concurrent_workers', label: 'Max Workers', type: 'number' },
-            { key: 'plan_review_timeout', label: 'Plan Review Timeout (seconds)', type: 'number' },
         ],
     },
     {
         title: 'Autonomy',
         tab: 'autonomy',
-        term: 'Internal names: gates, goals, heartbeats, session kernel.',
-        description: 'Long-running autonomous task substrate. Gates: deterministic shell checks Reflect cannot overrule. Goals: persistent objectives with budgets and auto-continuations. Heartbeats: recurring instructions steered into running work. Session kernel: a persistent per-session Python REPL whose variables survive turns and restarts.',
+        term: 'Internal names: gates, goals, session kernel.',
+        description: 'Long-running autonomous task substrate. Gates: deterministic shell checks Reflect cannot overrule. Goals: persistent objectives with budgets and auto-continuations. Session kernel: a persistent per-session Python REPL whose variables survive turns and restarts.',
         fields: [
             { key: 'gates_enabled', label: 'Deterministic Gates', type: 'bool' },
             { key: 'goals_enabled', label: 'Persistent Goals', type: 'bool' },
-            { key: 'heartbeats_enabled', label: 'Heartbeats', type: 'bool' },
             { key: 'session_kernel_enabled', label: 'Session Kernel (REPL)', type: 'bool', risk: 'autonomy', restart: RESTART_TOOLS },
+        ],
+    },
+    {
+        title: 'Skill Self-healing',
+        tab: 'autonomy',
+        description: 'When a skill trips up and the session finds a workaround, refine proposes adding that fix to the skill\'s SKILL.md. With auto-apply on, a proposal applies itself after the wait below if it passes the checks: short, written as skill text (not as a note to an editor), no near-copy of an existing heading, no push past the 5,000-character prompt limit, and at most 3 per skill per month. Every apply keeps a backup under data/skill_backups/, and Roll back in Capabilities → Skills undoes it. A proposal that fails a check waits for you there.',
+        fields: [
+            {
+                key: 'skill_proposal_auto_apply',
+                label: 'Auto-apply Skill Proposals',
+                type: 'bool',
+                risk: 'autonomy',
+                hint: 'Off: every proposal waits for you to click Apply or Reject.',
+            },
+            { key: 'skill_proposal_auto_apply_after_hours', label: 'Wait Before Applying (hours)', type: 'number', min: 0, max: 168 },
+            { key: 'skill_proposal_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number', min: 1, max: 50 },
         ],
     },
     {
         title: 'Canary Suite',
         tab: 'autonomy',
-        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline. Change-driven: canaries run when something they cover changes (an adaptive batch, a skill edit, a model swap, a deploy), plus a small nightly heartbeat that keeps history warm. The Adaptive Layer\'s tripwire reads the post-batch results per task. Canary sessions are isolated and tool-allowlisted: computation and reads only.',
+        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline. Change-driven: canaries run after a deploy or a model change, or when you press Run — never on a schedule. Canary sessions are isolated and tool-allowlisted: computation and reads only.',
         fields: [
             { key: 'canary_enabled', label: 'Canary Suite Enabled', type: 'bool', restart: RESTART_TOOLS },
-            { key: 'canary_schedule', label: 'Heartbeat Schedule (cron)', type: 'text' },
-            {
-                key: 'canary_heartbeat_per_night',
-                label: 'Heartbeat Canaries per Night',
-                type: 'number', min: 1, max: 10,
-                hint: 'How many least-recently-run active canaries each scheduled heartbeat runs. Parked canaries sit out.',
-            },
-            {
-                key: 'canary_post_batch_max',
-                label: 'Post-batch Probe Size',
-                type: 'number', min: 1, max: 12,
-                hint: 'Cap on canaries per post-batch probe: the ones covering the batch\'s edit kinds first, sentinels riding along.',
-            },
             { key: 'canary_retention_days', label: 'Run Retention (days)', type: 'number', min: 1, max: 365 },
-            {
-                key: 'canary_baseline_runs',
-                label: 'Green Precondition Window',
-                type: 'number', min: 1, max: 20,
-                hint: 'A canary may testify against a batch only when this many trailing runs before the apply were all green.',
-            },
-            { key: 'canary_regression_delta', label: 'Passive Drift Delta (0–1 fraction)', type: 'number', step: 0.05 },
-            {
-                key: 'canary_park_after_passes',
-                label: 'Park After Consecutive Passes',
-                type: 'number', min: 3, max: 200,
-                hint: 'Long-green canaries are parked: off the heartbeat, still in the suite, auto-unparked by any red run.',
-            },
-            {
-                key: 'canary_auto_admit',
-                label: 'Auto-admit New Canaries',
-                type: 'bool',
-                risk: 'autonomy',
-                hint: 'Lets the agent write new canary specs into data/canaries/ without asking, once their gate '
-                    + 'commands pass an allowlist proof and vetting runs. Off routes every new canary through you.',
-            },
-            {
-                key: 'canary_auto_maintain',
-                label: 'Auto-maintain Suite',
-                type: 'bool',
-                risk: 'autonomy',
-                hint: 'The idle sweep promotes vetted canaries, tags flapping ones flaky, parks long-green ones, '
-                    + 'syncs skill verify blocks, and retires exhausted probes. A canary whose latest run failed is '
-                    + 'never auto-moved — except that a red run un-parks.',
-            },
-        ],
-    },
-    {
-        title: 'Adaptive Layer',
-        tab: 'autonomy',
-        description: 'Governed machine-editable policy: routing hints and prompt notes the agent may auto-apply at idle (with full history and one-click rollback), and policies/worker specs that always wait for your approval. The canary tripwire flags any batch that makes the agent measurably worse. Run the canary suite for at least a week before enabling auto-apply.',
-        fields: [
-            { key: 'adaptive_enabled', label: 'Adaptive Layer Enabled', type: 'bool', risk: 'autonomy' },
-            { key: 'adaptive_auto_apply', label: 'Auto-apply Low-risk Edits', type: 'bool', risk: 'autonomy' },
-            { key: 'adaptive_auto_rollback', label: 'Auto-rollback on Canary Regression', type: 'bool', risk: 'autonomy' },
-            { key: 'adaptive_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number' },
-            { key: 'adaptive_max_entries_per_kind', label: 'Max Entries / Kind', type: 'number' },
-            { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (hours)', type: 'number' },
-            {
-                key: 'adaptive_usage_retire_days',
-                label: 'Retire Unused After (days)',
-                type: 'number', min: 0, max: 365,
-                hint: 'Entries with zero recorded uses (scout/reflect citations) over this many instrumented days are retired — journaled, rollbackable. 0 disables.',
-            },
-            {
-                key: 'adaptive_prompt_note_ttl_days',
-                label: 'Prompt-note TTL (days)',
-                type: 'number', min: 0, max: 365,
-                hint: 'Prompt notes have no producer-side retirement; this TTL is their backstop. 0 = keep forever.',
-            },
-            {
-                key: 'adaptive_harmful_retire_min_uses',
-                label: 'Failure-dominated Retire — Min Outcomes',
-                type: 'number', min: 0, max: 100,
-                hint: 'An entry with at least this many attributed outcomes (successes + failures from synthesis) whose success share falls below the threshold retires even though it is used. 0 disables.',
-            },
-            {
-                key: 'adaptive_harmful_retire_max_success',
-                label: 'Failure-dominated Retire — Success Floor (0–1 fraction)',
-                type: 'number', min: 0, max: 1, step: 0.05,
-                hint: 'Success share below this = failure-dominated. Journaled soft-delete, one-click rollback, candor/user sources exempt.',
-            },
-            {
-                key: 'adaptive_suspect_ttl_days',
-                label: 'Passive Suspect-flag TTL (days)',
-                type: 'number', min: 0, max: 90,
-                hint: 'A suspect flag from the passive post-mortem signal alone can never self-clear; it auto-clears after this many days. Canary-confirmed flags are exempt. 0 = flags wait for your dismiss.',
-            },
-            {
-                key: 'adaptive_agent_notes_enabled',
-                label: 'Agent Self-notes (adaptive_note tool)',
-                type: 'bool',
-                risk: 'autonomy',
-                restart: RESTART_TOOLS,
-                hint: 'Lets the live agent mint prompt notes and routing hints the moment it learns something — content lint applies, 2/day, normal pipeline + tripwire, never policy.',
-            },
-        ],
-    },
-    {
-        title: 'Goals (Telos)',
-        tab: 'autonomy',
-        term: 'Internal name: Telos \u2014 the teleological layer. Settings keys are telos_*.',
-        description: 'The operational question loop (carved down in v3.1): turn anomalies the rest of the system cannot explain mint questions, the SOUP generates falsifiable hypotheses at idle, supported claims can become scout routing hints, and a weekly entropy control keeps exploration from going stale. State lives in data/telos/ as markdown. Enabling the agent tools needs a restart; everything else applies immediately.',
-        fields: [
-            { key: 'telos_enabled', label: 'Telos Enabled', type: 'bool', restart: RESTART_TOOLS },
-            { key: 'telos_schedule', label: 'Slow-loop Schedule (cron)', type: 'text' },
-            { key: 'telos_serendipity_budget', label: 'Serendipity Budget (0–1 fraction)', type: 'number', step: 0.05 },
-            { key: 'telos_eig_floor', label: 'Gate EIG Floor (0–1 fraction)', type: 'number', step: 0.05 },
-            { key: 'telos_hypotheses_per_question', label: 'Hypotheses / Question', type: 'number' },
         ],
     },
     {
@@ -582,13 +484,48 @@ const SECTIONS = [
             { key: 'notify_webhook_timeout', label: 'Webhook Timeout (seconds)', type: 'number', min: 1, max: 60 },
         ],
     },
+    {
+        // What each kind of notice does. The per-area rows are not schema
+        // fields (they are entries of one dict-valued setting), so the section
+        // builds them itself via `extra` — see buildNotifyTierRows().
+        title: 'Notification tiers',
+        name: 'notify-tiers',
+        tab: 'integrations',
+        term: 'Settings keys: notify_tiers_enabled, notify_tier_overrides.',
+        description: 'Every notice belongs to a category with one tier. Interrupt: a badge on the bell plus a phone '
+            + 'push. Bell: a quiet item with a dot, never a buzz. Log only: the activity log, no badge. Off: not '
+            + 'recorded at all. Default needs no tuning; pick a tier for an area to move all of its notices there. '
+            + 'A per-category override in data/settings.json still beats the area row.',
+        fields: [
+            {
+                key: 'notify_tiers_enabled',
+                label: 'Tiered notifications',
+                type: 'bool',
+                hint: 'Off = every notice goes back to the old bell with its old urgency.',
+            },
+            {
+                key: 'push_urgency_floor',
+                label: 'Push floor',
+                type: 'select',
+                options: ['low', 'normal', 'high', 'urgent'],
+                hint: 'Only notifications at or above this urgency buzz a phone. Agent questions always push; the bell still shows everything.',
+            },
+            {
+                key: 'notification_retention_days',
+                label: 'Notification retention (days)',
+                type: 'number', min: 0, max: 365,
+                hint: 'The bell is a recent-events surface, not an archive. 0 = keep forever (pre-v3.1 behavior).',
+            },
+        ],
+        extra: settings => buildNotifyTierRows(settings),
+    },
 ];
 
 const MODEL_SELECT_FIELDS = [
     // Three chat-model roles (2026-08 consolidation), any provider:
     // Primary = agent turns + quality-critical calls (compaction/reflect/eval);
     // Background = fast/offline tier (scout, titles, distill, snooze, dream,
-    // telos, RLM sub-calls); Backup = used when Primary or Background fail.
+    // RLM sub-calls); Backup = used when Primary or Background fail.
     { key: 'llm_model', label: 'Primary Model', type: 'model-select' },
     { key: 'background_model', label: 'Background Model (scout/titles/idle work; empty = Primary)', type: 'model-select', allowEmpty: true },
     { key: 'fallback_model', label: 'Backup Model (used when Primary or Background fail)', type: 'model-select', allowEmpty: true },
@@ -1044,6 +981,27 @@ function _schemaFor(key) {
     return Object.prototype.hasOwnProperty.call(_schema, key) ? _schema[key] : null;
 }
 
+// The three field types the schema deliberately does NOT publish: an API key
+// and a write-only path are redacted by the server, so their absence says
+// nothing about whether the setting exists.
+const _UNPUBLISHED_TYPES = new Set(['apikey', 'certpath', 'writeonly']);
+
+/**
+ * Does this server actually have the setting behind this row?
+ *
+ * A control for a key the server does not know cannot be saved — the value
+ * is dropped — and, worse, it opens the modal permanently dirty: an unset
+ * key is `undefined`, an unticked box is `false`, and collectChanges() reads
+ * that difference as an edit, so Escape asks whether to discard changes
+ * nobody made. Rows for settings that arrive with a later release simply do
+ * not render until the server has them, and then they appear on their own.
+ */
+function _serverKnows(field) {
+    if (_UNPUBLISHED_TYPES.has(field.type)) return true;
+    if (_schemaFor(field.key)) return true;
+    return Object.prototype.hasOwnProperty.call(_original, field.key);
+}
+
 /** The bound to enforce: the server's when it has one, else the field's own. */
 function _boundsFor(field) {
     const rec = _schemaFor(field.key);
@@ -1321,6 +1279,12 @@ function _revertField(key) {
     } else if (key === 'cors_origins') {
         const editor = document.getElementById('origins-editor');
         if (editor) editor.replaceWith(_buildOriginsEditor(_original.cors_origins || []));
+    } else if (key === 'notify_tier_overrides') {
+        const saved = _original.notify_tier_overrides || {};
+        for (const area of Object.keys(_notifyAreas)) {
+            const sel = document.getElementById(`setting-notify-tier-${area}`);
+            if (sel) sel.value = saved[area] || '';
+        }
     }
 }
 
@@ -1381,6 +1345,12 @@ function collectChanges() {
     // Include CORS origins if changed
     if (JSON.stringify(_corsOrigins) !== JSON.stringify(_original.cors_origins || [])) {
         changes.cors_origins = _corsOrigins;
+    }
+
+    // Notification tier rows: the whole dict is the setting.
+    const tiers = _collectTierOverrides();
+    if (tiers && _stableJson(tiers) !== _stableJson(_cleanTiers(_original.notify_tier_overrides))) {
+        changes.notify_tier_overrides = tiers;
     }
 
     return changes;
@@ -2239,6 +2209,100 @@ function buildThisBrowserSection() {
         row,
         buildEnterSendsRow(),
     ]);
+}
+
+// ---------------------------------------------------------------------------
+// Notification tiers, per area
+//
+// notify_tier_overrides is one dict-valued setting: {area or category: tier}.
+// Each area gets a row of its own, and "Default" simply leaves the area out.
+// Category-level keys (a full name like "jobs.test_failed") have no row: they are
+// carried through a save untouched, so hand-tuning in settings.json survives
+// the modal. The default tiers come from the server (GET /api/settings
+// notify_areas, built from the registry); the labels are UI copy and live here.
+// ---------------------------------------------------------------------------
+
+const NOTIFY_AREA_LABELS = {
+    agent: ['Agent messages', 'The agent telling you something with notify_user'],
+    external: ['External messages', 'Messages from outside services and integrations'],
+    sessions: ['Sessions', 'A turn that needs you, timed out, ran out of budget or errored'],
+    jobs: ['Scheduled jobs', 'Job failures, test runs, and jobs left uncertain by a restart'],
+    canary: ['Canary suite', 'Sweep results after a deploy, a model change or Run all'],
+    skills: ['Skills', 'Unsafe verifications, rollbacks and auto-applied proposals'],
+    review: ['Waiting for review', 'The one "N skill proposals wait for your decision" item'],
+    dream: ['Dreaming', 'Corrections applied and stalled queues'],
+    spaces: ['Spaces', 'New space suggestions'],
+    system: ['System health', 'Model fallback, embeddings, MCP, search keys, quarantined tools'],
+};
+
+const NOTIFY_TIER_OPTIONS = [
+    { value: '', label: 'Default' },
+    { value: 'interrupt', label: 'Interrupt (badge + phone)' },
+    { value: 'bell', label: 'Bell (quiet)' },
+    { value: 'log', label: 'Log only' },
+    { value: 'drop', label: 'Off (don\u2019t record)' },
+];
+
+const NOTIFY_TIER_NAMES = { interrupt: 'interrupt', bell: 'bell', log: 'log only', drop: 'off' };
+
+let _notifyAreas = {};  // area -> {default_tiers, categories}, from GET /api/settings
+
+function _stableJson(obj) {
+    return JSON.stringify(Object.keys(obj || {}).sort().map(k => [k, obj[k]]));
+}
+
+// Only well-formed entries count: a hand-edited settings.json holding a
+// tier this client cannot show must not open the modal already dirty.
+function _cleanTiers(obj) {
+    return Object.fromEntries(Object.entries(obj || {}).filter(([, v]) => v in NOTIFY_TIER_NAMES));
+}
+
+function _collectTierOverrides() {
+    const areas = Object.keys(_notifyAreas);
+    if (!areas.length || !document.getElementById(`setting-notify-tier-${areas[0]}`)) return null;
+    const out = {};
+    // Category-level overrides have no row; keep them as they are.
+    for (const [k, v] of Object.entries(_cleanTiers(_original.notify_tier_overrides))) {
+        if (!(k in _notifyAreas)) out[k] = v;
+    }
+    for (const area of areas) {
+        const sel = document.getElementById(`setting-notify-tier-${area}`);
+        if (sel && sel.value) out[area] = sel.value;
+    }
+    return out;
+}
+
+function buildNotifyTierRows(settings) {
+    _notifyAreas = settings.notify_areas || {};
+    const areas = Object.keys(_notifyAreas);
+    // An older server publishes no registry: no rows rather than rows that
+    // cannot say what Default means.
+    if (!areas.length || !('notify_tier_overrides' in settings)) return null;
+    const saved = settings.notify_tier_overrides || {};
+
+    const rows = areas.map(area => {
+        const [label, blurb] = NOTIFY_AREA_LABELS[area] || [area, ''];
+        const info = _notifyAreas[area] || {};
+        const defaults = (info.default_tiers || []).map(t => NOTIFY_TIER_NAMES[t] || t).join(' / ');
+        const cats = (info.categories || []).filter(c => c in saved);
+        let hint = `${blurb ? blurb + '. ' : ''}Default: ${defaults || 'bell'}.`;
+        if (cats.length) {
+            hint += ` ${cats.length} categor${cats.length === 1 ? 'y here has' : 'ies here have'} a `
+                + 'per-category override in settings.json, which wins over this row.';
+        }
+        const id = `setting-notify-tier-${area}`;
+        const select = el('select', { id },
+            NOTIFY_TIER_OPTIONS.map(o => el('option', { value: o.value }, [text(o.label)])));
+        select.value = saved[area] || '';
+        return el('div', { class: 'setting-row', id: `row-notify-tier-${area}`, 'data-key': `notify_tier_overrides ${area}` }, [
+            el('div', { class: 'setting-label-cell' }, [
+                el('span', { class: 'setting-label-line' }, [el('label', { for: id }, [text(label)])]),
+                el('span', { class: 'setting-hint' }, [text(hint)]),
+            ]),
+            select,
+        ]);
+    });
+    return el('div', { class: 'settings-notify-tiers' }, rows);
 }
 
 function buildNotificationsSection() {
@@ -3510,7 +3574,11 @@ function _activateSettingsTab(key) {
 }
 
 function _buildSettingsSection(section, settings) {
-    const fields = section.fields.map(f => buildField(f, settings[f.key]));
+    const known = section.fields.filter(_serverKnows);
+    // A section whose every control belongs to a release this server does not
+    // have yet is a heading over nothing. Drop it whole.
+    if (!known.length) return null;
+    const fields = known.map(f => buildField(f, settings[f.key]));
     const heading = [text(section.title)];
     if (section.description) heading.push(buildHelpIcon(section.description));
     // `data-section` is a handle for a tab that has to place one of its
@@ -3518,15 +3586,19 @@ function _buildSettingsSection(section, settings) {
     // would tie the layout to a label the next rename breaks.
     return el('div', { class: 'settings-section', ...(section.name ? { 'data-section': section.name } : {}) }, [
         // `term` carries the internal name of a section the UI renamed for
-        // humans, so searching for "Telos" or "Candor" still lands. (N9)
+        // humans, so searching for "Canary" or "Adaptive" still lands. (N9)
         el('h3', section.term ? { title: section.term } : {}, heading),
         ...(section.description ? [buildSectionDesc(section.description)] : []),
         ...fields,
+        ...(section.extra ? [section.extra(settings)].filter(Boolean) : []),
     ]);
 }
 
 function buildTabs(settings) {
-    const sectionsFor = key => SECTIONS.filter(s => s.tab === key).map(s => _buildSettingsSection(s, settings));
+    const sectionsFor = key => SECTIONS
+        .filter(s => s.tab === key)
+        .map(s => _buildSettingsSection(s, settings))
+        .filter(Boolean);
 
     // The Security content is built async; it lands in Tools & safety, which
     // is where the rest of the sandbox lives.

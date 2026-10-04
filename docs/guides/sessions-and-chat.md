@@ -46,6 +46,25 @@ See [../api.md](../api.md) for full details.
 
 ---
 
+## The composer
+
+The box at the bottom of a chat is a card rather than a one-line bar: **two lines of text at rest**, growing as you type until it reaches 40% of the window height and then scrolling inside itself. The writing area spans the whole chat column — wider than the transcript's own measure — and the controls sit in a row beneath it instead of sharing the text line, so adding a control never narrows the place you write.
+
+Left to right that row holds **Stop** (red, and only while a turn is running), **attach**, **expand**, the microphone (only once voice input is configured), then the character counter, the key-binding hint and **Send**.
+
+- **The hint states the binding and is also the switch.** It reads *Enter to send · Shift+Enter new line*; click it and it becomes *Ctrl+Enter to send · Enter new line*. That is the same preference as **Settings → Providers & models → This browser → Enter sends the message** — flip it in either place and the other follows. Ctrl/Cmd+Enter sends whatever the setting says, and on a phone the on-screen keyboard's return key is labelled to match. The hint itself is a desktop affordance: on touch, and under 400px, the binding lives in the tooltip and the accessible description instead.
+- **Send is off until there is something to send** — text, or an attachment, or both.
+- **Typing while the agent works** puts your message into the turn already running. The card's border takes the accent colour and the placeholder changes to say where the text is going; once it is away, a chip above the composer reads *Sent to the running turn · "…"* until the agent picks it up.
+- **A counter appears at 20,000 characters** and turns amber at 200,000. The hard limit is still a million, rejected before anything is uploaded.
+- **A paste over 50,000 characters** offers to become an attachment instead. *Attach as a file* files it as `pasted-<date>.txt` and takes it back out of the message; *Keep it here* leaves it where you pasted it. Either way the model reads an attached file whole, and the message stays short.
+- **Expand** opens the same text in a large editor — a modal on a desktop, a full-screen sheet on a phone — with the same bindings and the same draft. The button is only there when that editor is available.
+
+On a phone or tablet the targets are 44px and the text is 16px (anything smaller and iOS zooms the page the moment you focus it). An empty composer you have not tapped yet folds its control row back onto the text line — attach, text, send, one row — and unfolds the moment it has focus or a character in it, because a phone with the keyboard up has roughly 260px of height to spend and a composer should not take half of it before you have typed anything.
+
+Drafts are kept per session in your browser and survive a reload or a switch, and **↑** in an empty composer walks back through what you have sent before.
+
+---
+
 ## The sidebar: session types, filtering, and finding things
 
 Not every session in the sidebar is a chat you started. Each carries a colored dot for its type, and the legend at the bottom of the sidebar shows the counts:
@@ -141,7 +160,7 @@ Three triggers fire compaction:
 
 You can intervene mid-turn at four granularities:
 
-- **Cancel** — stops the entire turn. Ends in `CANCELLING → IDLE_READY` typically within seconds. The cancelled turn's tool results so far are kept in history, but no further work happens. In the UI the send button turns into a **Stop** button for the length of a turn; `/cancel` in the composer does the same thing. Cancelling is cooperative — the agent finishes the step it is on — so the button greys out and the status bar reads "Stopping…" until the server confirms.
+- **Cancel** — stops the entire turn. Ends in `CANCELLING → IDLE_READY` typically within seconds. The cancelled turn's tool results so far are kept in history, but no further work happens. In the UI a red **Stop** button appears at the left of the composer's control row for the length of a turn — its own control, not the send button wearing a different icon, so what is under your cursor never changes meaning mid-turn; `/cancel` in the composer does the same thing. Cancelling is cooperative — the agent finishes the step it is on — so Stop greys out and the status bar reads "Stopping…" until the server confirms.
 - **Pause the session** — the pause button appears in the status bar while a turn is running and takes effect at the next round boundary; mid-tool-call work is not interrupted. The same button resumes.
 - **Pause a worker** — if the agent has spawned workers (sub-agents), you can pause individual ones at the next round boundary. The worker session enters `PAUSE_REQUESTED → PAUSED`; the parent is untouched. Resume later when ready. See [workers.md](workers.md).
 - **Don't intervene; just wait** — most "stuck" sessions are reclaimed by the reaper within minutes. See [../faq.md#my-session-is-stuck-in-processing-what-do-i-do](../faq.md#my-session-is-stuck-in-processing-what-do-i-do).
@@ -171,9 +190,19 @@ Every assistant reply also carries its own small chip — `qwen3-27b · 4.2s` �
 
 ---
 
+## Rating an answer
+
+Every assistant reply can be marked **Helpful** or **Not helpful**. On a mouse the two thumbs sit in the reply's hover toolbar, next to *Copy message*; on touch that toolbar collapses into one `⋯` whose sheet holds **Copy message**, **Helpful** and **Not helpful**. Pressing the thumb that is already set removes the rating — the same button is the undo — and a thumbs-down then offers one optional line about what went wrong, which you can skip with Escape or the **Skip** button. The rating is saved either way, before the note is asked for.
+
+It is worth doing, because a rating is the only thing in the loop that is not the model's opinion of itself. Reflect's own verdict on a turn is a grade written by a model about a model; a thumbs outranks it, and outranks what Pernix reads into your next message, when the turn's outcome is recorded. That outcome is what the tool, skill and model counters behind the agent's planning are built from. The **Explorer → Self-tuning → Trust** tab reports how often the two agree.
+
+Ratings are per message and stored with the session. They are never asked for on your own messages, on a reply still streaming (it has no stored message id yet — reopen the session and it can be rated), or in a self-check (canary) or worker session, whose transcripts are deliberately kept out of the learning loop.
+
+---
+
 ## Backpressure and the message queue
 
-A session is single-threaded — only one turn runs at a time. If you send messages while one is processing, they queue in `pending_messages`. The cap is `max_pending_messages` (default 10).
+A session is single-threaded — only one turn runs at a time. If you send messages while one is processing, they queue in `pending_messages`. The cap is `max_pending_messages` (default 10). In the UI a queued message keeps a chip above the composer until the agent reaches it, and the bubble itself carries a `×` that unqueues it while it is still waiting.
 
 If the queue fills, further submissions get rejected immediately with a `session.queue_full` SSE event. This is intentional — it prevents a runaway loop of submissions from piling up indefinitely. Adjust the cap if you have a use case that genuinely needs more headroom.
 
@@ -183,4 +212,4 @@ If the queue fills, further submissions get rejected immediately with a `session
 
 Some tools require human input. The most common is `ask_user`: the agent describes a question or a proposed dangerous action; the session enters `AWAITING_USER` and stops consuming LLM time. As soon as you answer (in the UI or via `POST /api/questions/{id}/answer`), a new turn begins from Scout.
 
-The `ask_user` flow is what gates dangerous tools — see [../faq.md](../faq.md#why-does-the-agent-ask-me-to-confirm-things-like-web-searches-or-creating-a-skill).
+The `ask_user` flow is what gates dangerous tools — see [../faq.md](../faq.md#why-does-the-agent-ask-me-to-confirm-things-like-web-searches).

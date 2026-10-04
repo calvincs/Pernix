@@ -91,9 +91,6 @@ TOOL_COOCCURRENCE: dict[str, list[str]] = {
     # tools needed to stage sources, but everyday file_read use must not drag
     # the (enabled-only) rlm_process schema into every session's active set.
     "rlm_process": ["file_read", "file_write", "glob"],
-    "add_feature": ["list_features", "mark_feature_passed"],
-    "evaluate": ["list_features", "add_feature", "browse_web"],
-    "create_tool": ["update_tool", "list_custom_tools"],
     "schedule_job": ["list_scheduled_jobs", "remove_scheduled_job", "set_job_state", "update_scheduled_job"],
     "set_job_state": ["list_scheduled_jobs", "schedule_job"],
     "update_scheduled_job": ["list_scheduled_jobs", "schedule_job"],
@@ -140,7 +137,7 @@ class ToolDef:
     # everywhere. Memory-write tools add "canary" so synthetic runs can read
     # memory but never mutate it.
     denied_session_types: set[str] = field(default_factory=set)
-    source: str = "builtin"  # builtin | extension | custom
+    source: str = "builtin"  # builtin | extension | mcp
     safety_level: str = "safe"  # safe | caution | dangerous
     # Long-poll tools (await_workers, rlm_process) block their thread for up
     # to 30-60 minutes waiting on OTHER work. They run on a dedicated executor
@@ -353,7 +350,7 @@ class ToolIndex:
 
 
 class ToolRegistry:
-    """Central registry for all tools (built-in, extension, custom)."""
+    """Central registry for all tools (built-in, extension, MCP)."""
 
     def __init__(self):
         self._tools: dict[str, ToolDef] = {}
@@ -382,8 +379,7 @@ class ToolRegistry:
         """Register a tool.
 
         safety_level: "safe" (read-only), "caution" (write/network/spawn),
-                      "dangerous" (arbitrary execution). Defaults to "caution"
-                      for custom tools, "safe" for builtins.
+                      "dangerous" (arbitrary execution). Defaults to "safe".
         long_poll:    True for tools that block their thread waiting on other
                       sessions' work — they run on a dedicated executor.
         max_timeout:  Ceiling for a caller-supplied `timeout` argument. Required
@@ -391,7 +387,7 @@ class ToolRegistry:
                       executor caps the call at `timeout` regardless.
         """
         if safety_level is None:
-            safety_level = "caution" if source == "custom" else "safe"
+            safety_level = "safe"
         self._tools[name] = ToolDef(
             name=name,
             description=description,
