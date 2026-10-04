@@ -104,7 +104,10 @@
 
   <div class="hero-inner">
     <div class="hero-copy">
-      <p class="hero-category reveal">A self-hosted AI workspace</p>
+      <p class="hero-category reveal">A self-hosted AI workspace · 3.2 preview</p>
+      <p class="release-notice">Preview of <code>next-3.2-testing</code>, preparing for main.
+        <a href="#release">What changed in 3.2</a> ·
+        <a href="https://github.com/calvincs/Pernix/tree/main">Current main branch</a>.</p>
       <h1 class="hero-title reveal">
         <span class="ht-line">Your model.</span>
         <span class="ht-line">Your memory.</span>
@@ -127,7 +130,7 @@
           <span class="install-label">clone &middot; install &middot; run</span>
           <button class="copy-btn" type="button" id="copy-install">copy</button>
         </div>
-        <pre class="install-body" id="install-body"><span class="il"><span class="p">$</span> git clone https://github.com/calvincs/Pernix.git &amp;&amp; cd Pernix</span>
+        <pre class="install-body" id="install-body"><span class="il"><span class="p">$</span> git clone --branch next-3.2-testing https://github.com/calvincs/Pernix.git &amp;&amp; cd Pernix</span>
 <span class="il"><span class="p">$</span> python3 -m venv .venv &amp;&amp; . .venv/bin/activate</span>
 <span class="il"><span class="p">$</span> pip install -r requirements.txt &amp;&amp; python run.py</span></pre>
       </div>
@@ -217,7 +220,7 @@
 <section class="night" id="overnight">
   <p class="section-label reveal">The night shift</p>
   <h2 class="section-title reveal">Work can continue <em>while you're away</em>.</h2>
-  <p class="section-sub reveal">An illustrative timeline, not a captured run. It combines a configured schedule, a delegated task, idle memory maintenance, and optional Canary checks and push notifications. The server and its model providers must remain available.</p>
+  <p class="section-sub reveal">An illustrative timeline, not a captured run. It combines a configured schedule, a delegated task, idle memory maintenance, and optional Dream review and push notifications. The server and its model providers must remain available.</p>
 
   <ol class="ledger">
     <li class="led is-you reveal">
@@ -240,8 +243,8 @@
     </li>
     <li class="led reveal">
       <span class="led-t">03:00</span><span class="led-n" aria-hidden="true"></span>
-      <span class="led-tag">canary</span>
-      <span class="led-x">nightly heartbeat &mdash; 2 / 2 passed</span>
+      <span class="led-tag">snooze</span>
+      <span class="led-x">split batch complete &mdash; later maintenance continues</span>
     </li>
     <li class="led reveal">
       <span class="led-t">05:30</span><span class="led-n" aria-hidden="true"></span>
@@ -427,13 +430,13 @@
           <span class="av-ok">exit 0</span>
         </div>
         <div class="av-row">
-          <span class="av-k">beat</span>
+          <span class="av-k">work</span>
           <span class="av-hb" id="av-hb" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
           <span class="av-v">round boundary</span>
         </div>
       </div>
-      <p class="tile-body">Give eligible long-running work a persistent goal, a budget, and a continuation allowance. Gates run explicit shell checks, such as tests, instead of relying only on a model's judgment. Heartbeats can steer running work at round boundaries. These features are opt-in and bounded; a passing check establishes only what it tests.</p>
-      <p class="tile-tools">goal_create · add_gate · set_heartbeat · evaluate</p>
+      <p class="tile-body">Give eligible long-running work a persistent goal, a budget, and a continuation allowance. Gates run explicit shell checks, such as tests, instead of relying only on a model's judgment. New user instructions take priority over idle maintenance. These features are opt-in and bounded; a passing check establishes only what it tests.</p>
+      <p class="tile-tools">goal_create · add_gate · schedule_job</p>
     </article>
 
     <article class="tile reveal">
@@ -521,7 +524,7 @@
       <li>images · audio · pdf</li><li>PWA + web push</li><li>voice input</li>
       <li>light theme</li><li>screen-reader floor</li><li>session search</li>
       <li>tool safety gate</li><li>RLM (opt-in)</li><li>reliability ledger (opt-in)</li>
-      <li>dreams (opt-in)</li><li>canary suite (opt-in)</li><li>adaptive policy (opt-in)</li><li>archive &amp; storage</li>
+      <li>dreams (opt-in)</li><li>canary suite (opt-in)</li><li>feedback &amp; Trust</li><li>archive &amp; storage</li>
     </ul>
   </div>
 
@@ -559,27 +562,27 @@
 
 <section class="learning" id="learning">
   <p class="section-label reveal">Experience that carries forward</p>
-  <h2 class="section-title reveal">Remember. Review. <em>Adapt with care.</em></h2>
-  <p class="section-sub reveal">Pernix can carry more than facts forward. It records outcomes, reviews substantive work, and uses your feedback to assess reusable guidance. Optional adaptation extends that cycle into changes you can inspect. The aim is learning from experience, not simply accumulating chat history.</p>
+  <h2 class="section-title reveal">Remember. Review. <em>Improve with evidence.</em></h2>
+  <p class="section-sub reveal">Pernix records outcomes, reviews substantive work, and carries reusable facts and lessons into later sessions. Your feedback can correct a model grade. Skill proposals turn useful workarounds into editable instructions, with checks and exact backups before application.</p>
   <ol class="experience-loop reveal" aria-label="How experience can inform future work">
     <li><span>01</span><strong>Intent</strong><p>You define the task and what a useful result looks like.</p></li>
     <li><span>02</span><strong>Action</strong><p>The agent uses tools, files, and workers to attempt it.</p></li>
     <li><span>03</span><strong>Outcome</strong><p>Results and command output record what actually happened.</p></li>
     <li><span>04</span><strong>Review</strong><p>Checks, model review, and your feedback provide different signals.</p></li>
     <li><span>05</span><strong>Memory</strong><p>Useful findings and corrective lessons can be retained.</p></li>
-    <li><span>06</span><strong>Adaptation</strong><p>Optional guidance changes can influence later work.</p></li>
+    <li><span>06</span><strong>Skills</strong><p>Checked proposals can improve a reusable procedure.</p></li>
   </ol>
   <div class="vow-list">
     <article class="vow reveal"><span class="vow-num">I</span><h3>Remember</h3><p>Extract reusable facts and lessons from substantive conversations. Retrieve them later, inspect their sources, and correct or remove entries. This changes available context, not the model's weights.</p></article>
     <article class="vow reveal"><span class="vow-num">II</span><h3>Review</h3><p>Ordinary chat reviews run in the background by default, without automatically retrying your answer. Thumbs-up or thumbs-down feedback can correct the outcome signals used to assess guidance. Worker and scheduled runs can use bounded retries.</p></article>
-    <article class="vow reveal"><span class="vow-num">III</span><h3>Adapt</h3><p>Optional experimental systems can propose or apply reusable instructions and routing guidance. Canary checks look for covered regressions; optional trials compare outcomes with and without new prompt guidance. Inconclusive results are not proof of improvement.</p></article>
+    <article class="vow reveal"><span class="vow-num">III</span><h3>Improve skills</h3><p>Skill self-healing is on by default, with a waiting period, size and confidence checks, and per-skill limits. Exact backups support rollback while protecting newer edits. Turn auto-apply off to review every proposal yourself; automatic canary-based rollback is retired.</p></article>
   </div>
   <div class="learning-proof reveal">
     <h3>Inspect the signal, not just the activity.</h3>
-    <p>The <strong>Trust view</strong> shows whether model grades agree with your feedback, where outcome signals came from, and what evidence supports adaptive guidance. It also surfaces trial results and checks for memory leaking into self-tests. These help you question the learning process; they do not certify its answers or prove that every change improves quality.</p>
-    <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/internals/canary-and-adaptive.md" target="_blank" rel="noopener">Read the experimental learning controls &rarr;</a>
+    <p>The <strong>Trust view</strong> shows agreement with your feedback, outcome sources, self-check contamination, and grader hold-out results. Whole-suite success and grading completion sit alongside accuracy on graded cases, so an ungradable case stays visible. Factual corrections must cite matching tool results; unsupported corrections are withheld. These checks do not guarantee that a model judgment is correct.</p>
+    <a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/internals/canary.md" target="_blank" rel="noopener">Read about self-checks and Trust &rarr;</a>
   </div>
-  <p class="section-note reveal">Candor, Dream, Canary, Adaptive, Telos, and trials require opt-in. Once enabled, some edits can apply automatically or after a veto window; manual approval and rollback depend on configuration. Skill-instruction updates have separate settings. Not every change is trial-tested or requires your explicit approval.</p>
+  <p class="section-note reveal">Dream and the canary suite remain opt-in. The four-task suite runs after a deploy, after a model swap, or on demand. In 3.2, adaptive policies and trials, Candor, Telos and heartbeat tools are retired. Goals, gates, cron schedules and editable Markdown skills remain.</p>
 </section>
 
 <!-- Details keep implementation material available without dominating the product story. -->
@@ -614,7 +617,7 @@
       <li class="phase reveal" data-phase="2" tabindex="0" data-log="scout.done · 3 tools &nbsp;·&nbsp; 840ms &nbsp;·&nbsp; skill: morning-brief">
         <div class="phase-node"><span>02</span></div>
         <h4>Scout</h4>
-        <p>Scout plans the approach, recalls relevant context, selects tools, and loads useful skills. It uses Background, or Primary when no separate Background model is set.</p>
+        <p>Scout uses one planning round by default to select an approach, tools and skills from preloaded context. Additional rounds are configurable. It uses Background, or Primary when no separate Background model is set.</p>
         <span class="phase-model">background role</span>
       </li>
       <li class="phase reveal" data-phase="3" tabindex="0" data-log="tool.call · search_web(&quot;…&quot;) → 8 results &nbsp;·&nbsp; round 2 &nbsp;·&nbsp; streaming">
@@ -952,14 +955,14 @@ and communicate clearly.
   <p class="section-label reveal">The first run</p>
   <h2 class="section-title reveal">Bring a model. <em>Make room to work.</em></h2>
   <p class="section-sub reveal">Use Python 3.11+ on a dedicated Linux VM, container, or spare machine. Choose Ollama for local inference, a cloud API, or an OpenAI-compatible server. A capable tool-using model matters; local hardware needs depend on the model you choose.</p>
-  <aside class="safety-note reveal"><strong>This is experimental host-executing software.</strong> Pernix can run shell commands, write files, and make network requests. Back up important data, give it a contained environment, and do not expose it directly to the public internet. Prompt rules and tool approval gates are not a security sandbox. <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/security.md" target="_blank" rel="noopener">Read the security model</a>.</aside>
+  <aside class="safety-note reveal"><strong>This is experimental host-executing software.</strong> Pernix can run shell commands, write files, and make network requests. Back up important data, give it a contained environment, and do not expose it directly to the public internet. Prompt rules and tool approval gates are not a security sandbox. <a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/security.md" target="_blank" rel="noopener">Read the security model</a>.</aside>
 
   <div class="start-grid">
     <ol class="steps">
       <li class="reveal"><span class="step-n">01</span><div><h4>Choose a model provider</h4><p>Install <a class="link" href="https://ollama.ai" target="_blank" rel="noopener">Ollama</a> and pull a model for local use, or configure an OpenRouter/OpenAI API key or an OpenAI-compatible endpoint. Ollama is optional. Cloud inference and external services may charge for usage.</p></div></li>
       <li class="reveal"><span class="step-n">02</span><div><h4>Clone & install</h4><p>Standard Python: clone, venv, <code>pip install -r requirements.txt</code>. Optional: copy <code>.env.example</code> for OpenRouter or Tavily keys.</p></div></li>
-      <li class="reveal"><span class="step-n">03</span><div><h4>Configure and start a conversation</h4><p><code>python run.py</code>. Open <code>localhost:8090</code>, then Settings &rarr; Providers &amp; models. Set your endpoint and Primary model. <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/deployment/llm-providers.md" target="_blank" rel="noopener">Provider setup guide</a>.</p></div></li>
-      <li class="reveal"><span class="step-n">04</span><div><h4>Start small, then extend</h4><p>Create a Space, add project instructions, and try a small task with an observable result. Add skills, MCP servers, and schedules as needed. Enable optional autonomy or adaptation deliberately, after reading their controls.</p></div></li>
+      <li class="reveal"><span class="step-n">03</span><div><h4>Configure and start a conversation</h4><p><code>python run.py</code>. Open <code>localhost:8090</code>, then Settings &rarr; Providers &amp; models. Set your endpoint and Primary model. <a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/deployment/llm-providers.md" target="_blank" rel="noopener">Provider setup guide</a>.</p></div></li>
+      <li class="reveal"><span class="step-n">04</span><div><h4>Start small, then extend</h4><p>Create a Space, add project instructions, and try a small task with an observable result. Add skills, MCP servers, and schedules as needed. Enable optional goals, Dream or self-checks after reading their controls.</p></div></li>
     </ol>
 
     <div class="terminal reveal">
@@ -967,7 +970,7 @@ and communicate clearly.
         <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
         <span class="term-title">~/pernix</span>
       </div>
-      <pre class="term-body"><span class="ln"><span class="prompt">$</span> git clone <span class="path">https://github.com/calvincs/Pernix.git</span></span>
+      <pre class="term-body"><span class="ln"><span class="prompt">$</span> git clone --branch next-3.2-testing <span class="path">https://github.com/calvincs/Pernix.git</span></span>
 <span class="ln"><span class="prompt">$</span> cd Pernix</span>
 <span class="ln"><span class="prompt">$</span> python3 -m venv .venv && source .venv/bin/activate</span>
 <span class="ln"><span class="prompt">$</span> pip install -r requirements.txt</span>
@@ -991,14 +994,21 @@ and communicate clearly.
 
   <ul class="rel-strip">
     <li class="reveal"><strong>Instructions set the context.</strong> Put project conventions in a Space: how to write, which sources to prefer, and what to check. These guide the model; they do not replace access controls.</li>
-    <li class="reveal"><strong>Skills describe the procedure.</strong> A Markdown capability pack can teach a report format, an API workflow, or a debugging checklist. Relevant instructions load when needed. <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/authoring/writing-skills.md" target="_blank" rel="noopener">Write a skill</a>.</li>
-    <li class="reveal"><strong>Tools provide the access.</strong> Built-in tools handle files, code, and web research. Add local or remote MCP servers for other systems, or call Pernix's REST API from your own applications. <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/mcp.md" target="_blank" rel="noopener">Connect MCP tools</a>.</li>
+    <li class="reveal"><strong>Skills describe the procedure.</strong> A Markdown capability pack can teach a report format, an API workflow, or a debugging checklist. Relevant instructions load when needed. <a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/authoring/writing-skills.md" target="_blank" rel="noopener">Write a skill</a>.</li>
+    <li class="reveal"><strong>Tools provide the access.</strong> Built-in tools handle files, code, and web research. Add local or remote MCP servers for other systems, or call Pernix's REST API from your own applications. <a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/mcp.md" target="_blank" rel="noopener">Connect MCP tools</a>.</li>
     <li class="reveal"><strong>Schedules make it recurring.</strong> Reuse the prompt and skill in a cron job, inspect the resulting session and artifacts, and adjust the procedure when the result needs work.</li>
   </ul>
   <div class="learning-proof reveal">
-    <h3>Keep your installation informed.</h3>
-    <p>Pernix is actively developed. Back up your data and read the upgrade notes before updating. The source, configuration reference, and release history are open for inspection.</p>
-    <p><a class="link" href="https://github.com/calvincs/Pernix/tree/main/docs" target="_blank" rel="noopener">Documentation</a> &middot; <a class="link" href="https://github.com/calvincs/Pernix/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a> &middot; <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md" target="_blank" rel="noopener">Upgrade guide</a></p>
+    <h3>3.2 preview: smaller surface, stronger recovery.</h3>
+    <p>These changes are on <code>next-3.2-testing</code>, ahead of promotion to <code>main</code>. The install commands on this page select that preview; use <code>main</code> for the existing 3.1 branch. Historical screenshots remain labeled 3.1. Back up before upgrading: migrations run forward through v44, and older unjournaled skill changes need manual recovery.</p>
+    <ul class="release-changes">
+      <li><strong>Work that survives interruptions.</strong> Hardened session cancellation, worker delivery, queued turns and stream recovery; detached jobs reconcile without inventing finish times.</li>
+      <li><strong>Maintenance that keeps moving.</strong> Resumable consolidation and rerouting, smaller split retries with backoff, activity timings and explicit degraded status.</li>
+      <li><strong>Clearer review and notifications.</strong> Evidence-attributed factual corrections, honest hold-out totals, and separate Needs you / Activity tabs.</li>
+      <li><strong>Safer operations.</strong> Exact skill backups, atomic settings and schedules, and separate application/access logs with 35 daily compressed archives.</li>
+    </ul>
+    <p><a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/changelog.md">3.2 change summary</a> &middot; <a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/operations.md">Operations guide</a></p>
+    <p><a class="link" href="https://github.com/calvincs/Pernix/tree/next-3.2-testing/docs" target="_blank" rel="noopener">Documentation</a> &middot; <a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a> &middot; <a class="link" href="https://github.com/calvincs/Pernix/blob/next-3.2-testing/docs/upgrade.md" target="_blank" rel="noopener">Upgrade guide</a></p>
   </div>
 </section>
 
@@ -1022,7 +1032,7 @@ and communicate clearly.
       <p class="honest-h">It isn't…</p>
       <ul>
         <li><strong>An IDE replacement.</strong> Pernix can inspect codebases, edit files, run tests, and delegate coding tasks. Its focus is a persistent browser workspace that also handles research and recurring work, not feature parity with a dedicated IDE or coding CLI.</li>
-        <li><strong>Guaranteed autonomous success.</strong> Model output, memory, and self-review can be wrong. Budgets bound work; passing checks only establish what they cover. Experimental adaptation is not a guarantee of improvement.</li>
+        <li><strong>Guaranteed autonomous success.</strong> Model output, memory, and self-review can be wrong. Budgets bound work; passing checks only establish what they cover. Skill updates are not a guarantee of improvement.</li>
         <li><strong>A commercial product.</strong> An independent open-source project, built for daily use by its author and shipped as-is under MIT.</li>
         <li><strong>Production software.</strong> It executes shell commands and writes files on the host machine — that is what makes it useful, and what makes it dangerous on the wrong box. Run it in a dedicated VM, container, or spare machine, and never expose network mode to the public internet.</li>
         <li><strong>A multi-tenant service.</strong> Spaces are project organization, not user isolation. This is a personal server for a trusted environment.</li>
@@ -1057,7 +1067,7 @@ and communicate clearly.
         <span class="dim">·</span>
         <span class="dim">no accounts</span>
         <span class="dim">·</span>
-        <a class="dim" href="https://github.com/calvincs/Pernix/tree/main/docs" target="_blank" rel="noopener">docs ↗</a>
+        <a class="dim" href="https://github.com/calvincs/Pernix/tree/next-3.2-testing/docs" target="_blank" rel="noopener">docs ↗</a>
       </div>
       <p class="footer-fine"><em>per&middot;nix</em> — Latin, <em>nimble</em>. A familiar that lives on your hardware.</p>
 
