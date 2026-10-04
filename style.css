@@ -2785,3 +2785,9 @@ section > *:not(.wall):not(.closing-inner) { max-width: var(--maxw); margin-left
   }
   .reveal { opacity: 1; transform: none; }
 }
+
+/* Release status stays visible while the website precedes main promotion. */
+.release-notice{max-width:60ch;font-size:.85rem;line-height:1.65;margin:0 0 1.4rem;padding:.8rem 1rem;border:1px solid rgba(212,168,67,.35);border-radius:6px;color:inherit;overflow-wrap:anywhere}
+.release-notice a{text-decoration:underline;text-underline-offset:3px}
+.release-changes{padding-left:1.2rem;line-height:1.7}
+.release-changes li+li{margin-top:.65rem}
