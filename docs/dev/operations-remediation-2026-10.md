@@ -59,3 +59,17 @@ Final validation and live deployment results are recorded below when complete.
 Final local validation: **4,247 tests passed in 112.92 seconds**, with **79.28%
 coverage** (63% required). Black, Ruff, Flake8 and `git diff --check` passed.
 The focused maintenance/reflect/consolidation/job suite also passed (276 tests).
+
+The first live verification cycle completed the ladder in 104 seconds with
+`outcome=partial`: consolidation took 19.8 seconds, splitting moved 50 entries
+in 11.5 seconds, and later retention/refinement activities ran. Its new timing
+identified rerouting as a second bottleneck (60-second activity timeout).
+Follow-up: skip catalogue scoring when the source already matches; run rerouting
+on the background pool in resumable batches of 200 settled entries / 10 seconds,
+with cooperative cancellation inside catalogue scoring. All 143 affected tests
+passed, including three new reroute regressions; formatting/lint passed.
+
+Automatic reconciliation repaired all 11 legacy running jobs (nine done, one
+timeout, one lost). Their unknown finish times remain unknown. The rebuilt
+container was healthy, preserved `--dangerous`, and matched local runtime
+SHA-256 checksums. Session listing returned in 46 ms after deployment.
