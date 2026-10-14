@@ -2,7 +2,7 @@
 
 Pernix is a self-hosted, headless AI agent server. You run it on your own hardware, point it at a local Ollama install or OpenRouter, and it runs as a personal AI workstation: persistent memory, sandboxed workspace, web UI, REST API, scheduled jobs, and parallel workers.
 
-**Version 3.2.0** is available on `main` and tagged as `v3.2.0`. Start
+**Version 3.2.1** is available on `main` and tagged as `v3.2.1`. Start
 with the [change summary](changelog.md#v320--2026-10-04) and
 [upgrade checklist](upgrade.md#upgrading-to-32). Operational diagnosis is in
 [operations.md](operations.md).

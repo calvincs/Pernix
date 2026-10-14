@@ -1,6 +1,19 @@
 # Changelog
 
 
+## v3.2.1 — 2026-10-14
+
+Patch release on `main` as `v3.2.1`; application and API version: `3.2.1`.
+No migrations and no settings changes.
+
+- fix(agent): identical bash loops trip the stuck detector again. A bash call
+  now counts as a workspace change only when its output differs from the last
+  run of the same command. In 3.2.0, every successful bash call counted as a
+  change, so a pure bash loop never tripped Signal 2 (field case c021aa9b0c79:
+  16 identical runs, same output each time, no nudge). Edit-then-rerun and
+  polling a log that is still moving remain allowed.
+
+
 ## v3.2.0 — 2026-10-04
 
 ### Current release scope
