@@ -6,6 +6,18 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## v3.2.1 — 2026-10-14
+
+Version 3.2.1 is a patch release on `main`, tagged as `v3.2.1`. No migrations.
+
+- **Repeated shell commands are caught.** If the agent runs the same shell
+  command again and gets the same output, the stuck detector now counts it as a
+  loop, warns the agent and stops the turn if the loop goes on. Re-running a
+  command after editing a file, or checking a log that is still changing, is
+  not affected.
+
+---
+
 ## v3.2.0 — 2026-10-04
 
 Version 3.2.0 is released on `main` and tagged as `v3.2.0`.

@@ -24,7 +24,7 @@ It is **not** a polished commercial product. It is a working personal tool with 
 
 ## Version 3.2
 
-Version **3.2.0** is available on `main`, tagged as `v3.2.0`.
+Version **3.2.1** is available on `main`, tagged as `v3.2.1`.
 Read the [change summary](docs/changelog.md#v320--2026-10-04),
 [upgrade checklist](docs/upgrade.md#upgrading-to-32), and
 [operations guide](docs/operations.md) before upgrading an existing installation.
