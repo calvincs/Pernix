@@ -45,6 +45,8 @@ _FILE_TOOLS = {"file_edit", "file_write", "file_read", "file_append"}
 # script it runs mutate the workspace invisibly to the file tools (field
 # case, session 3dc5a307d751 — a sed-based edit between two identical runs
 # read as a tool cycle and drew a false "repeating tool calls" nudge).
+# bash only counts as a mutation when its output changed, though: see
+# StuckDetector.mark_success.
 _MUTATING_TOOLS = frozenset({"file_write", "file_edit", "multiedit", "repl", "bash"})
 
 # Empirically-verified tool-name hallucinations with compatible argument schemas.
@@ -135,6 +137,9 @@ class StuckDetector:
     # (field case c93232a0521b: 4 false 'repeating tool calls' nudges on an
     # edit→rerun solver workflow with zero failed calls).
     mutation_epoch: int = 0
+    # bash args hash → hash of its last output. A bash call bumps the mutation
+    # epoch only when its output differs from the last run of the same command.
+    bash_outputs: dict = field(default_factory=dict)
     # Per-result observations: (tool_name, host_or_query_token, low_info_bool, body_size)
     # Bounded so a long turn doesn't grow it without limit.
     web_result_history: deque = field(default_factory=lambda: deque(maxlen=12))
@@ -413,14 +418,27 @@ class StuckDetector:
                 key = (tool_name, str(file_path))
                 self.file_failure_counts[key] = self.file_failure_counts.get(key, 0) + 1
 
-    def mark_success(self, tool_name: str = "", args: dict | None = None) -> None:
+    def mark_success(self, tool_name: str = "", args: dict | None = None, content: str | None = None) -> None:
         """Record that a tool succeeded, clearing unresolved failure state.
 
         If tool_name is a file-targeting tool, resets its per-file failure counter.
+
+        A bash call counts as a workspace mutation only when its output differs
+        from the last run of the same command. Counting every successful bash
+        call (98207808) hid pure bash loops from Signal 2: session
+        c021aa9b0c79 ran one identical command 16 times, same output each
+        time, and no signal fired. A rerun after a `sed -i` edit still differs
+        in output, so it is still not a cycle.
         """
         self.has_unresolved_failure = False
         self.unresolved_failure_rounds = 0
-        if tool_name in _MUTATING_TOOLS:
+        if tool_name == "bash" and content is not None:
+            key = _hash_args(args or {})
+            digest = hashlib.sha256(content.encode()).hexdigest()[:12]
+            if self.bash_outputs.get(key) != digest:
+                self.mutation_epoch += 1
+            self.bash_outputs[key] = digest
+        elif tool_name in _MUTATING_TOOLS:
             self.mutation_epoch += 1
         if tool_name:
             self.tool_failure_counts.pop(tool_name, None)
@@ -2867,7 +2885,7 @@ async def _record_round_results(
             tool_failures.setdefault(result.tool_name, []).append(_hash_args(tc.get("arguments", "")))
             stuck.mark_failure(tool_name=result.tool_name, args=item["parsed_args"])
         else:
-            stuck.mark_success(tool_name=result.tool_name, args=item["parsed_args"])
+            stuck.mark_success(tool_name=result.tool_name, args=item["parsed_args"], content=result.content)
             if not result.was_error:
                 gate.remember_success(result.tool_name, tc.get("arguments", ""), tool_round, result.content)
         # Semantic-streak observation (signals 8-10): records the result body's
