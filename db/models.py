@@ -2498,13 +2498,17 @@ def add_token_usage(
     source: str = "provider",
     provider: str = "",
     goal_id: int | None = None,
+    requested_model: str | None = None,
+    routing_reason: str = "unknown",
+    failure_reason: str | None = None,
 ) -> None:
     with connect_sessions() as conn:
         conn.execute(
             """INSERT INTO token_usage (session_id, model, prompt_tokens,
                completion_tokens, total_tokens, cache_read_tokens,
-               cache_write_tokens, cost_estimate, source, provider, goal_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               cache_write_tokens, cost_estimate, source, provider, goal_id,
+               requested_model, routing_reason, failure_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 model,
@@ -2517,6 +2521,9 @@ def add_token_usage(
                 source,
                 provider,
                 goal_id,
+                requested_model,
+                routing_reason,
+                failure_reason,
             ),
         )
 
@@ -2589,24 +2596,62 @@ def session_last_message_at(session_id: str, after_id: int) -> str | None:
     return str(row[0]) if row and row[0] else None
 
 
-def token_usage_by_model_since(since_iso: str) -> list[dict]:
-    """Per-model token totals across ALL sessions since a timestamp.
+def token_usage_by_model_since(since_iso: str, until_iso: str | None = None) -> list[dict]:
+    """Recorded streaming usage, grouped by route provenance and session.
 
-    Feeds the fallback-burn watch (core/llm/burnwatch.py): the fallback
-    model's share of a window's tokens is the signature of a wedged
-    primary provider silently rerouting every call to the paid tier.
+    Legacy rows remain unknown; a model name alone never proves failover.
     """
     anchor = str(since_iso).replace("T", " ")[:19]
+    until = str(until_iso or _now()).replace("T", " ")[:19]
     with connect_sessions() as conn:
         rows = conn.execute(
-            """SELECT model, provider,
-                      COALESCE(SUM(total_tokens), 0) as total,
-                      COUNT(*) as calls
-               FROM token_usage WHERE created_at >= ?
-               GROUP BY model, provider ORDER BY total DESC""",
-            (anchor,),
+            """SELECT model, provider, requested_model, routing_reason, failure_reason, session_id,
+                      COALESCE(SUM(total_tokens), 0) as total, COUNT(*) as calls
+               FROM token_usage WHERE created_at >= ? AND created_at <= ?
+               GROUP BY model, provider, requested_model, routing_reason, failure_reason, session_id
+               ORDER BY total DESC""",
+            (anchor, until),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def record_model_selection(
+    session_id: str, previous: str | None, selected: str | None, source: str = "user", persist: bool = True
+) -> None:
+    """Audit model choices; only session-scoped choices replace the durable pin."""
+    with connect_sessions() as conn:
+        if persist:
+            conn.execute("UPDATE sessions SET model_override = ? WHERE id = ?", (selected, session_id))
+        if previous != selected:
+            conn.execute(
+                """INSERT INTO model_selection_events
+                   (session_id, previous_model, selected_model, source, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (session_id, previous, selected, source, _now()),
+            )
+
+
+def update_fallback_incident(body: str | None) -> bool:
+    """Quietly refresh/resolve an incident, including an acknowledged one.
+
+    Return true only when a new incident needs a notification. Dismissal does
+    not permit reopening the same ongoing condition on the next poll.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT id FROM notifications WHERE category='system.fallback_burn' AND resolved_at IS NULL"
+        ).fetchall()
+        if body is None:
+            conn.execute(
+                "UPDATE notifications SET resolved_at=? WHERE category='system.fallback_burn' AND resolved_at IS NULL",
+                (_now(),),
+            )
+        elif rows:
+            conn.execute(
+                "UPDATE notifications SET body=?, updated_at=? WHERE id=? AND body<>?",
+                (body, _now(), rows[0]["id"], body),
+            )
+        return body is not None and not rows
 
 
 # ---------------------------------------------------------------------------

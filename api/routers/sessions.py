@@ -520,8 +520,8 @@ async def patch_session(session_id: str, body: dict = {}):
                          searchable, and opens read-only with a Restore
                          control. Delete remains a separate, explicit act.
       * model_override — model id string sets a persistent per-session
-                         override; "" or null clears it. Lives on the
-                         in-memory session (not persisted across restart),
+                         override; "" or null clears it. Persisted with an audit
+                         record across restarts,
                          and unlike agent-initiated switch_model it is NOT
                          reverted at turn end.
 
@@ -599,7 +599,10 @@ async def patch_session(session_id: str, body: dict = {}):
             raise HTTPException(400, detail="model_override must be a string or null")
         override = (override or "").strip() or None
         session = get_manager().get_or_create(session_id)
+        await _asyncio.to_thread(db.record_model_selection, session_id, session.model_override, override)
         session.model_override = override
+        session._model_before_agent_switch = None
+        session._budget_before_agent_switch = None
         if override is None:
             session.context_budget_override = None
         result["model_override"] = override

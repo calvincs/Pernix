@@ -848,10 +848,8 @@ class SessionManager:
         # rehydrated worker (restart, reap, resume_worker) silently ran on the
         # default model with the full tool surface — the kind's confinement
         # evaporated exactly when nobody was watching.
+        session.model_override = db_session.get("model_override") or None
         if session.session_type == "worker":
-            _model = db_session.get("model_override")
-            if _model:
-                session.model_override = _model
             _kind_name = db_session.get("worker_kind")
             if _kind_name:
                 try:
@@ -2819,7 +2817,8 @@ class SessionManager:
             before = session._model_before_agent_switch
             session._model_before_agent_switch = None
             # Capture the model that was active during this turn BEFORE restoring
-            active_during_turn = session.model_override or settings.llm_model
+            previous_override = session.model_override
+            active_during_turn = previous_override or settings.llm_model
             session.model_override = before if before != "" else None
             before_budget = session._budget_before_agent_switch
             session._budget_before_agent_switch = None
@@ -2840,6 +2839,13 @@ class SessionManager:
                 import json as _json
 
                 try:
+                    db.record_model_selection(
+                        session.session_id,
+                        previous_override,
+                        session.model_override,
+                        source="turn_restore",
+                        persist=False,
+                    )
                     db.add_message(
                         session.session_id,
                         "model_divider",

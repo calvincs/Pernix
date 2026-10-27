@@ -686,12 +686,8 @@ class SnoozeRunner:
             _announce(bus, "distill_audit", "Auditing distillation coverage against a raw transcript")
             await self._rung("distill_audit", self._distill_audit())
 
-        # Activity 17: fallback-burn watch — pure store read + at most one
-        # notification/day. Encodes the 2026-08-19 silent-reroute incident
-        # signature (primary provider wedged → every call billed to the
-        # fallback tier) as a standing check. Watch-only: never touches
-        # routing. Gated inside check_fallback_burn (share=0 or no
-        # fallback_model configured → no-op).
+        # Activity 17: reconcile one measured automatic-failover incident.
+        # Watch-only: changes notifications, never routing or model selection.
         if not self._is_cancelled():
             await self._rung("fallback_burn_check", self._fallback_burn_check())
 
@@ -1644,29 +1640,27 @@ Output valid JSON only. No markdown fences. /no_think"""
     # ------------------------------------------------------------------
 
     async def _fallback_burn_check(self) -> None:
-        """Notify (high urgency, daily dedup) when the fallback model is
-        carrying a threshold share of the trailing 24h's tokens. Never raises."""
+        """Maintain one incident until the measured condition clears, across UTC days."""
         try:
-            from core.llm.burnwatch import check_fallback_burn
+            from core.llm.burnwatch import check_fallback_burn, format_fallback_finding
+            from db import models as db
 
             finding = await asyncio.to_thread(check_fallback_burn)
-            if not finding:
-                return
-            self._bump("fallback_burn_alerts", 1)
-            await asyncio.to_thread(
-                notices.notify,
-                "system.fallback_burn",
-                "Fallback model is carrying the load",
-                (
-                    f"{finding['model']} served {finding['share']:.0%} of all tokens in the last "
-                    f"{finding['window_hours']}h ({finding['tokens']:,} of {finding['total_tokens']:,} "
-                    f"tokens over {finding['calls']} calls). If this model is the paid tier, the "
-                    "primary provider is likely wedged and every turn is billing there — check the "
-                    "provider key/endpoint (the 2026-08-19 signature: container-local env keys die "
-                    "on rebuild; the durable copy belongs in the compose-level .env)."
-                ),
-                dedup_key="fallback_burn",
-            )
+            body = format_fallback_finding(finding) if finding else None
+            if body is None:
+                # Emit the normal resolution event before closing acknowledged rows too.
+                await asyncio.to_thread(notices.resolve, "system.fallback_burn")
+            is_new = await asyncio.to_thread(db.update_fallback_incident, body)
+            if is_new:
+                nid = await asyncio.to_thread(
+                    notices.notify,
+                    "system.fallback_burn",
+                    "Automatic failover usage is elevated",
+                    body,
+                    subject="automatic_failover",
+                )
+                if nid:
+                    self._bump("fallback_burn_alerts", 1)
         except Exception as e:
             logger.warning("Fallback-burn watch failed: %s", e)
 

@@ -1558,6 +1558,8 @@ async def run_agent(
     did_tool_calls = False
     compaction = _CompactionController(session, session_id)
     compaction.turn_user_msg_id = _turn_user_msg_id
+    _routing_requested_model = effective_model
+    _routing_failure_reason = None
     _tried_fallback = False  # sticky per-turn: once we fail over, stay on fallback for all remaining rounds
     _last_usage = None  # local tracker — avoids reading shared client.last_usage across sessions
     # Counter for "stuck + told to call ask_user but did not" consecutive rounds.
@@ -1862,10 +1864,14 @@ async def run_agent(
             sched_created_at=_sched_created_at,
             sched_priority=_sched_priority,
             tried_fallback=_tried_fallback,
+            requested_model=_routing_requested_model if _tried_fallback else effective_model,
+            failure_reason=_routing_failure_reason,
             # Only worth surfacing while we can still act on it; once the
             # budget is spent an overflow is just another fatal stream error.
             surface_context_overflow=compaction.can_help_with_overflow,
         )
+        _routing_requested_model = outcome.requested_model
+        _routing_failure_reason = outcome.failure_reason
         _tried_fallback = outcome.tried_fallback
         _stream_current_model = outcome.model
         collected_content = outcome.content
@@ -2243,6 +2249,8 @@ async def run_agent(
             sched_created_at=_sched_created_at,
             sched_priority=_sched_priority,
             tried_fallback=_tried_fallback,
+            requested_model=_routing_requested_model if _tried_fallback else effective_model,
+            failure_reason=_routing_failure_reason,
             last_usage=_last_usage,
         )
         return
@@ -3281,6 +3289,8 @@ async def _stream_final_answer(
     sched_priority,
     tried_fallback: bool,
     last_usage,
+    requested_model: str | None = None,
+    failure_reason: str | None = None,
 ):
     """One tools=None call to turn a finished tool loop into a text answer.
 
@@ -3330,6 +3340,8 @@ async def _stream_final_answer(
         sched_created_at=sched_created_at,
         sched_priority=sched_priority,
         tried_fallback=started_on_fallback,
+        requested_model=requested_model,
+        failure_reason=failure_reason,
         label="Final response stream",
     )
     usage = final.usage or last_usage

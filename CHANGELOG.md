@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — development
+
+- Fix false fallback alerts when a user selects the configured backup model.
+  Record actual routing provenance; keep historical routes unknown.
+- Track one failover incident across midnight, with exact UTC windows and
+  affected sessions, quiet updates, and automatic resolution.
+- Migration v45 adds routing fields and a durable model-selection audit;
+  model-picker and agent session selections now survive restart.
+
 
 ## v3.2.1 — 2026-10-14
 
