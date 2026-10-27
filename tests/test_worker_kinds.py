@@ -230,10 +230,10 @@ def test_get_or_create_restores_worker_identity(mgr):
     assert "bash" not in w.tool_allowlist
 
 
-def test_get_or_create_normal_session_untouched(mgr):
+def test_get_or_create_normal_session_restores_user_pin(mgr):
     sid = mgr.create_session(title="N")
-    db.update_session(sid, model_override="ghost:1b")  # column exists but must be ignored
+    db.update_session(sid, model_override="chosen:1b")
     mgr._sessions.pop(sid)
     s = mgr.get_or_create(sid)
-    assert s.model_override is None
+    assert s.model_override == "chosen:1b"
     assert s.tool_allowlist is None

@@ -88,3 +88,31 @@ secrets, hand-authored skills and deployment overrides. Exact skill rollback is
 available for journaled applications whose current revision still matches;
 newer edits and old unjournaled changes require explicit recovery. See
 [using skills](guides/using-skills.md#skill-self-healing).
+
+## Automatic failover incidents and model choices
+
+The fallback-usage watch measures **recorded streaming agent calls**, not all
+provider traffic. Migration v45 adds `requested_model`, `routing_reason`, and
+`failure_reason` to `token_usage`; `model` and `provider` identify the served
+route. Explicit selections use `selected`; actual recovery uses
+`automatic_failover`, retaining the original request and bounded failure
+category through subsequent rounds and the final answer. Provider error bodies
+are not stored in these fields. Existing rows remain `unknown` rather than
+being inferred from a model name.
+
+The configured share and volume thresholds apply to a trailing 24-hour UTC
+window. Only automatic-failover tokens enter the numerator. A notice identifies
+the window, requested/served models, recorded categories and affected sessions;
+it does not diagnose a current outage. One incident updates quietly across
+midnight and remains acknowledged if dismissed. It resolves when the threshold
+clears or the watch is disabled; a failed database read does not resolve it.
+Migration v45 resolves the old, unsupported model-share notices while retaining
+their history.
+
+Model-picker selections now persist across restart and are recorded in
+`model_selection_events` with previous/selected model, source and timestamp.
+Clearing the picker restores Default durably. Agent session-scoped choices are
+also durable; temporary agent choices and their restoration are audited without
+replacing the durable selection. Existing worker pins remain supported. On the
+first upgrade, preserve any in-memory user pins before restarting the old build;
+previous versions did not save them to SQLite.

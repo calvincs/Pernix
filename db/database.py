@@ -1296,6 +1296,24 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_skill_proposals_pending ON skill_improvement_proposals(status, created_at, id)",
         ],
     ),
+    (
+        45,
+        "attribute model routing and audit persistent user selections",
+        [
+            "ALTER TABLE token_usage ADD COLUMN requested_model TEXT",
+            "ALTER TABLE token_usage ADD COLUMN routing_reason TEXT NOT NULL DEFAULT 'unknown'",
+            "ALTER TABLE token_usage ADD COLUMN failure_reason TEXT",
+            """CREATE TABLE model_selection_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                previous_model TEXT, selected_model TEXT, source TEXT NOT NULL,
+                created_at TEXT NOT NULL)""",
+            "CREATE INDEX idx_model_selection_session ON model_selection_events(session_id, id)",
+            # Old model-share alerts cannot establish that an actual failover occurred.
+            """UPDATE notifications SET resolved_at = strftime('%Y-%m-%dT%H:%M:%S+00:00','now')
+               WHERE category = 'system.fallback_burn' AND resolved_at IS NULL""",
+        ],
+    ),
 ]
 
 

@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from config import settings
+from db import models as db
 
 logger = logging.getLogger("pernix.ext.model")
 
@@ -239,6 +240,9 @@ def switch_model(model: str, reason: str = "", scope: str = "turn", _context: di
     if session is not None:
         # Per-session switch — no global mutation.
         old_override = session.model_override
+        db.record_model_selection(
+            session.session_id, old_override, model, source="agent_" + scope, persist=scope == "session"
+        )
         if scope == "session":
             # Persistent switch: cancel any pending turn-end restore so the
             # manager doesn't revert this override when the turn completes.

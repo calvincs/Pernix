@@ -37,7 +37,7 @@ from typing import Any
 from config import settings
 from core.context.compiler import attach_cache_breakpoints, normalize_for_openrouter
 from core.llm.budget import derive_max_output
-from core.llm.errors import FailoverError, FailoverReason
+from core.llm.errors import FailoverError, FailoverReason, classify_http_error
 from core.llm.router import OPENAI_FORMAT_PROVIDERS
 from core.llm.types import StreamEventType
 from db import models as db
@@ -92,6 +92,21 @@ def is_stream_retryable(error: str) -> bool:
     return any(k in error for k in _RETRYABLE_MARKERS)
 
 
+def stream_failure_category(error: str) -> str:
+    """Bounded diagnostic label; never persist raw errors that may contain secrets."""
+    lowered = error.lower()
+    if "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    if "connecterror" in lowered or "connection refused" in lowered:
+        return "connection_error"
+    if "empty response" in lowered:
+        return "empty_response"
+    match = re.search(r"\b(400|401|402|403|404|408|429|500|502|503|504)\b", error)
+    if match:
+        return classify_http_error(int(match.group(1)), "").value
+    return "provider_stream_error"
+
+
 def serving_provider(client, model: str) -> str:
     """The provider that actually served `model`, for the usage ledger.
 
@@ -132,6 +147,8 @@ class StreamOutcome:
     # everything that failed first.
     started_at: float = 0.0
     tried_fallback: bool = False
+    requested_model: str = ""
+    failure_reason: str | None = None
     # Set instead of `error` when the caller asked to handle context overflow
     # itself. Returned rather than raised so the ladder still reports whether
     # it had already burned the fallback before the overflow hit.
@@ -194,6 +211,8 @@ async def stream_with_failover(
     sched_created_at: float,
     sched_priority,
     tried_fallback: bool = False,
+    requested_model: str | None = None,
+    failure_reason: str | None = None,
     surface_context_overflow: bool = False,
     label: str = "LLM stream",
 ) -> StreamOutcome:
@@ -218,6 +237,7 @@ async def stream_with_failover(
     """
     retries = 0
     current_model = model
+    requested_model = requested_model or model
     current_messages = messages
     overflow: FailoverError | None = None
     # Usage persists across attempts: a retry that dies before the provider
@@ -230,6 +250,7 @@ async def stream_with_failover(
         tool_calls: list[dict] = []
         err: str | None = None
         finish_reason: str | None = None
+        attempt_failure_reason = "provider_stream_error"
         started_at = time.monotonic()
 
         if not client.has_capacity(current_model):
@@ -282,6 +303,9 @@ async def stream_with_failover(
                         source="provider",
                         provider=serving_provider(client, current_model),
                         goal_id=goal_id,
+                        requested_model=requested_model,
+                        routing_reason="automatic_failover" if tried_fallback else "selected",
+                        failure_reason=failure_reason,
                     )
 
                 elif event.type == StreamEventType.ERROR:
@@ -291,6 +315,7 @@ async def stream_with_failover(
                     # ''), and the adapter's finally-DONE then ended the turn
                     # as a clean, empty completion.
                     err = event.error or "provider stream ended with an error and no detail"
+                    attempt_failure_reason = stream_failure_category(err)
                     break
 
                 elif event.type == StreamEventType.DONE:
@@ -300,6 +325,7 @@ async def stream_with_failover(
                     finish_reason = event.finish_reason
 
         except FailoverError as fe:
+            attempt_failure_reason = fe.reason.value
             if surface_context_overflow and fe.reason == FailoverReason.CONTEXT_OVERFLOW:
                 overflow = fe
             else:
@@ -307,6 +333,7 @@ async def stream_with_failover(
 
         except Exception as e:
             err = str(e)
+            attempt_failure_reason = stream_failure_category(type(e).__name__ + " " + err)
 
         outcome = StreamOutcome(
             content=content,
@@ -317,6 +344,8 @@ async def stream_with_failover(
             usage=usage,
             started_at=started_at,
             tried_fallback=tried_fallback,
+            requested_model=requested_model,
+            failure_reason=failure_reason,
             context_overflow=overflow,
         )
 
@@ -373,6 +402,8 @@ async def stream_with_failover(
                 )
                 return outcome
             tried_fallback = True
+            # Store only a bounded classification, never provider bodies or credentials.
+            failure_reason = attempt_failure_reason
             retries = 0
             current_model = fallback
             logger.warning(

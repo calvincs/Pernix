@@ -224,3 +224,43 @@ async def test_ladder_surfaces_context_overflow_instead_of_retrying(monkeypatch)
     assert out.context_overflow is None
     assert out.error == "too long"
     assert [c["model"] for c in client.calls] == ["test/model", "other/model"]
+
+
+async def test_route_provenance_survives_sticky_round_and_final_answer(monkeypatch):
+    from db import models as db
+    from db.database import connect_sessions
+
+    monkeypatch.setattr("config.settings.fallback_model", "paid")
+    sid = db.create_session()
+    usage = [
+        StreamEvent(type=StreamEventType.USAGE, usage=TokenUsage(10, 5, 15)),
+        StreamEvent(type=StreamEventType.DONE),
+    ]
+    client = _FakeClient([[StreamEvent(type=StreamEventType.ERROR, error="model failure")], usage, usage, usage])
+    first = await _run(client, sid, model="local")
+    assert first.tried_fallback and first.requested_model == "local"
+    await _run(
+        client,
+        sid,
+        model="paid",
+        tried_fallback=True,
+        requested_model=first.requested_model,
+        failure_reason=first.failure_reason,
+        tools=None,
+    )
+    await _run(client, sid, model="paid")  # explicit selection of the same model
+    with connect_sessions() as conn:
+        rows = conn.execute("SELECT * FROM token_usage ORDER BY id").fetchall()
+    assert [r["routing_reason"] for r in rows] == ["automatic_failover", "automatic_failover", "selected"]
+    assert [r["requested_model"] for r in rows] == ["local", "local", "paid"]
+    assert rows[0]["failure_reason"] == rows[1]["failure_reason"] == "provider_stream_error"
+    assert rows[2]["failure_reason"] is None
+
+
+def test_failure_category_does_not_store_raw_provider_secrets():
+    from core.llm.stream_ladder import stream_failure_category
+
+    assert stream_failure_category("401 Unauthorized key=secret") == "auth"
+    assert stream_failure_category("ReadTimeout secret") == "timeout"
+    assert stream_failure_category("ConnectError secret") == "connection_error"
+    assert stream_failure_category("unexpected response secret") == "provider_stream_error"

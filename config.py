@@ -97,14 +97,11 @@ class Settings:
     # doomed request and — worse — replaces the original error with the
     # quota 403, masking what actually went wrong (0 disables the breaker).
     provider_quota_cooldown_s: int = 600
-    # Fallback-burn watch: fallback_model is the paid/backup tier, and a
-    # silently wedged primary provider once rerouted every turn there for
-    # days before anyone noticed (the 2026-08-19 aibox key-loss incident).
-    # Snooze checks the trailing 24h of token_usage: when the fallback
-    # model's token share reaches fallback_burn_alert_share AND at least
-    # fallback_burn_min_tokens were spent in the window, a high-urgency
-    # notification fires (deduped daily). Watch-only — routing never
-    # changes. share=0 disables the watch.
+    # Automatic-failover watch: trailing 24h of recorded streaming usage.
+    # Only attributed automatic failovers count in the numerator; selected
+    # models and unknown historical routes do not prove provider failure.
+    # One incident is updated until the threshold clears, even across days.
+    # Watch-only: routing never changes. share=0 disables and resolves it.
     fallback_burn_alert_share: float = 0.25
     fallback_burn_min_tokens: int = 50000
     # Optional per-model pricing for token_usage.cost_estimate: model id →
