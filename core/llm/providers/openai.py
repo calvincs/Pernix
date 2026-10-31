@@ -151,6 +151,11 @@ class OpenAIProvider:
             payload["tools"] = tools
         if temperature is not None:
             payload["temperature"] = temperature
+        # Self-hosted Qwen with thinking off sometimes ends a finished answer
+        # with a stray `</think>` where its stop token belongs, then writes the
+        # answer again. Everything past that tag is noise, so end there.
+        if "api.openai.com" not in (self._config.base_url or ""):
+            payload["stop"] = ["</think>"]
         return payload
 
     @staticmethod

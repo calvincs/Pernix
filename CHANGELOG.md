@@ -6,6 +6,8 @@
   Record actual routing provenance; keep historical routes unknown.
 - Track one failover incident across midnight, with exact UTC windows and
   affected sessions, quiet updates, and automatic resolution.
+- Stop self-hosted Qwen at a stray `</think>` so finished answers are not
+  written twice, and name the weekday in the clock block.
 - Migration v45 adds routing fields and a durable model-selection audit;
   model-picker and agent session selections now survive restart.
 

@@ -896,7 +896,8 @@ def _build_volatile_tail(
     """
     now_utc = datetime.now(timezone.utc)
     utc_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
-    local_str = now_utc.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    # The weekday is spelled out: models get it wrong when left to work it out.
+    local_str = now_utc.astimezone().strftime("%A %Y-%m-%d %H:%M %Z")
     lines = [
         "[CURRENT STATE]",
         f"Current time (UTC):   {utc_str}",
