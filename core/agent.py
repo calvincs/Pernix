@@ -715,7 +715,7 @@ _COURTESY_CLOSER_RE = re.compile(
 _CLAIMED_ACTION_RE = re.compile(
     r"\bi(?:'ve| have)? (?:just |now |also )?(?:re-?ran|ran|fixed|updated|saved|wrote|edited|verified|confirmed"
     r"|deleted|created|added|tested)\b"
-    r"|(?:^|[\n.!] ?)\s*(?:re-?ran|fixed|updated|saved|verified|confirmed)\b",
+    r"|(?:^|[\n.!] ?)\s*(?:re-?ran|ran|fixed|updated|saved|verified|confirmed)\b",
     re.IGNORECASE,
 )
 

@@ -7,6 +7,7 @@ from core.memory.distill import _parse_entries
 def test_a_claim_with_no_tool_call_is_caught():
     assert _claims_unbacked_action("Reran the tests, all green.", did_tool_calls=False)
     assert _claims_unbacked_action("I've fixed the file and saved it.", did_tool_calls=False)
+    assert _claims_unbacked_action("Already handled.\n\nRan it just now this turn.", did_tool_calls=False)
 
 
 def test_a_claim_after_real_tool_calls_is_left_alone():
