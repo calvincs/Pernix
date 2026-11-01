@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 
 import core.agent as agent
-from core.agent import LOOP_BREAK_AT, StuckDetector, _handle_stuck_signals
+from core.agent import LOOP_BREAK_AT, StuckDetector, _handle_stuck_signals, run_agent
 
 
 class _Registry:
@@ -94,3 +94,76 @@ def test_the_break_fires_once_per_turn(monkeypatch):
     _send(stuck, _call(command="ls"))
     _handle(stuck, ["bash", "ask_user"], monkeypatch)
     assert not stuck.force_text
+
+
+async def test_a_repeating_model_is_made_to_answer_through_the_real_loop(monkeypatch):
+    from core.llm.types import StreamEvent, StreamEventType, TokenUsage, ToolCall
+    from core.scout.report import ScoutReport
+    from core.tools.registry import ToolRegistry
+    from db import models as db
+    from sessions.state import AgentSession
+    from tests.conftest import FakeLLMClient
+
+    def _call_round(n):
+        return [
+            StreamEvent(
+                type=StreamEventType.TOOL_CALL,
+                tool_calls=[ToolCall(id=f"tc{n}", name="bash", arguments='{"command": "ls"}')],
+            ),
+            StreamEvent(type=StreamEventType.DONE),
+        ]
+
+    answer = [
+        StreamEvent(type=StreamEventType.TOKEN, content="The folder never changed."),
+        StreamEvent(type=StreamEventType.USAGE, usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2)),
+        StreamEvent(type=StreamEventType.DONE),
+    ]
+    runs = []
+    fake = FakeLLMClient(stream_events=[_call_round(n) for n in range(4)] + [answer])
+    tools_seen = []
+    real_stream = fake.chat_stream
+
+    def _stream(*args, **kwargs):
+        tools_seen.append(kwargs.get("tools"))
+        return real_stream(*args, **kwargs)
+
+    fake.chat_stream = _stream
+    monkeypatch.setattr("core.agent.get_llm_client", lambda: fake)
+    monkeypatch.setattr("core.llm.client._client", fake)
+
+    reg = ToolRegistry()
+
+    def _bash(command=""):
+        runs.append(command)
+        return "same output"
+
+    reg.register(
+        name="bash",
+        func=_bash,
+        description="bash",
+        parameters={"type": "object", "properties": {"command": {"type": "string"}}},
+        parallel_safe=True,
+        timeout=5,
+        idempotent=False,
+    )
+    reg.register(
+        name="ask_user",
+        func=lambda question="": "ok",
+        description="ask",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+    monkeypatch.setattr("core.agent.get_registry", lambda: reg)
+
+    sid = db.create_session(title="Loop break")
+    session = AgentSession(session_id=sid, session_type="normal")
+    session.last_scout_report = ScoutReport(recommended_tools=["bash", "ask_user"])
+    await run_agent(sid, "list the folder", session)
+
+    assert len(runs) == 3
+    assert tools_seen[-1] is None
+    assert all(t for t in tools_seen[:-1])
+    assert session.termination_reason == "stuck_loop"
+    final = [m for m in db.get_messages(sid) if m["role"] == "assistant"][-1]
+    assert final["content"] == "The folder never changed."

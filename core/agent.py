@@ -91,8 +91,9 @@ def _prior_turn_tool_names(session_id: str, lookback: int = 40) -> set[str]:
 
 _WEB_TOOLS = frozenset({"browse_web", "http_get", "search_web"})
 
-# The third identical call with nothing changed since the first ends the loop.
-# Advice does not stop a repeating model: a transcript showing the same call
+# Identical calls allowed since anything last changed, counting the one being
+# judged. A bash command's first run counts as a change, so in practice it runs
+# three times and the fourth try is refused. Advice does not stop a repeating model: a transcript showing the same call
 # and result several times teaches it to continue, and the 2026-10-31 replay
 # of c021aa9b0c79 kept repeating whatever the notice said.
 LOOP_BREAK_AT = 3
