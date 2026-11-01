@@ -163,38 +163,3 @@ def _salvage_xml_invoke(content: str, tool_exists: Callable[[str], bool]) -> Sal
 # Ordered: the vendor-specific token format is checked before the generic XML
 # shape, matching how the agent loop used to try them.
 _PARSERS = (_salvage_kimi, _salvage_xml_invoke)
-
-
-STRAY_THINK_CLOSE = "</think>"
-
-
-class TextCut:
-    """Pass streamed text through until a marker appears, then stop.
-
-    Text that could be the start of the marker is held back, because the marker
-    can arrive split across two chunks. An empty marker passes everything.
-    """
-
-    def __init__(self, marker: str):
-        self._marker = marker
-        self._held = ""
-        self.done = False
-
-    def feed(self, text: str) -> str:
-        if self.done or not self._marker:
-            return "" if self.done else text
-        buf = self._held + text
-        self._held = ""
-        at = buf.find(self._marker)
-        if at >= 0:
-            self.done = True
-            return buf[:at]
-        for size in range(min(len(buf), len(self._marker) - 1), 0, -1):
-            if self._marker.startswith(buf[-size:]):
-                self._held = buf[-size:]
-                return buf[:-size]
-        return buf
-
-    def flush(self) -> str:
-        held, self._held = self._held, ""
-        return held

@@ -30,7 +30,6 @@ import httpx
 from config import settings
 from core.llm.errors import FailoverError, FailoverReason, classify_http_error
 from core.llm.providers._shared import describe_exception, http_status_failover, parse_usage, stream_failover
-from core.llm.providers.salvage import STRAY_THINK_CLOSE, TextCut
 from core.llm.types import (
     ChatResponse,
     HealthStatus,
@@ -152,10 +151,12 @@ class OpenAIProvider:
             payload["tools"] = tools
         if temperature is not None:
             payload["temperature"] = temperature
+        # Self-hosted Qwen with thinking off sometimes ends a finished answer
+        # with a stray `</think>` where its stop token belongs, then writes the
+        # answer again. Everything past that tag is noise, so end there.
+        if "api.openai.com" not in (self._config.base_url or ""):
+            payload["stop"] = ["</think>"]
         return payload
-
-    def _is_self_hosted(self) -> bool:
-        return "api.openai.com" not in (self._config.base_url or "")
 
     @staticmethod
     def _is_max_tokens_param_error(status: int, body: str) -> bool:
@@ -202,8 +203,6 @@ class OpenAIProvider:
     def _parse_response(self, data: dict, model: str) -> ChatResponse:
         msg = data["choices"][0].get("message", {})
         content = msg.get("content") or ""
-        if self._is_self_hosted():
-            content = content.split(STRAY_THINK_CLOSE, 1)[0]
         finish = data["choices"][0].get("finish_reason", "stop")
 
         tool_calls = None
@@ -257,7 +256,6 @@ class OpenAIProvider:
         # contract as the OpenRouter adapter: flush on finish_reason,
         # [DONE], and in finally as a safety net).
         tc_accumulator: dict[int, dict] = {}
-        think_cut = TextCut(STRAY_THINK_CLOSE if self._is_self_hosted() else "")
 
         def _flush_tool_calls():
             if not tc_accumulator:
@@ -308,10 +306,6 @@ class OpenAIProvider:
                         continue
                     raw = line[6:].strip()
                     if raw == "[DONE]":
-                        held = think_cut.flush()
-                        if held:
-                            emitted_output = True
-                            yield StreamEvent(type=StreamEventType.TOKEN, content=held)
                         flushed = _flush_tool_calls()
                         if flushed:
                             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
@@ -386,18 +380,8 @@ class OpenAIProvider:
 
                     content = delta.get("content")
                     if content:
-                        # Self-hosted Qwen with thinking off sometimes ends a
-                        # finished answer with a stray `</think>` where its stop
-                        # token belongs, then writes the answer again. Cut the
-                        # text here, not with a server `stop`: that would also
-                        # cut a tool argument holding the same string.
-                        visible = think_cut.feed(content)
-                        if visible:
-                            emitted_output = True
-                            yield StreamEvent(type=StreamEventType.TOKEN, content=visible)
-                        if think_cut.done:
-                            last_finish_reason = "stop"
-                            break
+                        emitted_output = True
+                        yield StreamEvent(type=StreamEventType.TOKEN, content=content)
         except GeneratorExit:
             return
         except FailoverError as fe:
@@ -418,9 +402,6 @@ class OpenAIProvider:
         finally:
             if not failing_over:
                 try:
-                    held = think_cut.flush()
-                    if held:
-                        yield StreamEvent(type=StreamEventType.TOKEN, content=held)
                     flushed = _flush_tool_calls()
                     if flushed:
                         yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
