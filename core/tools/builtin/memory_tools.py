@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -312,7 +313,11 @@ async def _deep_recall_async(query: str, context: str, space_slug: str | None = 
                 args = json.loads(tc.arguments) if tc.arguments else {}
             except json.JSONDecodeError:
                 args = {}
-            result = _execute_deep_recall_tool(tc.name, args, memory_dir, space_slug=space_slug)
+            # This coroutine runs on the main event loop. The search makes a
+            # blocking embed call and blocking SQLite and rg calls.
+            result = await asyncio.to_thread(
+                _execute_deep_recall_tool, tc.name, args, memory_dir, space_slug=space_slug
+            )
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
     return "Search completed but no synthesis produced."
@@ -519,8 +524,6 @@ def deep_recall(
     the model focus on what's relevant. include_seen=True bypasses the
     per-session dedup ledger (only matters for the fallback path, which
     emits raw entries; the LLM path returns synthesis)."""
-    import asyncio
-
     from core.memory.store import get_memory_store
 
     store = get_memory_store()
@@ -533,12 +536,15 @@ def deep_recall(
         _slug = space_slug_for_session((_context or {}).get("session_id", ""))
     except Exception:
         _slug = None
+    future = None
     try:
         ctx = _context or {}
         loop = ctx.get("_loop") or asyncio.get_running_loop()
         future = asyncio.run_coroutine_threadsafe(_deep_recall_async(query, context, space_slug=_slug), loop)
         return future.result(timeout=60) + _federated_sections(query)
     except Exception as e:
+        if future is not None:
+            future.cancel()  # a timed-out search must not keep holding an LLM slot
         logger.warning("deep_recall LLM agent failed, falling back to basic recall: %s", e)
         try:
             results = store.search(query, limit=8, space_slug=_slug)

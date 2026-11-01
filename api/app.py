@@ -30,6 +30,10 @@ async def lifespan(app: FastAPI):
     setup_logging()
     logger.info("Pernix starting on %s:%d", settings.host, settings.port)
 
+    from core import loop_watchdog
+
+    app.state.loop_watchdog_stop = loop_watchdog.start()
+
     # 0. Capture the main event loop so tool threads can marshal event
     # delivery back onto it (core.events.run_on_loop).
     from core.events import set_main_loop
