@@ -19,6 +19,8 @@
   it stalls for 5 s. A stall freezes every session, scout and API route.
 - Challenge a reply once when it cites a link, PubMed id or DOI that nothing in
   the turn showed.
+- Stop grading from walking the whole workspace on every turn. It starved the UI
+  and all sessions of CPU on a 285k-file workspace.
 - Migration v45 adds routing fields and a durable model-selection audit;
   model-picker and agent session selections now survive restart.
 
