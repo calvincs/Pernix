@@ -1,8 +1,9 @@
 """Live debug 2026-10-31: repeated answers and a guessed weekday."""
 
+import re
 from datetime import datetime
 
-from core.context.compiler import _build_volatile_tail
+from core.context.compiler import _build_volatile_tail, _part_of_day
 from core.llm.providers.openai import OpenAIProvider
 from core.llm.types import ProviderConfig
 
@@ -24,3 +25,13 @@ def test_clock_names_the_local_weekday():
     tail = _build_volatile_tail("")
     local_line = next(line for line in tail.splitlines() if line.startswith("Current time (local):"))
     assert datetime.now().astimezone().strftime("%A") in local_line
+
+
+def test_clock_states_the_offset_and_part_of_day():
+    tail = _build_volatile_tail("")
+    local_line = next(line for line in tail.splitlines() if line.startswith("Current time (local):"))
+    assert re.search(r"\(UTC[+-]\d\d:\d\d, (morning|afternoon|evening|night)\)", local_line)
+
+
+def test_part_of_day_edges():
+    assert [_part_of_day(h) for h in (4, 5, 12, 17, 21)] == ["night", "morning", "afternoon", "evening", "night"]

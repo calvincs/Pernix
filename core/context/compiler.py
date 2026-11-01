@@ -260,6 +260,12 @@ Use those offset and limit values EXACTLY. Do NOT invent your own pagination
 Core tools: file_read, file_write, file_edit, glob, grep, bash, remember, recall,
 ask_user, discover_tools, discover_skills, load_skill, read_skill_resource.
 
+FACTS NEED A SOURCE: Every number, date, name, job status, or claim that you
+ran or checked something must come from a tool result or memory text in this
+conversation. If nothing supports it, leave it out: say you do not know, or go
+check. Never cite a link that failed or that you did not read. Do time zone and
+date window math with a tool, not in your head.
+
 PLAIN REPLIES: A greeting, small talk, or a question you can answer from what
 you already know gets a plain text reply with no tool call. A friendly question
 at the end of a chat reply ("what's on your mind?") is part of that text.
@@ -884,6 +890,16 @@ def _format_turn_ledger(snap: dict, anchor: str, sess: dict) -> str:
     return "\n".join([header] + lines[:25])
 
 
+def _part_of_day(hour: int) -> str:
+    if 5 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 17:
+        return "afternoon"
+    if 17 <= hour < 21:
+        return "evening"
+    return "night"
+
+
 def _build_volatile_tail(
     resource_status: str,
     goal_burn: str = "",
@@ -901,7 +917,10 @@ def _build_volatile_tail(
     now_utc = datetime.now(timezone.utc)
     utc_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
     # The weekday is spelled out: models get it wrong when left to work it out.
-    local_str = now_utc.astimezone().strftime("%A %Y-%m-%d %H:%M %Z")
+    now_local = now_utc.astimezone()
+    offset = now_local.strftime("%z")
+    part_of_day = _part_of_day(now_local.hour)
+    local_str = now_local.strftime(f"%A %Y-%m-%d %H:%M %Z (UTC{offset[:3]}:{offset[3:]}, {part_of_day})")
     lines = [
         "[CURRENT STATE]",
         f"Current time (UTC):   {utc_str}",
