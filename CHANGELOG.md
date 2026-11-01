@@ -8,6 +8,13 @@
   affected sessions, quiet updates, and automatic resolution.
 - Stop self-hosted Qwen at a stray `</think>` so finished answers are not
   written twice, and name the weekday in the clock block.
+- End repeat loops: after identical calls with nothing changing, interactive
+  sessions get one reply with tools off instead of more advice. Waits and polls
+  are exempt, and workers keep their tools.
+- Stop greetings pausing on `ask_user`, require a source for stated facts, and
+  give the clock block its UTC offset and part of day.
+- Search on the two ends of a large paste. The whole message stalled scout for
+  minutes and pushed it to the paid fallback.
 - Migration v45 adds routing fields and a durable model-selection audit;
   model-picker and agent session selections now survive restart.
 
