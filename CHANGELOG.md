@@ -21,6 +21,7 @@
   the turn showed.
 - Stop grading from walking the whole workspace on every turn. It starved the UI
   and all sessions of CPU on a 285k-file workspace.
+- Fold each sidebar time group at 50 rows. A day of 490 sessions froze the tab.
 - Migration v45 adds routing fields and a durable model-selection audit;
   model-picker and agent session selections now survive restart.
 
