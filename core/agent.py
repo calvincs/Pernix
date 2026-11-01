@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from config import settings
 from core.context.compaction import NOTHING_TO_SUMMARIZE, CompactionOutcome, compact_with_llm
 from core.context.compiler import attach_cache_breakpoints, compile_context, normalize_for_openrouter
+from core.context.local_times import local_time_note
 from core.context.tokens import get_estimator
 from core.llm.budget import derive_max_output, derive_model_budget, ensure_model_known
 from core.llm.client import get_llm_client
@@ -2874,7 +2875,7 @@ async def _record_round_results(
         # result so the model sees the rewrite on its next turn. (A separate
         # role=system note would be stripped by normalize_for_openrouter;
         # tool-role messages are preserved.)
-        stored_content = result.content
+        stored_content = local_time_note(result.content) if not result.was_error else result.content
         gate_notes = notes_by_id.get(tc.get("id", ""))
         if gate_notes:
             stored_content = "\n".join(gate_notes) + "\n" + stored_content
