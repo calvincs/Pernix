@@ -426,7 +426,7 @@ def register(reg) -> None:
     reg.register(
         name="ask_user",
         func=ask_user,
-        description="Post a question for the user. Non-blocking — the agent continues or pauses until the user answers via the API.",
+        description="Pause a task to get a decision it cannot continue without. Never use it for greetings or chat: reply in plain text.",
         parameters={
             "type": "object",
             "properties": {

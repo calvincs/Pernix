@@ -91,6 +91,16 @@ def _prior_turn_tool_names(session_id: str, lookback: int = 40) -> set[str]:
 
 _WEB_TOOLS = frozenset({"browse_web", "http_get", "search_web"})
 
+# The third identical call with nothing changed since the first ends the loop.
+# Advice does not stop a repeating model: a transcript showing the same call
+# and result several times teaches it to continue, and the 2026-10-31 replay
+# of c021aa9b0c79 kept repeating whatever the notice said.
+LOOP_BREAK_AT = 3
+
+# A bash command that waits is a poll. Its answer can stay the same for a while
+# without the agent being stuck.
+_BASH_WAIT_RE = re.compile(r"\b(?:sleep|wait|watch|timeout)\b")
+
 # Tool-result substrings that indicate "no useful info came back". Matched
 # case-insensitively against the tool result body. Kept narrow on purpose so
 # legitimate "404 documentation page" hits don't false-positive.
@@ -114,6 +124,20 @@ _FALSIFIED_FIT_RE = re.compile(
     r"|\bunsolved\b)",
     re.IGNORECASE,
 )
+
+
+def _is_poll_call(tc: dict, registry) -> bool:
+    """True for a call whose repeat is waiting, not looping."""
+    name = tc.get("name", "")
+    if name == "bash":
+        try:
+            args = json.loads(tc.get("arguments") or "{}")
+        except (ValueError, TypeError):
+            return False
+        cmd = args.get("command") if isinstance(args, dict) else None
+        return bool(_BASH_WAIT_RE.search(cmd or ""))
+    tool_def = registry.get(name) if hasattr(registry, "get") else None
+    return tool_def is not None and not getattr(tool_def, "idempotent", True)
 
 
 @dataclass
@@ -164,6 +188,13 @@ class StuckDetector:
     # How many times this turn the stuck handler let a change of approach run
     # instead of discarding it (see _is_recovery_move). Bounded per turn.
     recovery_passes: int = 0
+    # (call signature, mutation epoch) → how many times it was sent.
+    cycle_counts: dict = field(default_factory=dict)
+    # Highest count this round. Read by the stuck handler.
+    identical_calls: int = 0
+    # The next round runs without tools so the model has to answer.
+    force_text: bool = False
+    loop_break_used: bool = False
 
     def evaluate(self, content: str, tool_calls: list[dict] | None, tool_failures: dict, registry) -> tuple[float, int]:
         """Evaluate stuck signals. Returns (score 0-1, repeat_count)."""
@@ -196,6 +227,11 @@ class StuckDetector:
                 score += 0.4
                 self.behavioral_flags.add("tool_cycle")
             self.tool_call_history.append((sig, self.mutation_epoch))
+            self.identical_calls = 0
+            if not any(_is_poll_call(tc, registry) for tc in tool_calls):
+                key = (sig, self.mutation_epoch)
+                self.cycle_counts[key] = self.cycle_counts.get(key, 0) + 1
+                self.identical_calls = self.cycle_counts[key]
 
         # Signal 3: Error-retry without change
         if tool_calls:
@@ -1843,7 +1879,9 @@ async def run_agent(
         # that the work is done.
         stream_tools = payload.tools
         _forced_synthesis = tool_round == settings.max_tool_rounds - 1
-        if _forced_synthesis:
+        _loop_break_round = stuck.force_text
+        stuck.force_text = False
+        if _forced_synthesis or _loop_break_round:
             stream_tools = None
 
         # --- Stream with retry/fallback ---
@@ -1963,7 +2001,7 @@ async def run_agent(
         # structured field still made the call; the provider layer knows the
         # wire formats and turns it back into one. Only consulted when the
         # structured field came back empty — a correctly framed call wins.
-        if not collected_tool_calls and collected_content:
+        if not collected_tool_calls and collected_content and stream_tools is not None:
             salvaged = salvage_tool_calls(collected_content, registry.exists)
             if salvaged:
                 logger.warning("Session %s: %s", session_id, salvaged.summary)
@@ -2079,7 +2117,10 @@ async def run_agent(
             # model to stop calling tools and summarize. Keep the allowance
             # exhaustion typed so reflect's ceiling-loop guard and the worker
             # INCOMPLETE header both see the wall this turn hit.
-            session.termination_reason = "round_ceiling" if _forced_synthesis else "complete"
+            if _loop_break_round:
+                session.termination_reason = "stuck_loop"
+            else:
+                session.termination_reason = "round_ceiling" if _forced_synthesis else "complete"
             return
 
         # --- Tool execution ---
@@ -3008,6 +3049,29 @@ async def _handle_stuck_signals(
     # a notice from an earlier turn was still being obeyed rounds later). The
     # rows stay in the DB for the transcript UI.
     _ephemeral = json.dumps({"ephemeral_turn": int(turn_user_msg_id)}) if turn_user_msg_id is not None else None
+
+    # Sessions with a user get an answer instead of another try. Workers and
+    # jobs keep their tools below, because they may still owe a file.
+    if (
+        stuck is not None
+        and not stuck.loop_break_used
+        and stuck.identical_calls >= LOOP_BREAK_AT
+        and "ask_user" in (active_tools or [])
+    ):
+        stuck.loop_break_used = True
+        stuck.force_text = True
+        names = ", ".join(sorted({tc.get("name", "") for tc in (tool_calls or [])})) or "n/a"
+        logger.warning("Session %s: loop break after %d identical calls (%s)", session_id, stuck.identical_calls, names)
+        await asyncio.to_thread(
+            db.add_message,
+            session_id,
+            "system",
+            f"Tools are off for this reply: {names} was called {stuck.identical_calls} times with the same "
+            "arguments and nothing changed. Answer the user now from what you already have. Say what is "
+            "done, what is not, and what you would try next.",
+            metadata=_ephemeral,
+        )
+        return "nudge-and-retry", nudges_used
 
     if repeats < 3:
         # Not stuck this round — reset the consecutive-nudge counter so a

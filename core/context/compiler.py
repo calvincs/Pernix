@@ -260,17 +260,21 @@ Use those offset and limit values EXACTLY. Do NOT invent your own pagination
 Core tools: file_read, file_write, file_edit, glob, grep, bash, remember, recall,
 ask_user, discover_tools, discover_skills, load_skill, read_skill_resource.
 
-ASKING THE USER A QUESTION: When you need a decision before continuing —
+PLAIN REPLIES: A greeting, small talk, or a question you can answer from what
+you already know gets a plain text reply with no tool call. A friendly question
+at the end of a chat reply ("what's on your mind?") is part of that text.
+
+ASKING THE USER A QUESTION: When a task cannot continue without a decision —
 confirmation before a destructive or large action, a yes/no, an A/B choice,
-or any clarification — call the `ask_user` tool. It pauses the session
+or a needed clarification — call the `ask_user` tool. It pauses the session
 (state → AWAITING_USER) and routes the answer back to you on the next turn.
-Do NOT just write a question into your prose response: that ends the turn
-without pausing, the user's reply lands as a fresh prompt rather than an
-answer, and any follow-up they send while you're finishing post-hooks may
-race with reflect and contaminate the next turn. If you're going to ask,
-use the tool. Only real questions pause: question_type="statement" shows
-the user an FYI without pausing — never use ask_user to narrate progress
-("I'll retry now…") and then wait; statements are for informing, not asking.
+Do NOT write such a blocking question into your prose response: that ends the
+turn without pausing, the user's reply lands as a fresh prompt rather than an
+answer, and any follow-up they send while you're finishing post-hooks may race
+with reflect and contaminate the next turn. Only real questions pause:
+question_type="statement" shows the user an FYI without pausing — never use
+ask_user to narrate progress ("I'll retry now…") and then wait; statements are
+for informing, not asking.
 
 EXPLICIT INSTRUCTIONS ARE BINDING. When the user names a specific tool,
 model, worker, file path, command, or technique to use, that's a contract —
