@@ -29,6 +29,25 @@ def _loop_thread_stack(thread_id: int) -> str:
     return "".join(traceback.format_stack(frame)[-12:])
 
 
+_IDLE_FRAMES = ("wait", "get", "select", "accept", "poll", "_worker", "sleep")
+
+
+def _busy_threads(skip: set[int]) -> str:
+    """One short stack per thread that is not parked. A thread that burns CPU
+    starves the loop of the GIL, so the loop's own stack shows only the victim."""
+    names = {t.ident: t.name for t in threading.enumerate()}
+    out = []
+    for ident, frame in sys._current_frames().items():
+        if ident in skip or frame.f_code.co_name in _IDLE_FRAMES:
+            continue
+        where = " < ".join(
+            f"{f.filename.rsplit('/', 1)[-1]}:{f.lineno} {f.name}"
+            for f in reversed(traceback.extract_stack(frame)[-5:])
+        )
+        out.append(f"  [{names.get(ident, ident)}] {where}")
+    return "\n".join(out) or "  (none)"
+
+
 def _watch(loop: asyncio.AbstractEventLoop, thread_id: int, stop: threading.Event, stall_s: float, poll_s: float):
     last_seen = [time.monotonic()]
 
@@ -44,7 +63,12 @@ def _watch(loop: asyncio.AbstractEventLoop, thread_id: int, stop: threading.Even
         lag = time.monotonic() - last_seen[0]
         if lag >= stall_s and stalled_at is None:
             stalled_at = last_seen[0]
-            logger.warning("Event loop stalled for %.1fs. Loop thread stack:\n%s", lag, _loop_thread_stack(thread_id))
+            logger.warning(
+                "Event loop stalled for %.1fs. Loop thread stack:\n%s\nOther busy threads:\n%s",
+                lag,
+                _loop_thread_stack(thread_id),
+                _busy_threads({thread_id, threading.get_ident()}),
+            )
         elif lag < stall_s and stalled_at is not None:
             logger.warning("Event loop recovered after %.1fs", last_seen[0] - stalled_at)
             stalled_at = None

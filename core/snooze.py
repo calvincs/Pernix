@@ -1212,7 +1212,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                 continue
             if (file_name, epoch) in covered:
                 continue
-            entry = store.get_entry(file_name, epoch)
+            entry = await asyncio.to_thread(store.get_entry, file_name, epoch)
             if entry is None or not (entry.content or "").strip():
                 continue
             mem_ref = {

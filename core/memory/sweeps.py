@@ -711,7 +711,7 @@ async def reroute_misplaced_entries(
             )
 
         prompt = REROUTE_PROMPT.format(
-            file_catalog=_build_file_catalog(store),
+            file_catalog=await asyncio.to_thread(_build_file_catalog, store),
             entry_list="\n\n".join(entry_lines),
         )
 

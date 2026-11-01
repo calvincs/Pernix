@@ -73,3 +73,45 @@ def test_deep_recall_tool_runs_off_the_event_loop(monkeypatch):
 
     assert asyncio.run(main()) == "done"
     assert seen["thread"] != seen["loop"]
+
+
+def test_watchdog_names_a_busy_thread():
+    done = threading.Event()
+
+    def _burn_cpu_for_test():
+        while not done.is_set():
+            sum(range(1000))
+
+    th = threading.Thread(target=_burn_cpu_for_test, name="burner", daemon=True)
+    th.start()
+    try:
+        time.sleep(0.05)
+        text = loop_watchdog._busy_threads({threading.get_ident()})
+    finally:
+        done.set()
+        th.join()
+    assert "burner" in text
+    assert "_burn_cpu_for_test" in text
+
+
+def test_fallback_report_runs_off_the_event_loop(monkeypatch):
+    from core.scout import runner
+
+    seen = {}
+
+    def _fallback(*a, **k):
+        seen["thread"] = threading.get_ident()
+        return "report"
+
+    monkeypatch.setattr(runner, "_build_fallback_report", _fallback)
+    monkeypatch.setattr(runner, "should_bypass_scout", lambda *a: True)
+
+    class _Brief:
+        turn_count = 0
+
+    async def main():
+        seen["loop"] = threading.get_ident()
+        return await runner.run_scout("hi", "sid", session_brief=_Brief())
+
+    assert asyncio.run(main()) == "report"
+    assert seen["thread"] != seen["loop"]

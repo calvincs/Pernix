@@ -1274,7 +1274,7 @@ async def run_scout(
     # Check bypass
     if should_bypass_scout(message, brief.turn_count):
         logger.debug("Scout bypassed, using fallback for session %s", session_id)
-        return _build_fallback_report(message, brief, reason="bypass")
+        return await asyncio.to_thread(_build_fallback_report, message, brief, reason="bypass")
 
     # A retry/escalate grade on the turn just finished is planning input for
     # this one. Kept out of `message` itself so memory/tool discovery still
@@ -1443,7 +1443,9 @@ async def run_scout(
     )
     # Reuse the fallback we already built (it carries scout_model/latency and
     # any partial context) rather than rebuilding an identical one.
-    return degraded_report if degraded_report is not None else _build_fallback_report(message, brief)
+    if degraded_report is not None:
+        return degraded_report
+    return await asyncio.to_thread(_build_fallback_report, message, brief)
 
 
 async def _run_scout_llm(
@@ -1905,10 +1907,10 @@ async def _run_scout_llm(
     # that context, so a degraded scout turn stays workable.
     if report is None:
         logger.warning("Scout did not submit report after %d rounds, using deterministic fallback", max_rounds)
-        report = _build_fallback_report(message, brief)
+        report = await asyncio.to_thread(_build_fallback_report, message, brief)
     elif _is_degenerate_report(report):
         logger.warning("Scout returned an empty report — replacing with deterministic fallback")
-        report = _build_fallback_report(message, brief)
+        report = await asyncio.to_thread(_build_fallback_report, message, brief)
 
     # Best-effort validation for reports that skipped the in-loop path
     # (last-round native tool-call, text fallback, or fabricated empty report).

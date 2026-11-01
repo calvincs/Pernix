@@ -357,7 +357,7 @@ async def distill_session(
     # Build existing file list for the prompt (rich catalog: name + count + description)
     from core.memory.ingest import _build_file_catalog
 
-    file_list_str = _build_file_catalog(store)
+    file_list_str = await asyncio.to_thread(_build_file_catalog, store)
     prompt = DISTILL_PROMPT.format(existing_files=file_list_str)
 
     # Space routing (v33): a space session's knowledge belongs in the

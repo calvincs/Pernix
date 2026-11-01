@@ -168,7 +168,7 @@ async def _llm_route_sections(
     """Ask LLM to route sections to files. Returns {index: file_name} or None on failure."""
     from core.llm.client import get_llm_client
 
-    catalog = _build_file_catalog(store)
+    catalog = await asyncio.to_thread(_build_file_catalog, store)
     section_list = _build_section_list(sections)
 
     prompt = _ROUTE_PROMPT.format(file_catalog=catalog, section_list=section_list)
