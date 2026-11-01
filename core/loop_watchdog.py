@@ -10,9 +10,7 @@ the loop comes back.
 from __future__ import annotations
 
 import asyncio
-import faulthandler
 import logging
-import signal
 import sys
 import threading
 import time
@@ -79,12 +77,6 @@ def _watch(loop: asyncio.AbstractEventLoop, thread_id: int, stop: threading.Even
 def start(stall_s: float = STALL_S, poll_s: float = _POLL_S) -> threading.Event:
     """Start watching the running loop. Set the returned event to stop."""
     loop = asyncio.get_running_loop()
-    # `kill -USR1 <pid>` dumps every thread's stack to stderr. It needs no GIL
-    # and no ptrace, so it works on a busy process inside the container.
-    try:
-        faulthandler.register(signal.SIGUSR1, file=sys.__stderr__, all_threads=True, chain=False)
-    except (AttributeError, OSError, ValueError) as e:
-        logger.debug("Stack dump signal not registered: %s", e)
     stop = threading.Event()
     threading.Thread(
         target=_watch,
