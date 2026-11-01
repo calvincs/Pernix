@@ -725,6 +725,39 @@ def _claims_unbacked_action(text: str, did_tool_calls: bool) -> bool:
     return not did_tool_calls and bool(_CLAIMED_ACTION_RE.search(text or ""))
 
 
+# A link, PubMed id or DOI cited in a reply. Graded live: invented sources were
+# the most common serious failure, and a string match catches them for free.
+_SOURCE_REF_RE = re.compile(
+    r"https?://[^\s)\]>\"'`]+|\b(?:PMID|PubMed)(?: ID)?:?\s*\d{6,9}\b|\b10\.\d{4,9}/[^\s)\]>\"'`]+",
+    re.IGNORECASE,
+)
+
+
+def _normalize_source_ref(ref: str) -> str:
+    ref = ref.lower().split("#", 1)[0].rstrip(".,;:/*_")
+    ref = re.sub(r"^https?://(?:www\.)?", "", ref)
+    digits = re.fullmatch(r"(?:pmid|pubmed)(?: id)?:?\s*(\d+)", ref)
+    return digits.group(1) if digits else ref
+
+
+def _unsourced_refs(text: str, messages: list[dict]) -> list[str]:
+    """Sources cited in `text` that appear in nothing the model was shown.
+    Its own earlier replies do not count as a source."""
+    refs = _SOURCE_REF_RE.findall(text or "")
+    if not refs:
+        return []
+    shown = []
+    for m in messages:
+        if m.get("role") == "assistant":
+            continue
+        content = m.get("content")
+        if isinstance(content, list):
+            content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+        shown.append(str(content or ""))
+    corpus = "\n".join(shown).lower()
+    return list(dict.fromkeys(r for r in refs if _normalize_source_ref(r) not in corpus))[:6]
+
+
 def _announces_future_work(text: str) -> bool:
     """True when the reply's TAIL promises more work instead of doing it.
 
@@ -1609,6 +1642,7 @@ async def run_agent(
     )
     did_tool_calls = False
     _action_claim_checked = False
+    _sources_checked = False
     compaction = _CompactionController(session, session_id)
     compaction.turn_user_msg_id = _turn_user_msg_id
     _routing_requested_model = effective_model
@@ -2051,6 +2085,37 @@ async def run_agent(
                     "No tool ran this turn, but your reply says something was done. If you meant this turn, do it "
                     "now with a tool and report the real result. If it happened in an earlier turn, say so in one "
                     "line. Do not repeat your reply.",
+                )
+                session.touch()
+                collected_content = ""
+                tool_round += 1
+                _rounds_spent += 1
+                continue
+
+            # A cited source that no tool returned gets one chance to be fetched
+            # or removed. Bounded per turn, and never on a tool-less round.
+            _bad_refs = (
+                _unsourced_refs(collected_content, payload.messages)
+                if (
+                    not _sources_checked
+                    and collected_content
+                    and stream_tools
+                    and tool_round < settings.max_tool_rounds - 2
+                    and not session.cancel_requested
+                )
+                else []
+            )
+            if _bad_refs:
+                _sources_checked = True
+                await _save_turn_msg("assistant", collected_content)
+                await asyncio.to_thread(
+                    db.add_message,
+                    session_id,
+                    "system",
+                    "Your reply cites sources that appear in no tool result or message: "
+                    + ", ".join(_bad_refs)
+                    + ". Fetch each one now with a tool and check that it says what you claim, or remove it. "
+                    "If a tool cannot reach one, say so plainly. Then give the full corrected reply.",
                 )
                 session.touch()
                 collected_content = ""

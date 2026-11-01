@@ -17,6 +17,8 @@
   minutes and pushed it to the paid fallback.
 - Run the `deep_recall` search off the event loop, and log the loop's stack when
   it stalls for 5 s. A stall freezes every session, scout and API route.
+- Challenge a reply once when it cites a link, PubMed id or DOI that nothing in
+  the turn showed.
 - Migration v45 adds routing fields and a durable model-selection audit;
   model-picker and agent session selections now survive restart.
 
