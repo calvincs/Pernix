@@ -129,6 +129,23 @@ When [MODEL ROUTING INTEL] is present (observed verdict rates by model and task 
 
 """
 
+# Characters kept from each end of a message when it is used as a search query.
+SEARCH_TEXT_EDGE = 1000
+
+
+def _search_text(message) -> str:
+    """The part of a message worth searching on.
+
+    A large paste used as a query takes minutes to embed and match, and a
+    timeout cannot stop that work in its thread, so every retry piled on top of
+    the last. The request usually sits at the start or the end of a paste.
+    """
+    text = message if isinstance(message, str) else str(message)
+    if len(text) <= 2 * SEARCH_TEXT_EDGE:
+        return text
+    return f"{text[:SEARCH_TEXT_EDGE]}\n{text[-SEARCH_TEXT_EDGE:]}"
+
+
 _SCOUT_PROMPT_MULTI_ROUND = """You also have tools to search deeper if the baseline is insufficient:
 - search_memory: Run additional memory queries with different keywords or modes. If a preloaded snippet is truncated and looks relevant, call search_memory with keywords from that entry and file=<file_name> to retrieve the complete content from that file.
 - search_sessions: Search other sessions with different queries
@@ -1526,6 +1543,7 @@ async def _run_scout_llm(
     # non-memory preload (tools, skills, models, workspace
     # state) is the treatment being measured and stays.
     _no_recall = memory_recall_denied(brief)
+    search_text = _search_text(message)
 
     def _gather_memory_baseline() -> str | None:
         if _no_recall:
@@ -1537,7 +1555,7 @@ async def _run_scout_llm(
             store = get_memory_store()
             if not store:
                 return None
-            results = store.search(message, limit=10, _track_hits=False, space_slug=_space_slug)
+            results = store.search(search_text, limit=10, _track_hits=False, space_slug=_space_slug)
             if results:
                 _step("memory", f"Found {len(results)} relevant memories")
                 mem_lines = ["", "MEMORY SEARCH RESULTS (use search_memory tool for deeper/different queries):"]
@@ -1567,7 +1585,7 @@ async def _run_scout_llm(
         try:
             from core.scout.search import gather_deep_memory
 
-            deep_mem = gather_deep_memory(message, char_cap=_mem_cap, space_slug=_space_slug)
+            deep_mem = gather_deep_memory(search_text, char_cap=_mem_cap, space_slug=_space_slug)
             if deep_mem:
                 _step("memory", "Deep search found additional results")
                 return f"\nDEEP MEMORY SEARCH:\n{deep_mem}"
@@ -1582,7 +1600,7 @@ async def _run_scout_llm(
         try:
             from core.scout.search import gather_cross_session_data
 
-            cross = gather_cross_session_data(message, brief.session_id)
+            cross = gather_cross_session_data(search_text, brief.session_id)
             if cross:
                 _step("sessions", "Found relevant data in other sessions")
                 return f"\n{cross}"
@@ -1596,7 +1614,7 @@ async def _run_scout_llm(
             from core.tools.registry import get_registry
 
             registry = get_registry()
-            discovered = registry.discover(message, limit=15)
+            discovered = registry.discover(search_text, limit=15)
             if discovered:
                 _step("tools", f"Found {len(discovered)} candidate tools")
                 tool_lines = ["", "AVAILABLE TOOLS (from discovery search):"]
@@ -1613,7 +1631,7 @@ async def _run_scout_llm(
             from core.skills.registry import get_skill_registry
 
             skill_reg = get_skill_registry()
-            discovered_skills = skill_reg.discover(message, limit=5)
+            discovered_skills = skill_reg.discover(search_text, limit=5)
             if discovered_skills:
                 _step("skills", f"Found {len(discovered_skills)} candidate skills")
                 skill_lines = ["", "AVAILABLE SKILLS (domain expertise packages — recommend when task matches):"]
@@ -1637,7 +1655,7 @@ async def _run_scout_llm(
         # Relevant past lessons (entry_type='lesson') — workarounds extracted
         # by the refine pass from prior failed sessions, via hybrid search.
         try:
-            lessons_section = _build_lessons_section(message, space_slug=_space_slug)
+            lessons_section = _build_lessons_section(search_text, space_slug=_space_slug)
             if lessons_section:
                 _step("lessons", "Injecting relevant past lessons")
                 return lessons_section
