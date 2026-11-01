@@ -711,6 +711,20 @@ _COURTESY_CLOSER_RE = re.compile(
 )
 
 
+# A reply saying the work was done. Only read on a turn where no tool ran.
+_CLAIMED_ACTION_RE = re.compile(
+    r"\bi(?:'ve| have)? (?:just |now |also )?(?:re-?ran|ran|fixed|updated|saved|wrote|edited|verified|confirmed"
+    r"|deleted|created|added|tested)\b"
+    r"|(?:^|[\n.!] ?)\s*(?:re-?ran|fixed|updated|saved|verified|confirmed)\b",
+    re.IGNORECASE,
+)
+
+
+def _claims_unbacked_action(text: str, did_tool_calls: bool) -> bool:
+    """True when a turn with no tool call says it did something."""
+    return not did_tool_calls and bool(_CLAIMED_ACTION_RE.search(text or ""))
+
+
 def _announces_future_work(text: str) -> bool:
     """True when the reply's TAIL promises more work instead of doing it.
 
@@ -1594,6 +1608,7 @@ async def run_agent(
         tool_failures=tool_failures,
     )
     did_tool_calls = False
+    _action_claim_checked = False
     compaction = _CompactionController(session, session_id)
     compaction.turn_user_msg_id = _turn_user_msg_id
     _routing_requested_model = effective_model
@@ -2017,6 +2032,31 @@ async def run_agent(
             if _followup_pending:
                 _followup_pending = False
                 await asyncio.to_thread(_record_followup_outcome, session, session_id, False)
+
+            # A reply claiming work on a turn with no tool call. Graded live as
+            # "Reran" with nothing run: the most trust-breaking failure left.
+            if (
+                not _action_claim_checked
+                and collected_content
+                and tool_round < settings.max_tool_rounds - 2
+                and not session.cancel_requested
+                and _claims_unbacked_action(collected_content, did_tool_calls)
+            ):
+                _action_claim_checked = True
+                await _save_turn_msg("assistant", collected_content)
+                await asyncio.to_thread(
+                    db.add_message,
+                    session_id,
+                    "system",
+                    "No tool ran this turn, but your reply says something was done. If you meant this turn, do it "
+                    "now with a tool and report the real result. If it happened in an earlier turn, say so in one "
+                    "line. Do not repeat your reply.",
+                )
+                session.touch()
+                collected_content = ""
+                tool_round += 1
+                _rounds_spent += 1
+                continue
 
             # Forced follow-up (spec Feature 9): the model narrated future work
             # ("Next, I'll…") and then went quiet. Ending the turn here means

@@ -703,7 +703,7 @@ def register(reg) -> None:
         },
         category="memory",
         tags=["remember", "save", "store", "memory", "persist", "note", "record"],
-        timeout=30,
+        timeout=90,
         parallel_safe=True,
         denied_session_types={"canary"},  # plan §5: canaries read memory, never write
     )
@@ -775,7 +775,7 @@ def register(reg) -> None:
         },
         category="memory",
         tags=["recall", "search", "memory", "retrieve", "find", "knowledge"],
-        timeout=30,
+        timeout=90,
         parallel_safe=True,
     )
 

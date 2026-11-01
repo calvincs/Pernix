@@ -7,13 +7,13 @@ and saves them to persistent memory with dedup.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
 from dataclasses import dataclass
 
 from config import settings
+from core.llm.jsonx import extract_json
 
 logger = logging.getLogger("pernix.memory.distill")
 
@@ -109,6 +109,8 @@ def _is_saved(result: str) -> bool:
 
 # The FILE ROUTING RULES below name canonical memory files — keep in sync
 # with the routing vocabulary in core/memory/routing.py.
+DISTILL_READ_ATTEMPTS = 2
+
 DISTILL_PROMPT = """You are a session memory distiller. Extract the most important findings,
 decisions, and skills from this conversation.
 
@@ -398,25 +400,36 @@ async def distill_session(
     covered_to = watermark
 
     for index, chunk in enumerate(chunks):
-        try:
-            response = await client.chat(
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": chunk.text},
-                ],
-                model=model,
-                max_tokens=2000,
-            )
-            text = response.content.strip()
-        except Exception as e:
-            logger.warning("Distillation LLM call failed on chunk %d/%d: %s", index + 1, len(chunks), e)
+        entries: list[dict] = []
+        skipped = False
+        failed = False
+        # Qwen sometimes returns nothing or a sentence for no reason (2 of 40 on
+        # one fixed prompt), so one more call usually gets a readable answer.
+        for _attempt in range(DISTILL_READ_ATTEMPTS):
+            try:
+                response = await client.chat(
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": chunk.text},
+                    ],
+                    model=model,
+                    max_tokens=2000,
+                )
+                text = response.content.strip()
+            except Exception as e:
+                logger.warning("Distillation LLM call failed on chunk %d/%d: %s", index + 1, len(chunks), e)
+                failed = True
+                break
+            skipped = text.upper().rstrip(".") == "SKIP"
+            entries = [] if skipped else _parse_entries(text)
+            if skipped or entries:
+                break
+        if failed:
             break
 
-        if text.upper() == "SKIP":
+        if skipped:
             logger.debug("Distillation: LLM returned SKIP for session %s chunk %d", session_id, index + 1)
-            entries: list[dict] = []
         else:
-            entries = _parse_entries(text)
             if not entries:
                 # Unparseable output is a failed extraction, not an empty
                 # one. Committing coverage here would retire the material on
@@ -510,24 +523,13 @@ def _session_used_web_tools(messages: list[dict]) -> bool:
 
 
 def _parse_entries(text: str) -> list[dict]:
-    """Parse JSON array from LLM response, handling markdown fences."""
-    # Strip markdown code fences
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:])
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict):
-            return [data]
-        if isinstance(data, list):
-            return data
-    except json.JSONDecodeError:
-        logger.debug("Failed to parse distillation JSON: %s", text[:200])
+    """Parse the JSON array in an LLM response, with or without fences or prose."""
+    data = extract_json(text)
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return data
+    logger.debug("Failed to parse distillation JSON: %s", (text or "")[:200])
     return []
 
 
