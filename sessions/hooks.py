@@ -26,6 +26,11 @@ logger = logging.getLogger("pernix.sessions.hooks")
 # turn while keeping the read bounded on a long-lived session.
 REFLECT_TAIL_MESSAGES = 400
 
+# Sessions with a distill task running, and the newest request that arrived
+# during it. Loop-only state, see _schedule_distill.
+_distill_running: set[str] = set()
+_distill_rerun: dict[str, dict] = {}
+
 
 def _strip_thinking(text: str) -> str:
     """Strip LLM thinking/reasoning blocks from response content.
@@ -60,8 +65,9 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
     # Clean up any stale questions (answered inline or moot after turn completed)
     await _cleanup_stale_questions(session_id, session_obj=session_obj)
 
-    # Memory distillation
-    await _maybe_distill(session_id, session)
+    # Memory distillation. Never awaited here: it is an LLM call that took up
+    # to ~100 s, and a user's next message waits for FINALIZING to end.
+    _schedule_distill(session_id, session, session_obj)
 
     # Deterministic gates (plan 3a): run in FINALIZING immediately before
     # Reflect, once per attempt (they re-run on every reflect retry — the
@@ -193,6 +199,45 @@ async def _auto_title(session_id: str, emit=None) -> None:
                 emit({"type": "session.title", "title": title, "subtitle": subtitle})
     except Exception as e:
         logger.warning("Auto-title failed for %s: %s", session_id, e)
+
+
+def _schedule_distill(session_id: str, session: dict, session_obj=None) -> None:
+    """Distill in the background, one run per session at a time.
+
+    Two overlapping runs would read the same watermark and save the same
+    entries twice. A turn that ends during a run asks for one more pass, so
+    its messages are not left waiting for the next turn. Dying mid-run is
+    safe: the watermark only moves after a chunk is stored.
+    """
+    if session_id in _distill_running:
+        _distill_rerun[session_id] = session
+        return
+    from sessions.manager import get_manager
+
+    _distill_running.add(session_id)
+    # Same protection as post-hooks: keeps the reaper and snooze off the session.
+    if session_obj:
+        session_obj.add_background_ref()
+    get_manager()._spawn_detached(
+        _distill_task(session_id, session, session_obj),
+        f"distill:{session_id[:12]}",
+    )
+
+
+async def _distill_task(session_id: str, session: dict, session_obj=None) -> None:
+    try:
+        current: dict | None = session
+        while current is not None:
+            try:
+                await _maybe_distill(session_id, current)
+            except Exception as e:
+                logger.warning("Distillation failed for %s: %s", session_id, e)
+            current = _distill_rerun.pop(session_id, None)
+    finally:
+        _distill_running.discard(session_id)
+        _distill_rerun.pop(session_id, None)
+        if session_obj:
+            session_obj.remove_background_ref()
 
 
 async def _maybe_distill(session_id: str, session: dict) -> None:

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import gzip
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 from api.streaming import event_stream, sse_response
 from db import models as db
@@ -16,6 +19,9 @@ logger = logging.getLogger("pernix.api.sessions")
 # Matches HISTORY_PAGE in static/js/app.js — the transcript window the client
 # asks for, and the fallback when a caller passes a cursor with no size.
 DEFAULT_HISTORY_PAGE = 200
+
+# Below this, gzip saves too little to be worth the CPU.
+GZIP_MIN_BYTES = 1024
 
 
 @router.post("/api/sessions")
@@ -38,7 +44,13 @@ async def create_session(body: dict = {}):
 
 
 @router.get("/api/sessions")
-async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False, exclude_types: str = ""):
+async def list_sessions(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    archived: bool = False,
+    exclude_types: str = "",
+):
     """One page of sessions, newest first, plus how many there are in total.
 
     `total`/`has_more` are what let the sidebar offer the page behind this one
@@ -101,7 +113,7 @@ async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False
         # a second full scan of the table.
         total = sum(n for t, n in type_counts.items() if t not in excluded)
         archived_count = await _asyncio.to_thread(db.count_sessions, archived=True)
-    return {
+    payload = {
         "items": sessions,
         "count": len(sessions),
         "spaces": spaces,
@@ -113,6 +125,24 @@ async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False
         "type_counts": type_counts,
         "space_counts": space_counts,
     }
+    accepts_gzip = "gzip" in request.headers.get("accept-encoding", "")
+    return await _asyncio.to_thread(_session_list_response, payload, accepts_gzip)
+
+
+def _session_list_response(payload: dict, accepts_gzip: bool) -> JSONResponse:
+    """Encode the sidebar's list, gzipped when the client takes it.
+
+    Every open tab polls this each 10 s, and a full page is about 436 KB of
+    JSON (about 103 KB gzipped). This is here, in a thread, and not a global
+    GZipMiddleware, which would compress every large response on the event loop.
+    """
+    response = JSONResponse(jsonable_encoder(payload))
+    response.headers.add_vary_header("Accept-Encoding")
+    if accepts_gzip and len(response.body) >= GZIP_MIN_BYTES:
+        response.body = gzip.compress(response.body, compresslevel=5)
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Content-Length"] = str(len(response.body))
+    return response
 
 
 @router.get("/api/sessions/search")

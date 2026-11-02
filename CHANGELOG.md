@@ -2,6 +2,13 @@
 
 ## Unreleased — development
 
+- Give the container 45 s to stop. Docker's 10 s default killed Pernix before
+  its shutdown ran on deploys with a connection still open.
+- Run Files search, delete and upload off the event loop, so a search over a
+  large workspace no longer freezes every session. Same for the embedding sweep.
+- Run distill in the background, one run per session, so a follow-up message no
+  longer waits for it at the end of a turn.
+- Gzip the sidebar's session list, about 436 KB per poll from each open tab.
 - Let memory merges finish: raise the merge reply limit, which cut most replies
   off mid-JSON. A fused entry now archives its original instead of deleting it,
   so a bad merge can be undone.

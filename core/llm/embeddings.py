@@ -358,7 +358,9 @@ async def embed_pending(store, max_entries: int = 256) -> int:
         return 0
     if degraded():
         await asyncio.to_thread(check_remote_recovery)  # may switch active_model() back
-    backlog = store.pending_embeddings(limit=100_000)  # the real count, not the slice
+    # Both store calls walk rows in Python under the store lock: off the loop.
+    # The real count, not the slice.
+    backlog = await asyncio.to_thread(store.pending_embeddings, limit=100_000)
     pending = backlog[:max_entries]
     if not pending:
         return 0
@@ -382,7 +384,7 @@ async def embed_pending(store, max_entries: int = 256) -> int:
             continue
         consecutive_failures = 0
         rows = [(p["file_name"], p["epoch"], p["content_hash"], vec) for p, vec in zip(batch, vectors)]
-        stored += store.store_embeddings(rows)
+        stored += await asyncio.to_thread(store.store_embeddings, rows)
     if stored or failed_batches:
         logger.info(
             "Embedded %d memory entr%s with %s (%d skipped in %d failed batch%s; %d still pending)",
