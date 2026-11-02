@@ -5,10 +5,6 @@
   its full max_wait (30 minutes) even though spawn-time cleanup had
   already stamped it errored. The reaper and the suspend path both treat
   that as terminal; this was the one place that did not.
-* retry_worker cancels the old worker and immediately spawns its
-  replacement. At max_concurrent_workers the still-CANCELLING original
-  counted against its own replacement, so the retry failed with "Max
-  active workers reached".
 """
 
 import inspect
@@ -43,9 +39,3 @@ def test_the_active_count_can_exclude_one_worker(mgr):
     parent.worker_ids = list(ids)
 
     assert orchestration._count_active_workers(mgr, parent) == 3
-    assert orchestration._count_active_workers(mgr, parent, ignore=ids[0]) == 2
-
-
-def test_retry_hands_the_outgoing_id_to_the_spawn_gate():
-    src = inspect.getsource(orchestration.retry_worker)
-    assert "_replacing=worker_id" in src, "the cancelled worker must not block its own replacement"

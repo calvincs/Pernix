@@ -2,6 +2,11 @@
 
 ## Unreleased — development
 
+- Remove `retry_worker`. It cancelled workers with no check and dropped their
+  task. Use `resume_worker` to keep the work, or `spawn_worker` to start fresh;
+  a failed worker's reply now shows its original task.
+- Tell the model to wait with `await_workers` when it spawns a worker, and say
+  who cancelled a worker and how old it was.
 - Say a worker is still running when its result is asked for too soon. "No
   output, consider retrying" made the model cancel live workers.
 - Run the scout LLM once per session, on the first real message. Later turns

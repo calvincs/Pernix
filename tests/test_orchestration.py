@@ -724,7 +724,6 @@ def test_both_spawn_gates_share_one_definition():
     from core.extensions import orchestration
 
     src = inspect.getsource(orchestration.spawn_worker)
-    # Both gates call the one helper. They pass `ignore` so a retry's
-    # still-unwinding predecessor does not count against its replacement.
-    assert src.count("_count_active_workers(manager, parent, ignore=_replacing)") == 2
+    # Both gates call the one helper.
+    assert src.count("_count_active_workers(manager, parent)") == 2
     assert '"deleted"' not in src, "status tuples must not be re-inlined in spawn_worker"
