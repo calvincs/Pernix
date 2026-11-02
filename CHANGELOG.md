@@ -2,6 +2,8 @@
 
 ## Unreleased — development
 
+- Say a worker is still running when its result is asked for too soon. "No
+  output, consider retrying" made the model cancel live workers.
 - Run the scout LLM once per session, on the first real message. Later turns
   get a short memory search with no LLM. `scout_first_turn_only = false`
   restores the old behaviour.

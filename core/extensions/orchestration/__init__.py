@@ -807,6 +807,17 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
     # No output at all
     if _worker_obj and _worker_obj.error:
         return f"Worker {worker_id[:8]} FAILED with error: {_worker_obj.error}. Consider retrying with retry_worker()."
+    # Still working is not the same as no output. Told "may have failed
+    # silently, consider retrying", the model retried live workers, and each
+    # retry cancelled the run it replaced. A queued worker is IDLE_READY too,
+    # so a turn must have started before idle can mean finished.
+    if _worker_obj is not None:
+        _started = getattr(_worker_obj, "_turn_id", 0) > 0 or db.latest_turn_id(worker_id) > 0
+        if _worker_is_mid_turn(_worker_obj) or not _started:
+            return (
+                f"Worker {worker_id[:8]} is still running, so it has no result yet. "
+                "Call await_workers to wait for it. Do not use retry_worker: that cancels it."
+            )
     return f"Worker {worker_id[:8]} produced no output. It may have failed silently or timed out. Consider retrying with retry_worker()."
 
 
