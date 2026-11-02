@@ -288,6 +288,7 @@ async def consolidate_files(
     Returns (used_llm, files_consolidated).
     """
     from core.memory.consolidate import (
+        LLM_MERGE_MAX_TOKENS,
         build_budgeted_merge_prompt,
         build_signatures,
         execute_merge,
@@ -400,7 +401,7 @@ async def consolidate_files(
                         {"role": "user", "content": prompt},
                     ],
                     model=settings.background_model or settings.llm_model,
-                    max_tokens=2000,
+                    max_tokens=LLM_MERGE_MAX_TOKENS,
                 )
                 decision = parse_llm_merge_response(response.content.strip(), cluster)
                 used_llm = True

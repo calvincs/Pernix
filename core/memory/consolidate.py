@@ -448,8 +448,10 @@ Output format:
 
 
 # Output tokens the merge call asks for (sweeps passes the same number as
-# max_tokens); the prompt budget has to leave room for them.
-LLM_MERGE_MAX_TOKENS = 2000
+# max_tokens); the prompt budget has to leave room for them. A verdict with
+# fused text runs 6-7k tokens; at 2000 most replies were cut off mid-JSON and
+# thrown away, so almost nothing merged.
+LLM_MERGE_MAX_TOKENS = 8000
 # Preview ladder. The prompt used to splice 1024 chars of EVERY entry of
 # EVERY file in the cluster with no total cap: the two largest clusters on
 # the live box produced ~195K-token prompts against a 196 608-token window,
@@ -677,6 +679,7 @@ def execute_merge(store, decision: MergeDecision) -> dict:
     Moves kept entries to target, archives source files, logs to DB.
     """
     from core.memory.format import parse_entries_from_markdown
+    from core.memory.sweeps import archive_entries
     from db.database import connect_memory
 
     stats = {
@@ -785,11 +788,14 @@ def execute_merge(store, decision: MergeDecision) -> dict:
                 actual_epoch = oldest_epoch
 
             # The fused entry carries all unique facts from both contributors
-            # (per the merge prompt contract); supersede the target-file
-            # contributor so the fuse doesn't duplicate it. The source-file
-            # contributor is retired by step 3's whole-file archive.
-            if tgt_orig is not None:
-                store.delete_entry(decision.target_file, fuse_target_epoch)
+            # (per the merge prompt contract), but that text is model-written
+            # and nothing fact-checks it. Archive the target-file contributor,
+            # never delete it: it leaves search, and a bad fuse can be undone
+            # from the file. The source-file contributor is retired by step
+            # 3's whole-file archive. Equal epochs mean the real epoch could
+            # not be read, and archiving would hit the fused entry too.
+            if tgt_orig is not None and actual_epoch != fuse_target_epoch:
+                archive_entries(store, decision.target_file, {fuse_target_epoch})
 
             # Write summed hit count for fused entry
             if total_hits > 0:

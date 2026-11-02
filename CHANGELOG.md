@@ -2,6 +2,9 @@
 
 ## Unreleased — development
 
+- Let memory merges finish: raise the merge reply limit, which cut most replies
+  off mid-JSON. A fused entry now archives its original instead of deleting it,
+  so a bad merge can be undone.
 - Fix false fallback alerts when a user selects the configured backup model.
   Record actual routing provenance; keep historical routes unknown.
 - Track one failover incident across midnight, with exact UTC windows and
