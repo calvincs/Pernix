@@ -86,3 +86,31 @@ def test_fuse_keeps_the_entry_count_right(store):
     finally:
         conn.close()
     assert count == 1
+
+
+def test_archive_file_survives_per_entry_archive_tags(store):
+    """Real source files hold per-entry tags; they must not read as archived."""
+    from core.memory.format import is_file_archived
+    from core.memory.sweeps import archive_entries
+
+    store.add_entry("An old fact about the east coast rail schedule.", file_name="src.file", epoch=100)
+    store.add_entry("A live fact about the postal sorting office hours.", file_name="src.file", epoch=200)
+    archive_entries(store, "src.file", {100})
+
+    store.archive_file("src.file")
+
+    assert is_file_archived(store.read_file("src.file"))
+    assert parse_entries_from_markdown("src.file", store.read_file("src.file")) == []
+    store.reindex()
+    conn = store._connect()
+    try:
+        count = conn.execute("SELECT count(*) FROM memory_fts WHERE file_name = 'src.file'").fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 0
+
+
+def test_merge_rung_outlasts_a_real_merge():
+    from core.snooze import RUNG_TIMEOUTS
+
+    assert RUNG_TIMEOUTS["consolidate_files"] >= 180

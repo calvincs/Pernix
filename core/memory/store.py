@@ -1063,6 +1063,8 @@ class MemoryStore:
 
     def archive_file(self, name: str) -> None:
         """Mark entire file as archived: tag header, remove FTS5 entries, zero count."""
+        from core.memory.format import is_file_archived
+
         name = self._validate_name(name)
         md_path = self._dir / f"{name}.md"
         if not md_path.exists():
@@ -1070,12 +1072,16 @@ class MemoryStore:
 
         with self._lock:
             content = md_path.read_text()
-            # Add archived tag after file header if not already present
-            if "<!-- @archived: true -->" not in content:
+            # Add archived tag after file header if not already present. Check
+            # the header only: per-entry archive tags elsewhere in the file
+            # must not read as "already archived", or the live entries return
+            # at the next reindex.
+            if not is_file_archived(content):
                 # Insert after the @created line
                 content = content.replace(
                     f"<!-- @file: {name} -->",
                     f"<!-- @file: {name} -->\n<!-- @archived: true -->",
+                    1,
                 )
                 self._write_locked(md_path, content)
 

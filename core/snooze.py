@@ -54,7 +54,7 @@ SKILL_SWEEP_MAX_PENDING = 30
 
 # Captured by child tasks and worker contexts; a new cycle cannot revive old work.
 _CANCEL_SCOPES = contextvars.ContextVar("snooze_cancel_scopes", default=())
-RUNG_TIMEOUTS = {"consolidate_files": 60, "dedup_sweep": 60, "reroute_misplaced_entries": 60, "split_file": 120}
+RUNG_TIMEOUTS = {"consolidate_files": 240, "dedup_sweep": 60, "reroute_misplaced_entries": 60, "split_file": 120}
 
 
 # Session types snooze looks straight through (plan §5, pass-3 F3): they
