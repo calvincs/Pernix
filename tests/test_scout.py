@@ -236,7 +236,7 @@ def test_fallback_report_announces_degraded_scout():
     report = _build_fallback_report("Build something", SessionBrief(session_id="test"))
     section = report.to_system_prompt_section()
     assert "[SCOUT STATUS]" in section
-    assert "discover_tools" in section
+    assert "lookup" in section
 
 
 def test_bypass_fallback_stays_quiet():

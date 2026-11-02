@@ -1169,11 +1169,15 @@ _CONVERSATIONAL_RE = re.compile(
 )
 
 
-def should_bypass_scout(message: str, turn_count: int) -> bool:
+def should_bypass_scout(message: str, turn_count: int, scouted_before: bool = False) -> bool:
     """Determine if scout should be skipped for trivial interactions."""
     if not settings.scout_enabled:
         return True
     words = len(message.split())
+    # One LLM scout per session, spent on the first message worth planning: a
+    # "hi" must not use it up before the real task arrives.
+    if settings.scout_first_turn_only and (scouted_before or words <= 3):
+        return True
     # Short follow-ups in active sessions
     if words <= 3 and turn_count > 1:
         return True
@@ -1272,9 +1276,13 @@ async def run_scout(
     brief = session_brief or build_session_brief(session_id)
 
     # Check bypass
-    if should_bypass_scout(message, brief.turn_count):
+    run_once = settings.scout_first_turn_only
+    scouted_before = run_once and await asyncio.to_thread(db.session_has_llm_scout, session_id)
+    if should_bypass_scout(message, brief.turn_count, scouted_before):
         logger.debug("Scout bypassed, using fallback for session %s", session_id)
-        return await asyncio.to_thread(_build_fallback_report, message, brief, reason="bypass")
+        return await asyncio.to_thread(
+            _build_fallback_report, message, brief, reason="no_llm" if run_once else "bypass", session_id=session_id
+        )
 
     # A retry/escalate grade on the turn just finished is planning input for
     # this one. Kept out of `message` itself so memory/tool discovery still
@@ -2141,12 +2149,20 @@ def _validate_report(report: ScoutReport) -> ScoutReport:
 # ---------------------------------------------------------------------------
 
 
-def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "degraded") -> ScoutReport:
+# Bounds for the no-LLM report: it rides on every later turn of a session.
+_NO_LLM_QUERY_CHARS = 600
+_NO_LLM_MEMORY_CHARS = 1800
+
+
+def _build_fallback_report(
+    message: str, brief: SessionBrief, *, reason: str = "degraded", session_id: str = ""
+) -> ScoutReport:
     """Deterministic fallback when scout LLM fails or is bypassed.
 
-    reason: "bypass" when scout was skipped on purpose (cheap turn), "degraded"
-    when it ran and produced nothing usable. Only "degraded" warns the agent
-    that its tool list is an uncurated default.
+    reason: "bypass" when scout was skipped on purpose (cheap turn), "no_llm"
+    for a turn that is planned without the scout LLM by design, "degraded" when
+    it ran and produced nothing usable. Only "degraded" warns the agent that
+    its tool list is an uncurated default.
 
     Skills are intentionally excluded — skill discovery requires NLP matching
     which is too expensive for a synchronous fallback. The agent can still
@@ -2166,9 +2182,12 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
 
             store = get_memory_store()
             if store:
-                memory_context = store.recall(message, top=3) or ""
+                query = message[:_NO_LLM_QUERY_CHARS] if reason == "no_llm" else message
+                memory_context = store.recall(query, top=3) or ""
         except Exception:
             pass
+    if reason == "no_llm":
+        memory_context = memory_context[:_NO_LLM_MEMORY_CHARS]
 
     # Default tools: core + recently used
     from core.tools.registry import get_registry
@@ -2198,10 +2217,14 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
             tool_names.add(name)
 
     approach = (
-        "Scout unavailable — proceed conservatively. Use discover_tools / "
-        "discover_skills before assuming tool surface. Verify file paths "
-        "with glob/grep before file_write. Aim to write any deliverable early."
+        "Scout unavailable — proceed conservatively. Use lookup before assuming "
+        "tool surface. Verify file paths with glob/grep before file_write. Aim "
+        "to write any deliverable early."
     )
+    if reason == "no_llm":
+        # Only the LLM scout read the prior grade. A turn without it must not
+        # lose the grader's strategy (session 3dc5a307d751).
+        approach = _prior_turn_verdict_block(session_id)
 
     return ScoutReport(
         memory_context=memory_context,

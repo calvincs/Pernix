@@ -29,6 +29,7 @@ from core.llm.semaphore import PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
 from core.llm.stream_ladder import stream_with_failover
 from core.llm.types import REJECTED_CALL_KEY, is_rejected_call
 from core.tools.executor import execute_tool_round, is_command_failure
+from core.tools.native import frozen_surface
 from core.tools.registry import get_registry
 from db import models as db
 from sessions.state import AgentSession, turn_state
@@ -1004,6 +1005,7 @@ class _ToolCallGate:
         # for the assistant row to be written. Both reset per admit().
         self._proposed: list[dict] = []
         self._rejected: list[dict] = []
+        self._wrapped: dict[str, dict] = {}  # call id -> original use_tool call
 
     async def admit(self, calls: list[dict], active_tools: list[str]) -> tuple[list[dict], dict[str, list[str]]]:
         """Return (executable calls, correction notes keyed by tool_call id).
@@ -1021,6 +1023,8 @@ class _ToolCallGate:
         self._notes: dict[str, list[str]] = {}
         self._proposed = list(calls)
         self._rejected = []
+        self._wrapped: dict[str, dict] = {}
+        calls = await self._unwrap_use_tool(calls)
         unique = await self._dedup(calls)
         unique = await self._semantic_dedup(unique)
         valid = await self._correct_names(unique, active_tools)
@@ -1060,6 +1064,10 @@ class _ToolCallGate:
             tc["id"] = f"rejected_{len(self._rejected)}_{_hash_args(tc.get('arguments', ''))}"
         tc[REJECTED_CALL_KEY] = True
         tc["arguments"] = _rejected_call_args(tc.get("arguments", ""))
+        # The assistant row holds the original use_tool call, not this copy.
+        wrapper = self._wrapped.get(tc["id"])
+        if wrapper is not None:
+            wrapper[REJECTED_CALL_KEY] = True
         self._rejected.append({"tc": tc, "message": message})
 
     def _note(self, tc: dict, text: str) -> None:
@@ -1161,6 +1169,41 @@ class _ToolCallGate:
                 else:
                     kept.append(tc)
             out.extend(kept)
+        return out
+
+    async def _unwrap_use_tool(self, calls: list[dict]) -> list[dict]:
+        """Turn use_tool(name, arguments) into a call to the named tool.
+
+        This runs first, so dedup, validation, stuck detection, the executor's
+        policy checks and reflect all see the real tool. The assistant row
+        keeps the original use_tool call: that is what the model sent, and
+        showing it a direct call would teach it to skip use_tool.
+        """
+        out: list[dict] = []
+        for tc in calls:
+            if (tc.get("name") or "").strip() != "use_tool":
+                out.append(tc)
+                continue
+            if not tc.get("id"):
+                tc["id"] = f"use_tool_{len(self._wrapped)}_{_hash_args(tc.get('arguments', ''))}"
+            raw = tc.get("arguments")
+            try:
+                outer = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
+                inner = outer.get("arguments", {})
+                inner = (json.loads(inner) if inner.strip() else {}) if isinstance(inner, str) else inner
+            except (AttributeError, json.JSONDecodeError, ValueError):
+                outer, inner = {}, None
+            name = outer.get("name") if isinstance(outer, dict) else None
+            if not isinstance(name, str) or not name.strip() or name.strip() == "use_tool":
+                problem = 'use_tool needs name="<tool>" and arguments={...}. Call lookup to find the tool.'
+            elif not isinstance(inner or {}, dict):
+                problem = "use_tool arguments must be a JSON object of the tool's parameters."
+            else:
+                unwrapped = {**tc, "name": name.strip(), "arguments": json.dumps(inner or {})}
+                self._wrapped[tc["id"]] = tc
+                out.append(unwrapped)
+                continue
+            await self._reject(tc, transcript_msg=f"Error: {problem}", event_msg=f"Error: {problem}", event_args={})
         return out
 
     async def _correct_names(self, calls: list[dict], active_tools: list[str]) -> list[dict]:
@@ -2717,6 +2760,14 @@ def _resolve_tool_surface(
     allowed_tools (when set) intersects the result, and reflect's retry
     exclusions are subtracted last so they beat all four.
     """
+    if settings.scout_first_turn_only:
+        report = session.last_scout_report
+        tools = frozen_surface(
+            registry,
+            allowlist=getattr(session, "tool_allowlist", None),
+            excluded=session.turn.retry_excluded_tools,
+        )
+        return (report.to_system_prompt_section() if report else ""), tools
     # The prior-turn lookup is a transcript read; run_agent prefetches it
     # off-loop and hands it in so turn start does not block the event loop.
     if prior_tool_names is None:
@@ -3059,7 +3110,8 @@ async def _record_round_results(
         record_tool_outcome(session.turn, result)
 
         # Dynamic tool expansion via discover_tools
-        if result.tool_name == "discover_tools" and not result.was_error:
+        # Off with a fixed tool list: widening it mid-turn would cool the prompt.
+        if result.tool_name == "discover_tools" and not result.was_error and not settings.scout_first_turn_only:
             _expand_tools_from_discovery(result.content, active_tools)
 
 
@@ -3597,7 +3649,7 @@ def _build_hallucinated_tool_hint(bad_name: str, registry) -> str:
 
     if not ordered:
         return (
-            "No close match found in the active tool set. Call discover_tools "
+            "No close match found in the active tool set. Call lookup "
             "with a keyword (e.g. the noun from your intent) to find the right tool."
         )
 

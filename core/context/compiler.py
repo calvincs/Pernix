@@ -226,13 +226,50 @@ def _legacy_multimodal_to_text(content_str: str) -> str:
     return "\n".join(parts)
 
 
+FINDING_HELP = """FINDING HELP: Your first message in a session may come with a briefing. Later turns get only a short memory search. For more help, ask for it.
+
+lookup(query) searches memory, past sessions, skills and tools in one call. It is fast and changes nothing.
+
+Call lookup BEFORE you act or answer if ANY of these is true. Do not judge whether you probably know the answer. Just check this list.
+1. The user names a person, project, file, product or preference not yet seen in this conversation.
+2. The user points to the past: "again", "last time", "as before", "remember", "we did", "the usual".
+3. This message has a different subject or goal from the last one.
+4. A tool failed or returned nothing, and you are about to try something else.
+5. You are about to say you do not know, cannot do it, or lack a tool.
+6. You are about to install, build or write something a tool or skill might already do.
+
+Do NOT call lookup for greetings, thanks, "go ahead", or the next step of a plan that is working.
+
+Query with 3 to 8 plain words naming the subject, not a sentence. If nothing useful comes back, try once with different words. Then continue, and say what you could not find. Empty results mean the words did not match, not that the fact does not exist.
+
+After lookup: use a memory hit. For a skill, call load_skill(name). For a tool in your list, call it. For any other tool, call use_tool(name, arguments) with the schema lookup gave you.
+
+Tools outside your list: {catalog}"""
+
+
+def _build_finding_help_block(tool_schemas: list[dict] | None) -> str:
+    """How to get help, plus every tool's name. Byte-stable within a session.
+
+    Only for a session that has the helpers: a job's allow-list may not.
+    """
+    if not settings.scout_first_turn_only:
+        return ""
+    names = {(s.get("function") or {}).get("name") for s in tool_schemas or []}
+    if not {"lookup", "use_tool"} <= names:
+        return ""
+    from core.tools.native import catalog_names
+    from core.tools.registry import get_registry
+
+    return FINDING_HELP.format(catalog=", ".join(catalog_names(get_registry())) or "none")
+
+
 # Fixed base system prompt — stable across ALL turns (prompt cache friendly)
 BASE_SYSTEM_PROMPT = """You are Pernix, a headless AI agent. You execute tasks through tool use.
 State lives on disk (files, memory), not in context.
 You can be interrupted and resumed at any time.
 
 Before acting, THINK about what you need:
-- What tools might help? Use discover_tools to find them.
+- What tools might help? Use lookup to find them.
 - What do you already know? Use recall to check memory.
 - What instructions apply? Check SESSIONS.md if it exists.
 
@@ -258,7 +295,7 @@ Use those offset and limit values EXACTLY. Do NOT invent your own pagination
 (no limit=1 to "probe", no random offsets). Do not assume partial output is complete.
 
 Core tools: file_read, file_write, file_edit, glob, grep, bash, remember, recall,
-ask_user, discover_tools, discover_skills, load_skill, read_skill_resource.
+ask_user, lookup, load_skill, read_skill_resource.
 
 FACTS NEED A SOURCE: Every number, date, name, job status, or claim that you
 ran or checked something must come from a tool result or memory text in this
@@ -315,7 +352,7 @@ uploaded to the workspace. PDFs are auto-extracted to a sidecar
 Any attached file can be accessed via file_read("filename"). Image-specific
 handling depends on your model's vision capability — see [ACTIVE MODEL] below.
 
-For any other capability, use discover_tools to find it.
+For any other capability, use lookup to find it.
 
 SKILLS = capability packages in data/skills/. To use one: load_skill(name) and
 follow the instructions inside. Skills do NOT need validation.
@@ -1081,6 +1118,10 @@ def compile_context(
     if skills_block:
         system_parts.append(skills_block)
 
+    help_block = _build_finding_help_block(tool_schemas)
+    if help_block:
+        system_parts.append(help_block)
+
     # Temporal context (current time + birthdate)
     system_parts.append(_build_temporal_context())
 
@@ -1090,16 +1131,23 @@ def compile_context(
     # system_prompt ("\n\n" separator is 2 chars, counted by join()).
     static_prefix_chars = len("\n\n".join(system_parts))
 
-    if scout_report_text:
-        system_parts.append(scout_report_text)
-
     # Active goal — STATIC fields only (objective, ceilings, status), placed
     # after the scout section: stable across the rounds of a turn, changing
     # only between turns. Live burn goes in the volatile tail (plan 3b) —
     # burn in the head would invalidate the cached prefix every round.
     goal_block = _build_goal_block(session_id)
-    if goal_block:
-        system_parts.append(goal_block)
+
+    # Both blocks change between turns. In the head they make the whole history
+    # cold each turn (11.9 s vs 2.9 s at 67k tokens), so run-once mode moves
+    # them after this turn's user message. See turn_briefing below.
+    turn_briefing = ""
+    if settings.scout_first_turn_only:
+        turn_briefing = "\n\n".join(part for part in (scout_report_text, goal_block) if part)
+    else:
+        if scout_report_text:
+            system_parts.append(scout_report_text)
+        if goal_block:
+            system_parts.append(goal_block)
 
     system_prompt = "\n\n".join(system_parts)
     # The volatile per-call state (clock, resource status) is appended as a
@@ -1114,7 +1162,11 @@ def compile_context(
     )
     # Head is stable across the rounds of a turn — cached count. The tail is
     # tiny and changes per call, so it's counted raw.
-    system_tokens = _count_text_cached(system_prompt, estimator) + estimator.count(volatile_tail)
+    system_tokens = (
+        _count_text_cached(system_prompt, estimator)
+        + estimator.count(volatile_tail)
+        + (_count_text_cached(turn_briefing, estimator) if turn_briefing else 0)
+    )
 
     # --- Tool schema tokens ---
     tool_tokens = _count_text_cached(json.dumps(tool_schemas), estimator) if tool_schemas else 0
@@ -1396,6 +1448,7 @@ def compile_context(
         # overflow history_budget and evict the prompt itself.
         if turn_user_msg_id is not None and msg.get("id") == turn_user_msg_id and msg["role"] == "user":
             entry["_pinned"] = True
+            entry["_turn_user"] = True
 
         messages.append(entry)
 
@@ -1423,6 +1476,16 @@ def compile_context(
             insert_at = 2 if has_compaction and len(messages) >= 2 else 1
             messages.insert(insert_at, notice_entry)
             history_tokens += estimator.count_message(notice_entry)
+
+    # --- Place the turn briefing ---
+    # Right after this turn's user message, not at the tail: a later round
+    # adds rows behind it, so it keeps its spot and the turn's prefix holds. It
+    # is rebuilt per turn and never saved, so last turn's briefing leaves the
+    # history. User role, since Ollama drops a mid-conversation system message.
+    if turn_briefing:
+        at = next((i + 1 for i, m in enumerate(messages) if m.get("_turn_user")), len(messages))
+        briefing = {"role": "user", "content": f"[TURN BRIEFING, from the harness]\n{turn_briefing}", "_pinned": True}
+        messages.insert(at, briefing)
 
     # --- Append the volatile tail (clock + resource status) ---
     # After trim so it can never be dropped; last position keeps the

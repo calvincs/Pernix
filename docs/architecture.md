@@ -69,6 +69,8 @@ By default scout gets **one round** (`scout_max_rounds = 1`): everything it need
 
 The tool list scout curates isn't limited to Pernix's own extensions: Pernix ships a native **MCP** (Model Context Protocol) client, on by default (`mcp_enabled=true`) but inert with zero servers configured — connect one under Settings → Integrations → MCP Servers and its tools register as ordinary entries (`mcp_<server>_<tool>`) that scout picks from and the safety gate governs exactly like a builtin. See `core/extensions/mcp/` and [mcp.md](mcp.md).
 
+**Scout runs once per session by default** (`scout_first_turn_only = true`). A later turn gets a short memory search with no LLM. The tool list stays fixed for the session, because the served template puts tools ahead of the system text and any change makes the whole prompt cold. Tools outside that list are found with `lookup` and run with `use_tool`. Scout text and the goal block sit after the turn's user message, so the history stays reusable.
+
 ### 3. The Agent Loop — the worker
 
 Once scout finishes, the **main agent** takes over. This is where the user-facing response comes from.

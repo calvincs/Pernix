@@ -11,7 +11,7 @@
 
 ## Memory
 
-- Scout pre-loads a baseline memory search every turn — trust it for broad context.
+- Each turn brings a short memory search — trust it for broad context, and use `lookup` when you need more.
 - `recall(query)` — fast FTS5 search. Good for direct lookups. Scores: > 3.0 strong · 1.0–3.0 weak · < 1.0 noise.
 - `deep_recall(query, context=)` — LLM-synthesized search. Use when recall() is empty/weak, the query is complex, or cross-file reasoning is needed.
 - Empty recall results mean keywords didn't match — not that memory doesn't exist. Decompose the query or use deep_recall().
@@ -21,8 +21,8 @@
 ## Capability Discovery
 
 - When a task requires capabilities your current model lacks, discover what is available rather than giving up.
-- Use `list_available_models` and `discover_tools` to find models and tools that can fill the gap.
-- If the scout recommends a specific model, follow its guidance — it has already matched the task to available capabilities.
+- Use `list_available_models` and `lookup` to find models and tools that can fill the gap.
+- If a briefing recommends a specific model, follow its guidance — it has already matched the task to available capabilities.
 
 ## Delegation
 

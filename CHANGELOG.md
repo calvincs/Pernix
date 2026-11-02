@@ -2,6 +2,13 @@
 
 ## Unreleased — development
 
+- Run the scout LLM once per session, on the first real message. Later turns
+  get a short memory search with no LLM. `scout_first_turn_only = false`
+  restores the old behaviour.
+- Keep the tool list fixed for a session, since one changed tool made the whole
+  prompt cold. Add `lookup` and `use_tool` to reach every other tool.
+- Move scout text and the goal block after the turn's user message, so a long
+  chat reuses its history on each new turn.
 - Give the container 45 s to stop. Docker's 10 s default killed Pernix before
   its shutdown ran on deploys with a connection still open.
 - Run Files search, delete and upload off the event loop, so a search over a

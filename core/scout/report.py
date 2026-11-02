@@ -238,10 +238,10 @@ class ScoutReport:
                 "Scout's plan was submitted without full self-validation. "
                 "Outstanding concerns:\n- "
                 + "\n- ".join(self.viability_notes)
-                + "\nProceed with extra care and call discover_tools if recommendations look off."
+                + "\nProceed with extra care and call lookup if recommendations look off."
             )
 
-        if self.from_fallback and self.fallback_reason != "bypass":
+        if self.from_fallback and self.fallback_reason not in ("bypass", "no_llm"):
             # Render whenever scout degraded, not only when identity/rules are
             # also missing. The deterministic fallback fills those in from
             # SOUL.md/RULES.md, so gating on them hid the notice exactly when
@@ -252,8 +252,8 @@ class ScoutReport:
                 "[SCOUT STATUS]\n"
                 "Scout planning was unavailable for this turn — the tool list "
                 "below is a conservative default, not a curated one. Before "
-                "concluding a capability is missing, call discover_tools "
-                "(and recall) to check what this deployment already provides."
+                "concluding a capability is missing, call lookup to check "
+                "what this deployment already provides."
             )
 
         return "\n\n".join(parts)

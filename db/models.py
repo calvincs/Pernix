@@ -3876,6 +3876,17 @@ def mark_session_reviewed(session_id: str) -> None:
         )
 
 
+def session_has_llm_scout(session_id: str) -> bool:
+    """True once a real scout plan exists: a failed scout may run again."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM messages WHERE session_id = ? AND role = 'scout' "
+            "AND content LIKE '%\"from_fallback\": false%' LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    return row is not None
+
+
 def get_distill_watermark(session_id: str) -> int:
     """Newest message id distillation has both extracted AND stored (v38).
 

@@ -218,6 +218,10 @@ class Settings:
     # and each extra round cost ~6 s and re-sent the 15-19k-token prefix on the
     # reference box. Raise it to give scout its search tools back.
     scout_max_rounds: int = 1
+    # Run the scout LLM once per session. Later turns get a no-LLM memory search,
+    # the tool list stays fixed, and scout text sits after the history so the
+    # prompt prefix survives. False restores a scout on every turn.
+    scout_first_turn_only: bool = True
     # Per-item char cap on memory search results injected into scout's user
     # content. Smaller = less context pressure on long-running sessions.
     scout_preload_memory_char_limit: int = 600
