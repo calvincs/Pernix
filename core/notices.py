@@ -98,7 +98,7 @@ CATEGORIES: dict[str, Category] = {
     "skills.rolled_back": Category("log"),
     "skills.proposals_auto_applied": Category("log"),
     # A skill at its size cap: proposals for it can no longer auto-apply.
-    # One open row per skill, updated on each cycle that hits the cap.
+    # One open row per skill; raised once per blocked proposal (see proposals.py).
     "skills.saturated": Category("bell", coalesce=True),
     # One computed row: "N skill proposals wait for your decision"
     # (core/skills/review.py). Replaces a bell item per proposal; resolved

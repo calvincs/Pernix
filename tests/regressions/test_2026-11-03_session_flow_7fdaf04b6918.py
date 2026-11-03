@@ -369,3 +369,15 @@ def test_a_full_skill_raises_a_saturation_notice(monkeypatch):
     proposals._notify_saturated("youtube-whisper", "skip:would push the skill past the 5000-char prompt limit")
 
     assert sent and sent[0][0] == "skills.saturated" and sent[0][1]["subject"] == "youtube-whisper"
+
+
+def test_a_blocked_proposal_raises_the_full_skill_notice_once(monkeypatch):
+    from core.skills import proposals
+
+    sent = []
+    monkeypatch.setattr("core.notices.notify", lambda cat, **kw: sent.append(cat))
+    for _ in range(3):
+        proposals._notify_saturated("s", "skip:prompt limit", proposal_id="p-once")
+    proposals._notify_saturated("s", "skip:prompt limit", proposal_id="p-other")
+
+    assert sent == ["skills.saturated", "skills.saturated"]

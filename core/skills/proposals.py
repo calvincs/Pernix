@@ -623,14 +623,23 @@ def _validate_for_auto_apply(proposal: dict) -> str | None:
     return None
 
 
-def _notify_saturated(skill_name: str, reason: str) -> None:
+def _notify_saturated(skill_name: str, reason: str, *, proposal_id: str = "") -> None:
     """Tell the user a skill is full: its proposals queue up and never apply.
 
     Before this the skip lived only in the log, so a saturated skill kept
     collecting proposals nobody saw (2026-11-03: two sat blocked).
+
+    Once per blocked proposal. Auto-apply re-checks every snooze cycle, and
+    re-raising the same unchanged fact marked the bell unread six times in
+    the first hour.
     """
     if not skill_name:
         return
+    if proposal_id:
+        marker = f"skills_saturated_notified:{proposal_id}"
+        if db.get_snooze_state(marker):
+            return
+        db.set_snooze_state(marker, "1")
     from core import notices
 
     notices.notify(
@@ -694,7 +703,7 @@ def auto_apply_ripe_proposals() -> dict:
                 out["skipped"] += 1
                 logger.info("Skill auto-apply skipped %s: %s", pid, reason)
                 if "prompt limit" in reason:
-                    _notify_saturated(str(prop.get("skill_name") or ""), reason)
+                    _notify_saturated(str(prop.get("skill_name") or ""), reason, proposal_id=pid)
             continue
         try:
             result = apply_proposal(pid, status_label="auto_applied", unwrap=True)
