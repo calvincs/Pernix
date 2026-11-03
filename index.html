@@ -51,6 +51,31 @@
   "codeRepository": "https://github.com/calvincs/Pernix"
 }
 </script>
+<style>
+/* concise draft: middle sections only */
+#what{border-top:1px solid var(--line-2)}
+.grid6{list-style:none;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));margin-top:6px;border-top:1px solid var(--line)}
+.grid6 li{position:relative;display:grid;grid-template-columns:22px minmax(0,1fr);column-gap:14px;align-content:start;padding:26px 32px 26px 0;border-bottom:1px solid var(--line-2);min-width:0}
+.grid6 li:nth-child(odd){border-right:1px solid var(--line)}
+.grid6 li:nth-child(even){padding-left:32px;padding-right:0}
+.grid6 li::before{content:'';grid-row:1/span 3;width:7px;height:7px;margin-top:9px;justify-self:center;border:1px solid var(--gold-deep);background:var(--ink);transform:rotate(45deg);transition:background .25s var(--ease),border-color .25s var(--ease),box-shadow .25s var(--ease)}
+.grid6 li:hover::before{border-color:var(--gold-bright);background:var(--gold-bright);box-shadow:0 0 10px var(--gold-glow)}
+.grid6 h3{grid-column:2;display:flex;align-items:baseline;gap:10px;font:500 21px/1.2 var(--serif);color:var(--vellum-bright);margin-bottom:6px;letter-spacing:-.01em}
+.grid6 h3 span{font:10px var(--mono);letter-spacing:.14em;color:var(--gold)}
+.grid6 p{grid-column:2;font-size:16px;line-height:1.5;color:var(--vellum-dim);margin-bottom:10px;max-width:40ch}
+.grid6 .w-t{grid-column:2;font:11px/1.6 var(--mono);letter-spacing:.02em;color:var(--vellum);overflow-wrap:anywhere;transition:color .25s var(--ease)}
+.grid6 .w-t i{font-style:normal;color:var(--vellum-faint);margin:0 7px}
+.grid6 li:hover .w-t{color:var(--gold)}
+.start .start-grid{margin-top:0;gap:48px}
+.quick{list-style:none;border-top:1px solid var(--line)}
+.quick li{display:grid;grid-template-columns:44px minmax(0,1fr);gap:12px;padding:16px 0;border-bottom:1px solid var(--line-2)}
+.quick span{font:12px var(--mono);color:var(--gold);padding-top:5px}
+.quick p{font-size:17px;line-height:1.55;color:var(--vellum)}
+.start .safety-note{margin:28px 0 0;font-size:15px;line-height:1.6}
+.doc-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 24px;margin-top:40px;padding-top:22px;border-top:1px solid var(--line-2);font-family:var(--mono);font-size:13px}
+.doc-row span{font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--vellum-faint)}
+@media (max-width:640px){.grid6{grid-template-columns:minmax(0,1fr)}.grid6 li,.grid6 li:nth-child(even){padding:20px 0;border-right:0}}
+</style>
 </head>
 <body>
 
@@ -84,9 +109,7 @@
       <span>menu</span>
     </button>
     <nav class="topnav" id="topnav" aria-label="Primary">
-      <a href="#workflows">use cases</a>
-      <a href="#anatomy">workspace</a>
-      <a href="#toolbelt">capabilities</a>
+      <a href="#what">what it does</a>
       <a href="https://github.com/calvincs/Pernix/tree/main/docs" target="_blank" rel="noopener">docs ↗</a>
       <a href="#start">get started</a>
       <a class="ghub" href="https://github.com/calvincs/Pernix" target="_blank" rel="noopener">github <span id="nav-stars"></span>&#8599;</a>
@@ -104,7 +127,7 @@
     <div class="hero-copy">
       <p class="hero-category reveal">A self-hosted AI workspace · 3.3</p>
       <p class="release-notice"><strong>3.3 is available.</strong> Released on <code>main</code>.
-        <a href="#release">What changed in 3.3</a> ·
+        <a href="https://github.com/calvincs/Pernix/blob/main/docs/changelog.md">What changed in 3.3</a> ·
         <a href="https://github.com/calvincs/Pernix/tree/v3.3.0">Get v3.3.0</a>.</p>
       <h1 class="hero-title reveal">
         <span class="ht-line">Your model.</span>
@@ -137,7 +160,7 @@
       <ul class="facts reveal">
         <li>MIT</li>
         <li>no accounts</li>
-        <li><a href="#release">docs &amp; releases</a></li>
+        <li><a href="https://github.com/calvincs/Pernix/tree/main/docs">docs</a></li>
         <li>Python 3.11+</li>
         <li><a id="star-link" href="https://github.com/calvincs/Pernix" target="_blank" rel="noopener"><span id="star-count">&#9733; GitHub</span></a></li>
       </ul>
@@ -184,665 +207,49 @@
   </div>
 </section>
 
-<section class="workflows" id="workflows">
-  <p class="section-label reveal">Start with the work</p>
-  <h2 class="section-title reveal">More than <em>another chat tab</em>.</h2>
-  <p class="section-sub reveal">Tools that act, context that carries forward, and a record of what happened. Start with a conversation; leave with something you can use.</p>
-  <div class="vow-list">
-    <article class="vow reveal"><span class="vow-num">I</span><h3>Code &amp; check</h3><p>Inspect a repository, fix a bug, and run the tests. Open the changed files and check the command output.</p><p class="workflow-prompt">“Find why this CSV import drops the last row. Fix it and add a regression test.”</p></article>
-    <article class="vow reveal"><span class="vow-num">II</span><h3>Research &amp; keep</h3><p>Read sources, compare options, and save a report. Keep the useful findings for your next conversation.</p><p class="workflow-prompt">“Compare these three libraries against our requirements. Save a report with sources.”</p></article>
-    <article class="vow reveal"><span class="vow-num">III</span><h3>Schedule &amp; return</h3><p>Put a useful prompt on a schedule. Come back to its session and results while the server stays available.</p><p class="workflow-prompt">“Every weekday, summarize these sources and save a morning brief.”</p></article>
-  </div>
-  <p class="section-note reveal">Illustrative tasks. Results depend on your model, configured tools, and checks.</p>
+<section id="what">
+  <p class="section-label reveal">What it does</p>
+  <ul class="grid6 reveal">
+    <li><h3><span>01</span>Light coding</h3><p>Small fixes and scripts, tested as it goes. Not built for large projects.</p><span class="w-t">file_read<i>·</i>file_edit<i>·</i>bash</span></li>
+    <li><h3><span>02</span>Research</h3><p>Reads sources and saves a report with links.</p><span class="w-t">search_web<i>·</i>browse_web<i>·</i>file_write</span></li>
+    <li><h3><span>03</span>Schedules</h3><p>Runs a prompt on a timer and notifies you.</p><span class="w-t">schedule_job<i>·</i>0 7 * * 1-5</span></li>
+    <li><h3><span>04</span>Memory</h3><p>Saves what it learns as Markdown you can edit.</p><span class="w-t">remember<i>·</i>recall<i>·</i>data/memories/</span></li>
+    <li><h3><span>05</span>Skills</h3><p>Markdown how-tos. It proposes fixes you can review and undo.</p><span class="w-t">data/skills/&lt;name&gt;/SKILL.md</span></li>
+    <li><h3><span>06</span>Helpers &amp; tools</h3><p>Parallel helper agents, MCP servers, a browser, a REST API.</p><span class="w-t">spawn_worker<i>·</i>await_workers<i>·</i>mcp_add_server</span></li>
+  </ul>
 </section>
-
-<section class="anatomy" id="anatomy">
-  <p class="section-label reveal">Inside the workspace</p>
-  <h2 class="section-title reveal">See the work. <em>Keep the result.</em></h2>
-  <p class="section-sub reveal">Conversations, tool output, project files, and a code editor in one browser workspace. Follow a task from the first request to the saved result.</p>
-  <div class="window-mock reveal">
-    <div class="window-chrome"><span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span><span class="window-url">Pernix · 3.3</span>
-      <span class="shot-tabs" role="tablist" aria-label="Screen size">
-        <button class="shot-tab active" type="button" role="tab" id="tab-desktop" aria-selected="true" aria-controls="shot-desktop" data-shot="desktop">Desktop</button>
-        <button class="shot-tab" type="button" role="tab" id="tab-phone" aria-selected="false" aria-controls="shot-phone" data-shot="phone" tabindex="-1">Phone</button>
-      </span>
-    </div>
-    <div class="shot-pane" id="shot-desktop" role="tabpanel" aria-labelledby="tab-desktop"><a href="img/shots/app-32.webp" target="_blank" rel="noopener" aria-label="Open desktop screenshot at full size"><img class="window-shot" src="img/shots/app-32.webp" loading="lazy" decoding="async" width="1360" height="850" alt="Pernix 3.2 showing a project session, expanded test output, a saved-file reference, and the message composer. Synthetic demonstration."></a></div>
-    <div class="shot-pane hidden" id="shot-phone" role="tabpanel" aria-labelledby="tab-phone"><img class="phone-shot" src="img/shots/phone-32.webp" loading="lazy" decoding="async" width="390" height="844" alt="The same synthetic CSV review session in the narrow-screen Pernix layout, with the composer below the conversation."></div>
-    <p class="window-caption">Current interface · synthetic demo transcript, not a live run. Expand tool output, inspect the result, and continue in the same session. Select the image for a closer look.</p>
-    <p class="window-caption phone-caption">The same demo in the narrow-screen layout. Use the PWA on your phone with trusted network access to your server.</p>
-  </div>
-  <ul class="workspace-highlights reveal"><li><strong>Follow the execution</strong><span>Tool calls and worker reports stay with the conversation.</span></li><li><strong>Open the result</strong><span>Browse files and edit code in the built-in Explorer.</span></li><li><strong>Continue anywhere</strong><span>Desktop browser or phone PWA, connected to your server.</span></li></ul>
-</section>
-
-<section class="projects" id="projects">
-  <p class="section-label reveal">Projects that carry forward</p>
-  <h2 class="section-title reveal">Pick up <em>where you left off.</em></h2>
-  <div class="context-grid">
-    <div class="context-list">
-      <article class="context-item reveal"><span>01</span><div><h3>Sessions keep the conversation.</h3><p>Search earlier work, reopen a thread, and inspect its messages and tool results.</p></div></article>
-      <article class="context-item reveal"><span>02</span><div><h3>Spaces give projects a home.</h3><p>Group related sessions around shared instructions, files, and project memory.</p></div></article>
-      <article class="context-item reveal"><span>03</span><div><h3>Memory keeps what matters.</h3><p>Facts, decisions, and lessons live in searchable Markdown. Inspect, correct, or remove them; keep them when you switch models.</p></div></article>
-    </div>
-    <aside class="ownership reveal" id="vows"><p class="inapp-h">Yours to keep</p><h3>Your models.<br>Your files.<br><em>Your infrastructure.</em></h3><p>Use Ollama, OpenRouter, or an OpenAI-compatible endpoint. Mix local and cloud models to suit the work.</p><p>Sessions, memory, and workspace files stay on your machine. No Pernix account or subscription. The server sends no usage telemetry.</p><p class="section-note">Connected providers have their own costs and data policies.</p></aside>
-  </div>
-</section>
-
-<section class="caps" id="toolbelt"><p class="section-label reveal">See and steer the work</p><h2 class="section-title reveal">Real tools. <em>Visible execution.</em></h2><div class="bento"><article class="tile reveal">
-      <div class="tile-h">
-        <h3>Workers</h3>
-        <span class="tile-tag">parallel sub&#8209;agents</span>
-      </div>
-      <div class="tile-viz">
-        <svg class="viz-svg fan" viewBox="0 0 220 108" aria-hidden="true">
-          <line x1="20" y1="54" x2="60" y2="54" stroke="rgba(212,168,67,0.45)" stroke-width="1"/>
-          <line x1="60" y1="54" x2="120" y2="22" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
-          <line x1="60" y1="54" x2="120" y2="54" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
-          <line x1="60" y1="54" x2="120" y2="86" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
-          <line class="dash" x1="120" y1="22" x2="176" y2="22" stroke="rgba(212,168,67,0.4)" stroke-width="1" stroke-dasharray="2 3"/>
-          <line class="dash" x1="120" y1="54" x2="176" y2="54" stroke="rgba(212,168,67,0.4)" stroke-width="1" stroke-dasharray="2 3"/>
-          <line class="dash" x1="120" y1="86" x2="176" y2="86" stroke="rgba(212,168,67,0.4)" stroke-width="1" stroke-dasharray="2 3"/>
-          <circle cx="20"  cy="54" r="5" fill="#d4a843"/>
-          <circle cx="60"  cy="54" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-          <circle class="wnode" cx="120" cy="22" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-          <circle class="wnode" cx="120" cy="54" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-          <circle class="wnode" cx="120" cy="86" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-          <text x="182" y="25" font-family="DM Mono, monospace" font-size="7" fill="#8a7e66">vision</text>
-          <text x="182" y="57" font-family="DM Mono, monospace" font-size="7" fill="#8a7e66">code</text>
-          <text x="182" y="89" font-family="DM Mono, monospace" font-size="7" fill="#8a7e66">research</text>
-        </svg>
-      </div>
-      <p class="tile-body"><strong>Explore in parallel.</strong> Ask one worker to inspect a codebase while another researches a dependency. Review both reports in the parent session.</p>
-    </article>
-<article class="tile reveal">
-      <div class="tile-h">
-        <h3>Goals &amp; checks</h3>
-        <span class="tile-tag">opt&#8209;in &middot; goals &amp; gates</span>
-      </div>
-      <div class="tile-viz auto-viz">
-        <div class="av-row">
-          <span class="av-k">goal</span>
-          <span class="av-bar"><i id="goal-bar"></i></span>
-          <span class="av-v">budgeted</span>
-        </div>
-        <div class="av-row">
-          <span class="av-k">gate</span>
-          <code class="av-code">pytest -q</code>
-          <span class="av-ok">exit 0</span>
-        </div>
-        <div class="av-row">
-          <span class="av-k">work</span>
-          <span class="av-hb" id="av-hb" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-          <span class="av-v">round boundary</span>
-        </div>
-      </div>
-      <p class="tile-body"><strong>Give longer work a finish line.</strong> Set an opt-in goal, a budget, and a continuation allowance. Use a test command as a gate before calling the task done.</p>
-    </article>
-<article class="tile reveal">
-      <div class="tile-h">
-        <h3>Schedules</h3>
-        <span class="tile-tag">a standing order</span>
-      </div>
-      <div class="tile-viz cron-viz">
-        <code class="cron-expr">0 7 * * 1-5</code>
-        <ul class="week" id="week" aria-hidden="true">
-          <li class="on">M</li><li class="on">T</li><li class="on">W</li><li class="on">T</li><li class="on">F</li><li>S</li><li>S</li>
-        </ul>
-        <p class="cron-note">each run opens its own session &mdash; <span class="cq">Cron: morning-brief</span></p>
-      </div>
-      <p class="tile-body"><strong>Make useful work recurring.</strong> Schedule a weekday brief or a weekly digest. Each run gets its own session and saved results to inspect.</p>
-    </article>
-<article class="tile reveal">
-      <div class="tile-h">
-        <h3>MCP</h3>
-        <span class="tile-tag">other people's tools</span>
-      </div>
-      <div class="tile-viz mcp-viz">
-        <svg class="viz-svg hub" viewBox="0 0 220 108" aria-hidden="true">
-          <circle cx="34" cy="54" r="13" fill="none" stroke="rgba(212,168,67,0.5)" stroke-width="1"/>
-          <circle cx="34" cy="54" r="3" fill="#d4a843"/>
-          <path class="spoke s1" d="M47 54 L 118 22" fill="none" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="3 4"/>
-          <path class="spoke s2" d="M47 54 L 118 54" fill="none" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="3 4"/>
-          <path class="spoke s3" d="M47 54 L 118 86" fill="none" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="3 4"/>
-          <rect x="120" y="13" width="72" height="18" fill="none" stroke="rgba(212,168,67,0.4)" stroke-width="0.9"/>
-          <rect x="120" y="45" width="72" height="18" fill="none" stroke="rgba(212,168,67,0.4)" stroke-width="0.9"/>
-          <rect x="120" y="77" width="72" height="18" fill="none" stroke="rgba(212,168,67,0.4)" stroke-width="0.9"/>
-          <text x="128" y="26" font-family="DM Mono, monospace" font-size="7.5" fill="#8a7e66">stdio</text>
-          <text x="128" y="58" font-family="DM Mono, monospace" font-size="7.5" fill="#8a7e66">http</text>
-          <text x="128" y="90" font-family="DM Mono, monospace" font-size="7.5" fill="#8a7e66">sse</text>
-        </svg>
-        <p class="mcp-name"><code>mcp_&lt;server&gt;_&lt;tool&gt;</code></p>
-      </div>
-      <p class="tile-body"><strong>Connect the tools you use.</strong> Add a local or remote MCP server to give Pernix access to another system through the same tool controls.</p>
-    </article></div>
-  <p class="capability-links reveal">Also built in: web research · Python &amp; shell · files &amp; images · voice input · REST API. <a class="link" href="#under-hood">Explore the technical details →</a></p>
-</section>
-
-<details class="page-details night-details" id="night-example">
-<summary>An example overnight workflow <span>Scheduled work and idle maintenance, with the browser closed</span></summary>
-<section class="night" id="overnight">
-  <p class="section-label reveal">The night shift</p>
-  <h2 class="section-title reveal">Work can continue <em>while you're away</em>.</h2>
-  <p class="section-sub reveal">An illustrative timeline, not a captured run. It combines a configured schedule, a delegated task, idle memory maintenance, and optional Dream review and push notifications. The server and its model providers must remain available.</p>
-
-  <ol class="ledger">
-    <li class="led is-you reveal">
-      <span class="led-t">23:14</span><span class="led-n" aria-hidden="true"></span>
-      <span class="led-tag">you</span>
-      <span class="led-x">you close the tab</span>
-    </li>
-
-    <li class="led-gap reveal"><span>7h 48m &middot; nobody watching</span></li>
-
-    <li class="led reveal">
-      <span class="led-t">23:40</span><span class="led-n" aria-hidden="true"></span>
-      <span class="led-tag">snooze</span>
-      <span class="led-x"><code>dedup_sweep</code> &mdash; 5 duplicate memory entries merged</span>
-    </li>
-    <li class="led reveal">
-      <span class="led-t">01:00</span><span class="led-n" aria-hidden="true"></span>
-      <span class="led-tag">snooze</span>
-      <span class="led-x"><code>catchup_distill</code> &mdash; 1 session reviewed &middot; 4 saved, 2 deduped</span>
-    </li>
-    <li class="led reveal">
-      <span class="led-t">03:00</span><span class="led-n" aria-hidden="true"></span>
-      <span class="led-tag">snooze</span>
-      <span class="led-x">split batch complete &mdash; later maintenance continues</span>
-    </li>
-    <li class="led reveal">
-      <span class="led-t">05:30</span><span class="led-n" aria-hidden="true"></span>
-      <span class="led-tag">worker</span>
-      <span class="led-x">worker <em>research-digest</em> finished &mdash; parent auto-resumed</span>
-    </li>
-    <li class="led reveal">
-      <span class="led-t">07:00</span><span class="led-n" aria-hidden="true"></span>
-      <span class="led-tag">cron</span>
-      <span class="led-x"><code>0 7 * * 1-5</code> fired &mdash; session <span class="led-id">8f2a1c3d</span></span>
-    </li>
-    <li class="led reveal">
-      <span class="led-t">07:01</span><span class="led-n" aria-hidden="true"></span>
-      <span class="led-tag">push</span>
-      <span class="led-x">&ldquo;Brief ready&rdquo; &mdash; sent to your phone</span>
-    </li>
-
-    <li class="led-gap is-dawn reveal"><span>lights on</span></li>
-
-    <li class="led is-you reveal">
-      <span class="led-t">07:02</span><span class="led-n" aria-hidden="true"></span>
-      <span class="led-tag">you</span>
-      <span class="led-x">you open the tab</span>
-    </li>
-  </ol>
-
-  <p class="night-foot reveal">Closing the tab does not stop the server. <em>Closing the laptop may.</em> Schedules, checks, and notifications need setup; not every task can finish without your input.</p>
-</section>
-</details>
-
-<section class="learning" id="learning">
-  <p class="section-label reveal">Review &amp; improve</p><h2 class="section-title reveal">Useful feedback. <em>Recoverable changes.</em></h2>
-  <p class="section-sub reveal">Review the outcome, correct the signal, and improve the procedure. Your feedback can correct a model grade; skill proposals turn useful lessons into editable instructions.</p>
-  <div class="review-grid">
-    <article class="review-card reveal"><div class="review-copy"><h3>Check what the review is based on.</h3><p>Trust shows agreement with your feedback, where outcomes came from, and whether self-checks stayed clean. Hold-out results keep ungraded cases visible.</p><p>Ordinary chat reviews run in the background. Factual corrections need matching tool evidence; model judgments can still be wrong.</p><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/internals/canary.md">Self-checks &amp; Trust →</a></div><figure><a href="img/shots/trust-32.webp" target="_blank" rel="noopener" aria-label="Open Trust screenshot at full size"><img src="img/shots/trust-32.webp" loading="lazy" decoding="async" width="360" height="740" alt="Pernix 3.2 Trust panel showing grader agreement, outcome sources, and self-check contamination. Empty metrics in an isolated demo."></a><figcaption>Trust · fresh demo, no grading history.</figcaption></figure></article>
-    <article class="review-card reveal"><div class="review-copy"><h3>Improve a skill. Keep a way back.</h3><p>Skill self-healing is on by default, with a waiting period, size and confidence checks, and per-skill limits. Exact backups support rollback while protecting newer edits.</p><p>Turn auto-apply off to review each proposal yourself. Start with a Markdown procedure you can read and edit.</p><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/authoring/writing-skills.md">Write &amp; maintain a skill →</a></div><figure><a href="img/shots/skills-32.webp" target="_blank" rel="noopener" aria-label="Open skill recovery screenshot at full size"><img src="img/shots/skills-32.webp" loading="lazy" decoding="async" width="360" height="740" alt="Pernix 3.2 skill details showing a synthetic CSV review procedure, recent changes, and a Roll back action."></a><figcaption>Skills · synthetic change with a journaled backup.</figcaption></figure></article>
-  </div>
-</section>
-
-<details class="page-details" id="under-hood">
-<summary>Under the hood <span>Planning, execution, state transitions, the API, and editable instructions</span></summary>
-<!-- ========== HOW A TURN THINKS ========== -->
-<section class="turn" id="turn">
-  <p class="section-label reveal">The execution loop</p>
-  <h2 class="section-title reveal">From request <em>to recorded work</em>.</h2>
-  <p class="section-sub reveal">A typical substantive turn plans, acts, and preserves useful context. Primary handles execution and quality-critical review; Background handles planning and maintenance. Some phases may be skipped, and default chat review is deferred rather than a pre-answer gate.</p>
-
-  <div class="pipeline" aria-hidden="false">
-    <svg class="pipe-svg" viewBox="0 0 1200 220" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="flow" x1="0" y1="0" x2="1" y2="0">
-          <stop offset="0%" stop-color="rgba(212,168,67,0)"/>
-          <stop offset="50%" stop-color="rgba(212,168,67,0.9)"/>
-          <stop offset="100%" stop-color="rgba(212,168,67,0)"/>
-        </linearGradient>
-      </defs>
-      <path id="pipe-path" d="M 80,110 L 1120,110" stroke="rgba(212,168,67,0.18)" stroke-width="1" fill="none"/>
-      <path d="M 80,110 L 1120,110" stroke="url(#flow)" stroke-width="2" fill="none" class="pipe-flow"/>
-    </svg>
-
-    <ol class="phases">
-      <li class="phase reveal" data-phase="1" tabindex="0" data-log="state · idle_ready → scouting &nbsp;·&nbsp; message queued &nbsp;·&nbsp; event_seq 4811">
-        <div class="phase-node"><span>01</span></div>
-        <h4>Session</h4>
-        <p>Your message lands on a stored thread: text and supported attachments. History survives restarts; interrupted work has recovery paths, not a guarantee of seamless completion.</p>
-        <span class="phase-model">queue</span>
-      </li>
-      <li class="phase reveal" data-phase="2" tabindex="0" data-log="scout.done · first turn &nbsp;·&nbsp; 840ms &nbsp;·&nbsp; skill: morning-brief">
-        <div class="phase-node"><span>02</span></div>
-        <h4>Scout</h4>
-        <p>Scout plans once per session by default, on the first real message: an approach, the skill to load and relevant memory, from preloaded context. Later turns get a quick memory search with no model call, and the tool list stays fixed so a local model reuses its cached prompt. It uses Background, or Primary when no separate Background model is set.</p>
-        <span class="phase-model">background role</span>
-      </li>
-      <li class="phase reveal" data-phase="3" tabindex="0" data-log="tool.call · search_web(&quot;…&quot;) → 8 results &nbsp;·&nbsp; round 2 &nbsp;·&nbsp; streaming">
-        <div class="phase-node"><span>03</span></div>
-        <h4>Agent Loop</h4>
-        <p>The main model streams a response, calls tools, and reads their results within configured limits. A configured Backup model can catch failed calls, locally or in the cloud.</p>
-        <span class="phase-model">main model</span>
-      </li>
-      <li class="phase reveal" data-phase="4" tabindex="0" data-log="background review · recorded outcome &nbsp;·&nbsp; no automatic chat retry">
-        <div class="phase-node"><span>04</span></div>
-        <h4>Reflect</h4>
-        <p>Reflect reviews substantive chats in the background and records lessons. Unattended runs can retry within limits. A model grade is not proof of correctness; optional gates run explicit checks.</p>
-        <span class="phase-model">primary role</span>
-      </li>
-      <li class="phase reveal" data-phase="5" tabindex="0" data-log="session.title → &quot;morning brief&quot; &nbsp;·&nbsp; 2 entries saved &nbsp;·&nbsp; workers reaped">
-        <div class="phase-node"><span>05</span></div>
-        <h4>Post&#8209;hooks</h4>
-        <p>Auto-titling, memory distillation, worker cleanup. The cleanup runs in the background after you've already seen the answer.</p>
-        <span class="phase-model">background</span>
-      </li>
-    </ol>
-
-    <div class="pipe-readout reveal" aria-live="polite">
-      <span class="pipe-readout-key">event log</span>
-      <code id="pipe-log">hover a phase to sample its events</code>
-    </div>
-  </div>
-
-  <div class="asides">
-    <p class="aside reveal">
-      <strong>Compaction</strong> summarizes older context as the prompt fills. Stored history remains available subject to retention settings, but summaries and retrieval are selective, not unlimited or lossless context.
-    </p>
-    <p class="aside reveal">
-      <strong>Snooze</strong> runs idle maintenance: memory deduplication, profile distillation, lessons from finished sessions, and optional Dream work. User activity takes priority, with cancellation and later retries for eligible maintenance tasks.
-    </p>
-    <p class="aside reveal">
-      <strong>Recovery</strong> assumes the worst. Kill the server mid-turn and restart it: interrupted sessions are swept to safety at boot, parents parked on workers are recovered, and clients replay any events they missed by sequence number. <em>Nothing pretends it didn't happen.</em>
-    </p>
-  </div>
-</section>
-
-<!-- ========== STATE MACHINE ========== -->
-<section class="states" id="states">
-  <p class="section-label reveal">The state machine</p>
-  <h2 class="section-title reveal">Ten states. One session at a time.</h2>
-  <p class="section-sub reveal">Every session is in exactly one state, and every edge is a <code>(state,&nbsp;reason)</code> pair in an exhaustive table — anything not in the table is rejected. Transitions are logged, replayed to the UI in real time, and recovered after a crash. Hover or tap a state to see its real exits; left alone, the diagram walks an actual turn.</p>
-
-  <div class="state-shell reveal">
-    <svg class="state-svg" viewBox="0 0 760 460" preserveAspectRatio="none" role="img" aria-label="State machine diagram — edges drawn from the real transition table">
-      <defs>
-        <marker id="arr-g" markerWidth="8" markerHeight="8" refX="6.5" refY="2.6" orient="auto">
-          <path d="M0,0 L0,5.2 L6.5,2.6 z" fill="rgba(212,168,67,0.7)"/>
-        </marker>
-        <marker id="arr-f" markerWidth="8" markerHeight="8" refX="6.5" refY="2.6" orient="auto">
-          <path d="M0,0 L0,5.2 L6.5,2.6 z" fill="rgba(207,192,160,0.4)"/>
-        </marker>
-        <marker id="arr-h" markerWidth="8" markerHeight="8" refX="6.5" refY="2.6" orient="auto">
-          <path d="M0,0 L0,5.2 L6.5,2.6 z" fill="rgba(212,168,67,0.3)"/>
-        </marker>
-        <marker id="arr-b" markerWidth="8" markerHeight="8" refX="6.5" refY="2.6" orient="auto">
-          <path d="M0,0 L0,5.2 L6.5,2.6 z" fill="rgba(240,200,99,1)"/>
-        </marker>
-      </defs>
-      <g id="state-edges"></g>
-      <circle id="state-pulse" r="4" fill="#f0c863" opacity="0"/>
-    </svg>
-
-    <div class="state-nodes">
-      <button class="snode active" style="left:46%;top:8%" data-state="idle">
-        <span class="snode-dot"></span><span class="snode-label">idle_ready</span>
-      </button>
-      <button class="snode" style="left:76%;top:18%" data-state="scout">
-        <span class="snode-dot"></span><span class="snode-label">scouting</span>
-      </button>
-      <button class="snode" style="left:92%;top:30%" data-state="compacting">
-        <span class="snode-dot"></span><span class="snode-label">compacting</span>
-      </button>
-      <button class="snode" style="left:58%;top:46%" data-state="processing">
-        <span class="snode-dot"></span><span class="snode-label">processing</span>
-      </button>
-      <button class="snode" style="left:88%;top:66%" data-state="awaiting_workers">
-        <span class="snode-dot"></span><span class="snode-label">awaiting_workers</span>
-      </button>
-      <button class="snode" style="left:38%;top:86%" data-state="finalizing">
-        <span class="snode-dot"></span><span class="snode-label">finalizing</span>
-      </button>
-      <button class="snode" style="left:66%;top:82%" data-state="awaiting">
-        <span class="snode-dot"></span><span class="snode-label">awaiting_user</span>
-      </button>
-      <button class="snode" style="left:22%;top:58%" data-state="paused">
-        <span class="snode-dot"></span><span class="snode-label">paused</span>
-      </button>
-      <button class="snode" style="left:26%;top:28%" data-state="pause_req">
-        <span class="snode-dot"></span><span class="snode-label">pause_requested</span>
-      </button>
-      <button class="snode" style="left:44%;top:26%" data-state="cancelling">
-        <span class="snode-dot"></span><span class="snode-label">cancelling</span>
-      </button>
-    </div>
-
-    <aside class="state-readout">
-      <p class="state-readout-label">selected</p>
-      <h4 id="state-name">idle_ready</h4>
-      <p id="state-desc">No active turn. The session is open and waiting for a prompt. The reaper will reap it from memory after 30 minutes of stillness with no subscribers.</p>
-      <p class="state-readout-meta"><span id="state-meta">awaiting input</span></p>
-      <ul class="state-edges-out" id="state-edges-out" aria-label="Legal exits from this state"></ul>
-    </aside>
-  </div>
-
-  <p class="state-foot reveal">Edges drawn from the table in <code>sessions/state_v2.py</code>. Two housekeeping reasons are omitted for legibility. <code>reaper-unstick</code> returns six states to <code>idle_ready</code> — scouting, processing, pause_requested, paused, awaiting_user, awaiting_workers; <code>cancel-timeout</code> covers those six plus compacting, finalizing and cancelling. Both are explicit rows in the table, not a generic force.</p>
-
-  <figure class="shot-figure reveal">
-    <div class="shot-frame is-wide">
-      <div class="window-chrome">
-        <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
-        <span class="window-url">localhost:8090 &middot; State timeline</span>
-      </div>
-      <img src="img/shots/timeline-crop.png" loading="lazy" decoding="async" width="846" height="776"
-           alt="Five turns as phase-segmented lanes; the selected turn shows the scout&rsquo;s plan and its chosen tools.">
-    </div>
-    <figcaption>Historical 3.1 capture: five turns as phase bars, the fifth opened to its plan. The interactive state diagram above reflects the current implementation.</figcaption>
-  </figure>
-</section>
-
-<!-- ========== OPEN API ========== -->
-<section class="api" id="api">
-  <p class="section-label reveal">The interface</p>
-  <h2 class="section-title reveal">An open API. <em>Tinker freely.</em></h2>
-  <div class="api-grid">
-    <div class="api-text">
-      <p class="prose reveal">
-        The web UI is one client; you can build others. Pernix is built on <strong>FastAPI</strong>, which means the same API is available from scripts, other services, and your terminal.
-      </p>
-      <p class="prose reveal">
-        Open <code>localhost:8090/docs</code> while the server runs and you get a live <strong>Swagger UI</strong>: every endpoint, every schema, every response model — try-it-able right from the browser. <code>/redoc</code> if you prefer ReDoc. The fastest way to learn the system is to poke it.
-      </p>
-      <ul class="api-feats">
-        <li class="reveal"><span class="api-key">streaming</span><span>Server-Sent Events on <code>/api/sessions/{id}/events</code> for tokens, tool calls, state transitions.</span></li>
-        <li class="reveal"><span class="api-key">resumable</span><span>Sequence-numbered replay helps clients catch up on reconnect; stored transcripts provide recovery beyond the replay window.</span></li>
-        <li class="reveal"><span class="api-key">scriptable</span><span>The same API the PWA uses. Build CLIs, integrations, custom UIs.</span></li>
-        <li class="reveal"><span class="api-key">discoverable</span><span>OpenAPI 3 schema at <code>/openapi.json</code>. Generate clients in any language.</span></li>
-      </ul>
-    </div>
-
-    <div class="swagger reveal">
-      <div class="swagger-bar">
-        <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
-        <span class="swagger-title">localhost:8090/docs</span>
-        <span class="swagger-tag">OAS 3.1</span>
-      </div>
-      <div class="swagger-body">
-        <div class="swagger-h">
-          <span class="swagger-name">Pernix API <span class="swagger-ver">OpenAPI</span></span>
-        </div>
-        <div class="swagger-route get">
-          <span class="verb get">GET</span>
-          <span class="route">/api/sessions</span>
-          <span class="route-desc">List all sessions</span>
-        </div>
-        <div class="swagger-route post expanded">
-          <span class="verb post">POST</span>
-          <span class="route">/api/chat</span>
-          <span class="route-desc">Send a message · events via SSE</span>
-        </div>
-        <div class="swagger-detail">
-          <div class="swagger-try">
-            <span class="api-langtabs" role="tablist" aria-label="Code sample language">
-              <button class="lang-tab active" data-lang="curl">curl</button>
-              <button class="lang-tab" data-lang="py">python</button>
-              <button class="lang-tab" data-lang="js">js</button>
-            </span>
-            <button class="swagger-btn">Execute &nbsp;↗</button>
-          </div>
-          <pre class="swagger-code" data-lang-pane="curl">curl http://localhost:8090/api/chat \
-  -H <span class="str">"Content-Type: application/json"</span> \
-  -d <span class="str">'{"session_id": "abc123",
-       "message": "summarize the auth branch"}'</span></pre>
-          <pre class="swagger-code hidden" data-lang-pane="py"><span class="kw">import</span> requests
-
-requests.post(<span class="str">"http://localhost:8090/api/chat"</span>, json={
-    <span class="str">"session_id"</span>: <span class="str">"abc123"</span>,
-    <span class="str">"message"</span>: <span class="str">"summarize the auth branch"</span>,
-})</pre>
-          <pre class="swagger-code hidden" data-lang-pane="js"><span class="kw">await</span> fetch(<span class="str">"http://localhost:8090/api/chat"</span>, {
-  method: <span class="str">"POST"</span>,
-  headers: { <span class="str">"Content-Type"</span>: <span class="str">"application/json"</span> },
-  body: JSON.stringify({ session_id: <span class="str">"abc123"</span>,
-    message: <span class="str">"summarize the auth branch"</span> }),
-})</pre>
-        </div>
-        <div class="swagger-route get">
-          <span class="verb get">GET</span>
-          <span class="route">/api/sessions/{id}/events</span>
-          <span class="route-desc">SSE stream · tokens, tools, state</span>
-        </div>
-        <div class="swagger-foot">
-          <span class="muted">The same documented API the web app uses &middot; openapi.json</span>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ========== SOUL & RULES ========== -->
-<section class="identity" id="identity">
-  <p class="section-label reveal">Editable instructions</p>
-  <h2 class="section-title reveal">Your conventions, <em>in plain text</em>.</h2>
-  <div class="identity-grid">
-    <div class="identity-text">
-      <p class="prose reveal">
-        Pernix's behavior beyond raw model output is shaped by plain text on disk.
-        <strong>SOUL.md</strong> guides its voice. <strong>RULES.md</strong> supplies working conventions. <strong>SESSIONS.md</strong> adds deployment context, preferences, and intended limits. A space can override any of the three for its own sessions, per file, in <code>data/agent/spaces/&lt;slug&gt;/</code>.
-      </p>
-      <p class="prose reveal">
-        Edit them in any text editor; the agent picks up changes on its next turn. These files guide model behavior, not enforced access control. Permission levels written in a prompt are not a substitute for tool configuration, OS permissions, or an isolated host.
-      </p>
-      <ul class="bullet-list">
-        <li class="reveal">Want it more terse? Edit a paragraph in SOUL.md.</li>
-        <li class="reveal">Need a project guardrail? Add a line to RULES.md.</li>
-        <li class="reveal">Want to explain where it should ask first? Add guidance in SESSIONS.md.</li>
-        <li class="reveal">Switching context entirely? Swap the whole file out.</li>
-      </ul>
-    </div>
-
-    <div class="codex reveal">
-      <div class="codex-tabs">
-        <button class="codex-tab active" data-tab="soul">SOUL.md</button>
-        <button class="codex-tab" data-tab="rules">RULES.md</button>
-        <button class="codex-tab" data-tab="agents">SESSIONS.md</button>
-        <button class="codex-tab" data-tab="skill">a skill</button>
-      </div>
-
-      <pre class="codex-body" data-pane="soul"><span class="dim"># Identity</span>
-
-You are <span class="hl">Pernix</span> — a capable, focused AI assistant.
-You help with complex tasks, think carefully before acting,
-and communicate clearly.
-
-<span class="dim">## Core Traits</span>
-
-- <span class="hl">Pragmatic</span>: Prefer working solutions over perfect ones.
-  Ship, then iterate.
-- <span class="hl">Direct</span>: Minimal preamble. Get to the point.
-  No filler phrases.
-- <span class="hl">Curious</span>: Enjoy understanding systems deeply
-  before changing them.
-- <span class="hl">Careful</span>: Confirm intent before irreversible
-  actions. Measure twice, cut once.
-
-<span class="dim">## Communication Style</span>
-
-- Concise by default — expand when the topic demands it.
-- No sycophancy. No "great question!"
-- When referencing code, include file paths and line
-  numbers so the user can navigate directly.</pre>
-
-      <pre class="codex-body hidden" data-pane="rules"><span class="dim"># Operational Rules</span>
-
-<span class="dim">## Capability Discovery</span>
-
-- When a task requires capabilities your current model
-  lacks, <span class="hl">discover what is available</span> rather than
-  giving up.
-- Use <span class="kw">list_available_models</span> and <span class="kw">lookup</span>
-  to find models and tools that can fill the gap.
-
-<span class="dim">## Delegation</span>
-
-- Delegate specialized work to workers via <span class="kw">spawn_worker</span>.
-  Use the <span class="kw">model</span> parameter to run a worker on a model
-  suited to the task.
-- Do not switch the global model for a one-off
-  specialized task — delegate instead.
-
-<span class="dim">## Persistence</span>
-
-- When an approach fails, diagnose why and try a different
-  approach before giving up.
-- Exhaust your options before telling the user something
-  cannot be done.</pre>
-
-      <pre class="codex-body hidden" data-pane="agents"><span class="dim"># Session Context</span>
-
-<span class="dim">## User Context</span>
-
-- Timezone: <span class="hl">America/Los_Angeles</span>
-- Key facts: goes by Cal, prefers bullet
-  summaries over prose
-
-<span class="dim">## Enabled Domains</span>
-
-- research &amp; writing
-- code review
-- weekly digest
-
-<span class="dim">## Permission Guidance (not access control)</span>
-
-<span class="dim"># 1 Read · 2 Suggest · 3 Draft · 4 Confirm · 5 Auto</span>
-- research &amp; writing: <span class="kw">level 5</span>
-- code review: <span class="kw">level 3</span>
-- weekly digest: <span class="kw">level 5</span>
-
-<span class="dim">## Active Intents</span>
-
-- Track open PRs on the auth branch and
-  surface blockers each morning.</pre>
-
-      <pre class="codex-body hidden" data-pane="skill"><span class="dim">---</span>
-<span class="kw">name</span>: meeting-notes-to-actions
-<span class="kw">description</span>: Turn meeting notes or a transcript into
-  a clean action-item list with owners and dates.
-<span class="kw">when</span>: user pastes meeting notes or asks to
-  <span class="hl">"extract action items"</span> or <span class="hl">"what did we agree"</span>.
-<span class="dim">---</span>
-
-<span class="dim"># Meeting notes &rarr; action items</span>
-
-1. Read top to bottom. Don't skim.
-2. Pull <span class="hl">concrete commitments only</span>, not summaries.
-   "Cal will review the deck by Friday" &mdash; action.
-   "We talked about the deck" &mdash; not an action.
-3. Group by owner. Each entry: owner, action,
-   due date (mark unknown as <span class="kw">??</span>).
-4. Surface decisions separately under "Decisions".
-5. End with open questions &mdash; anything unresolved.</pre>
-
-      <p class="codex-foot"><span>data/agent/SOUL.md</span> · <span>data/agent/RULES.md</span> · <span>data/agent/SESSIONS.md</span> · <span>data/skills/*/SKILL.md</span></p>
-    </div>
-  </div>
-</section>
-
-<!-- ========== QUICK START ========== -->
-<section class="tool-reference" id="tool-reference"><p class="section-label">Tools &amp; deployment</p><h2 class="section-title">The pieces <em>behind the work.</em></h2><div class="chips reveal">
-    <p class="chips-h">also in the box</p>
-    <ul class="chip-list">
-      <li>search_web</li><li>browse_web</li><li>http_get</li><li>repl</li>
-      <li>job_start</li><li>view_image</li><li>spaces</li><li>skills</li>
-      <li>background review</li><li>a model per role</li>
-      <li>images · audio · pdf</li><li>PWA + web push</li><li>voice input</li>
-      <li>light theme</li><li>screen-reader floor</li><li>session search</li>
-      <li>tool safety gate</li><li>RLM (opt-in)</li>
-      <li>dreams (opt-in)</li><li>canary suite (opt-in)</li><li>feedback &amp; Trust</li><li>archive &amp; storage</li>
-    </ul>
-  </div><article class="tile wide reveal" id="tile-boundary">
-      <div class="tile-h">
-        <h3>Runs on your hardware</h3>
-        <span class="tile-tag">local storage &middot; configurable connections</span>
-      </div>
-      <div class="tile-viz">
-        <svg class="viz-svg boundary" viewBox="0 0 460 168" role="img" aria-label="Example local-model setup: server, model, memory and workspace on your machine, with optional connections to cloud models and network tools. Not a network security boundary.">
-          <rect x="4" y="20" width="286" height="132" fill="none" stroke="rgba(212,168,67,0.45)" stroke-width="1"/>
-          <rect x="16" y="12" width="104" height="16" fill="#0a0908"/>
-          <text x="22" y="24" font-family="DM Mono, monospace" font-size="10" fill="#d4a843">your machine</text>
-
-          <rect x="24" y="42" width="118" height="40" fill="none" stroke="rgba(207,192,160,0.22)" stroke-width="0.9"/>
-          <text x="36" y="66" font-family="DM Mono, monospace" font-size="10" fill="#cfc0a0">server</text>
-          <rect x="154" y="42" width="118" height="40" fill="none" stroke="rgba(207,192,160,0.22)" stroke-width="0.9"/>
-          <text x="166" y="66" font-family="DM Mono, monospace" font-size="10" fill="#cfc0a0">model</text>
-          <rect x="24" y="94" width="118" height="40" fill="none" stroke="rgba(207,192,160,0.22)" stroke-width="0.9"/>
-          <text x="36" y="118" font-family="DM Mono, monospace" font-size="10" fill="#cfc0a0">memory</text>
-          <rect x="154" y="94" width="118" height="40" fill="none" stroke="rgba(207,192,160,0.22)" stroke-width="0.9"/>
-          <text x="166" y="118" font-family="DM Mono, monospace" font-size="10" fill="#cfc0a0">workspace</text>
-
-          <path class="leak" d="M290 62 L 352 62" fill="none" stroke="rgba(212,168,67,0.5)" stroke-width="1" stroke-dasharray="4 4"/>
-          <path class="leak" d="M290 110 L 352 110" fill="none" stroke="rgba(212,168,67,0.5)" stroke-width="1" stroke-dasharray="4 4"/>
-          <rect x="354" y="50" width="102" height="24" fill="none" stroke="rgba(212,168,67,0.32)" stroke-width="0.9"/>
-          <text x="364" y="66" font-family="DM Mono, monospace" font-size="9.5" fill="#8a7e66">cloud models</text>
-          <rect x="354" y="98" width="102" height="24" fill="none" stroke="rgba(212,168,67,0.32)" stroke-width="0.9"/>
-          <text x="364" y="114" font-family="DM Mono, monospace" font-size="9.5" fill="#8a7e66">network tools</text>
-          <text x="354" y="140" font-family="DM Mono, monospace" font-size="9" fill="#8a7e66">your configuration</text>
-        </svg>
-      </div>
-      <p class="tile-body">The server, session history, memory, and workspace live on your hardware. Inference can be local too. Model calls and connected tools send data to the services you configure and use, including browsing, HTTP, MCP, and optional voice services. This diagram shows a deployment choice, not a firewall: host-executed code can also make network requests.</p>
-      <p class="tile-tools">python run.py · localhost:8090 · .env</p>
-    </article></section>
-</details>
 
 <section class="start" id="start">
-  <p class="section-label reveal">The first run</p>
-  <h2 class="section-title reveal">Bring a model. <em>Make room to work.</em></h2>
-  <p class="section-sub reveal">Use Python 3.11+ on a dedicated Linux VM, container, or spare machine. Choose Ollama for local inference, a cloud API, or an OpenAI-compatible server. A capable tool-using model matters; local hardware needs depend on the model you choose.</p>
-  <aside class="safety-note reveal"><strong>This is experimental host-executing software.</strong> Pernix can run shell commands, write files, and make network requests. Back up important data, give it a contained environment, and do not expose it directly to the public internet. Prompt rules and tool approval gates are not a security sandbox. <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/security.md" target="_blank" rel="noopener">Read the security model</a>.</aside>
-
+  <p class="section-label reveal">Get started</p>
   <div class="start-grid">
-    <ol class="steps">
-      <li class="reveal"><span class="step-n">01</span><div><h4>Choose a model provider</h4><p>Install <a class="link" href="https://ollama.ai" target="_blank" rel="noopener">Ollama</a> and pull a model for local use, or configure an OpenRouter/OpenAI API key or an OpenAI-compatible endpoint. Ollama is optional. Cloud inference and external services may charge for usage.</p></div></li>
-      <li class="reveal"><span class="step-n">02</span><div><h4>Clone & install</h4><p>Standard Python: clone, venv, <code>pip install -r requirements.txt</code>. Optional: copy <code>.env.example</code> for OpenRouter or Tavily keys.</p></div></li>
-      <li class="reveal"><span class="step-n">03</span><div><h4>Configure and start a conversation</h4><p><code>python run.py</code>. Open <code>localhost:8090</code>, then Settings &rarr; Providers &amp; models. Set your endpoint and Primary model. <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/deployment/llm-providers.md" target="_blank" rel="noopener">Provider setup guide</a>.</p></div></li>
-      <li class="reveal"><span class="step-n">04</span><div><h4>Start small, then extend</h4><p>Create a Space, add project instructions, and try a small task with an observable result. Add skills, MCP servers, and schedules as needed. Enable optional goals, Dream or self-checks after reading their controls.</p></div></li>
-    </ol>
-
+    <div class="reveal">
+      <ol class="quick">
+        <li><span>01</span><p>Use a VM, container or spare machine with Python 3.11+.</p></li>
+        <li><span>02</span><p>Pick a model: Ollama, OpenRouter, OpenAI or any compatible server.</p></li>
+        <li><span>03</span><p>Run the commands, open <code>localhost:8090</code>, then Settings &rarr; Providers &amp; models.</p></li>
+      </ol>
+      <aside class="safety-note"><strong>This is experimental host-executing software.</strong> Pernix can run shell commands, write files, and make network requests. Back up important data, give it a contained environment, and do not expose it directly to the public internet. Prompt rules and tool approval gates are not a security sandbox. <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/security.md" target="_blank" rel="noopener">Read the security model</a>.</aside>
+    </div>
     <div class="terminal reveal">
       <div class="term-bar">
         <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
         <span class="term-title">~/pernix</span>
       </div>
-      <pre class="term-body"><span class="ln"><span class="prompt">$</span> git clone --branch main <span class="path">https://github.com/calvincs/Pernix.git</span></span>
+      <pre class="term-body"><span class="ln"><span class="prompt">$</span> git clone <span class="path">https://github.com/calvincs/Pernix.git</span></span>
 <span class="ln"><span class="prompt">$</span> cd Pernix</span>
-<span class="ln"><span class="prompt">$</span> python3 -m venv .venv && source .venv/bin/activate</span>
+<span class="ln"><span class="prompt">$</span> python3 -m venv .venv &amp;&amp; source .venv/bin/activate</span>
 <span class="ln"><span class="prompt">$</span> pip install -r requirements.txt</span>
-<span class="ln"><span class="prompt">$</span> playwright install chromium  <span class="cmt"># browser for browse_web</span></span>
-<span class="ln"><span class="prompt">$</span> cp .env.example .env  <span class="cmt"># add API keys if you have any</span></span>
-<span class="ln"><span class="cmt"># Local example only; skip for a cloud or existing model server.</span></span>
-<span class="ln"><span class="prompt">$</span> ollama pull <span class="path">qwen3:8b</span>  <span class="cmt"># choose a model your hardware can run</span></span>
 <span class="ln"><span class="prompt">$</span> python run.py</span>
-<span class="ln out">  Pernix &rarr; <span class="path">http://127.0.0.1:8090</span> <span class="cursor"></span></span>
-<span class="ln"></span>
-<span class="ln"><span class="cmt"># the UI lives at /, swagger at /docs, redoc at /redoc</span></span></pre>
+<span class="ln out">  Pernix &rarr; <span class="path">http://127.0.0.1:8090</span> <span class="cursor"></span></span></pre>
     </div>
   </div>
-</section>
-
-<section class="release" id="release">
-  <p class="section-label reveal">Release notes</p><h2 class="section-title reveal">3.3. <em>Quicker to follow up.</em></h2>
-  <p class="section-sub reveal">Version <code>3.3.0</code> is available on <code>main</code>. The install commands on this page use main; choose <a class="link" href="https://github.com/calvincs/Pernix/tree/v3.3.0">the v3.3.0 tag</a> for this exact release. One database migration runs on startup; read the upgrade guide first.</p>
-  <ul class="release-benefits"><li class="reveal"><span>01</span><h3>Plan once, keep the cache.</h3><p>Scout plans on the first message. Later turns skip the planning call, and a fixed tool list lets a local model reuse its cached prompt: a 67k-token chat went from about 12 s of prompt processing to about 3 s. The agent finds anything else with <code>lookup</code>.</p></li><li class="reveal"><span>02</span><h3>Memory that stays put.</h3><p>Entries moved into an archived file are no longer dropped at the next index rebuild, and startup repairs any file already affected. The memory store starts at boot.</p></li><li class="reveal"><span>03</span><h3>Cleaner learning signal.</h3><p>Grades name the model that ran the turn. Skill proposals only carry code the session ran successfully. Thank-you turns skip memory work.</p></li></ul>
-  <p class="release-links reveal"><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/changelog.md">Full change summary →</a><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md">Upgrade &amp; migration guide →</a><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/operations.md">Operations guide →</a></p>
-  <p class="section-note reveal">Upgrading an existing installation? Back up <code>data/</code> first. <code>retry_worker</code> is removed; skills or prompts that name it should use <code>resume_worker</code> or <code>spawn_worker</code>.</p>
-</section>
-
-<section class="honest" id="limits">
-  <p class="section-label reveal">Know the boundaries</p><h2 class="section-title reveal">A personal tool. <em>Use your judgment.</em></h2>
-  <ul class="limits-list reveal"><li><strong>You remain the reviewer.</strong> Models, memory, and self-review can be wrong. Recall is selective; checks establish only what they test. Budgets and skill updates do not guarantee success.</li><li><strong>Bring the connections.</strong> Web search needs a Tavily key; browser rendering needs Playwright. Providers and integrations need setup. Scheduled work needs an available server and model.</li><li><strong>A trusted, personal environment.</strong> Spaces organize projects; they do not isolate users. Pernix is experimental software, shipped as-is under MIT. <a class="link" href="#start">Read setup &amp; safety</a>.</li></ul>
-  <p class="section-note reveal">Dream and self-checks are opt-in. Workers delegate one level deep; useful parallelism depends on your model provider’s capacity.</p>
+  <p class="doc-row reveal"><span>Docs</span>
+    <a class="link" href="https://github.com/calvincs/Pernix/tree/main/docs" target="_blank" rel="noopener">Overview</a>
+    <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/architecture.md" target="_blank" rel="noopener">How it works</a>
+    <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/deployment/llm-providers.md" target="_blank" rel="noopener">Providers</a>
+    <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/changelog.md" target="_blank" rel="noopener">Changelog</a>
+    <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md" target="_blank" rel="noopener">Upgrade</a>
+  </p>
 </section>
 
 <!-- ========== CLOSING ========== -->
