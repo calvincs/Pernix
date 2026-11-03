@@ -49,7 +49,10 @@ AUTO_APPLY_MAX_CHANGE_CHARS = 1500
 # so the added text never reached the prompt. A refused proposal is not
 # lost: it waits in the Skills tab, and archives after 30 days.
 AUTO_APPLY_MAX_PER_SKILL_30D = 3
-SKILL_INJECT_MAX_CHARS = 5000  # mirrors core.scout.runner.SKILL_INJECT_MAX_CHARS
+# Mirrors core.scout.runner.SKILL_INJECT_MAX_CHARS. In run-once scout mode
+# nothing is injected, but load_skill puts the whole body in the history of
+# every later turn, so the cap still bounds what a skill costs the prompt.
+SKILL_INJECT_MAX_CHARS = 5000
 _HEADING_SIMILARITY = 0.6
 
 # Text addressed to an editor rather than to the agent reading the skill:
@@ -620,6 +623,28 @@ def _validate_for_auto_apply(proposal: dict) -> str | None:
     return None
 
 
+def _notify_saturated(skill_name: str, reason: str) -> None:
+    """Tell the user a skill is full: its proposals queue up and never apply.
+
+    Before this the skip lived only in the log, so a saturated skill kept
+    collecting proposals nobody saw (2026-11-03: two sat blocked).
+    """
+    if not skill_name:
+        return
+    from core import notices
+
+    notices.notify(
+        "skills.saturated",
+        title=f"Skill is full: {skill_name}",
+        body=(
+            f"Proposals for {skill_name} cannot auto-apply ({reason.removeprefix('skip:')}). "
+            "Shorten the skill, or apply or reject its pending proposals in the Skills tab."
+        ),
+        subject=skill_name,
+        link={"kind": "tab", "tab": "skills"},
+    )
+
+
 def auto_apply_ripe_proposals() -> dict:
     """Apply pending skill proposals that are past the window and pass the
     checks in ``_validate_for_auto_apply``.
@@ -668,6 +693,8 @@ def auto_apply_ripe_proposals() -> dict:
             else:
                 out["skipped"] += 1
                 logger.info("Skill auto-apply skipped %s: %s", pid, reason)
+                if "prompt limit" in reason:
+                    _notify_saturated(str(prop.get("skill_name") or ""), reason)
             continue
         try:
             result = apply_proposal(pid, status_label="auto_applied", unwrap=True)

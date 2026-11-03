@@ -1781,6 +1781,15 @@ def _write_post_mortem(
         # model_override is an in-memory AgentSession field, never a DB
         # column — reading it from the sessions row mislabeled every
         # override-running session as settings.llm_model.
+        if "agent_model" not in payload and turn_user_msg_id:
+            # The turn's own rows first: the live override is the model NOW,
+            # which a deferred grade reads minutes after a user switch.
+            try:
+                _turn_model = db.turn_agent_model(session_id, int(turn_user_msg_id))
+                if _turn_model:
+                    payload["agent_model"] = _turn_model
+            except Exception as _e:
+                logger.debug("turn model lookup failed for %s: %s", session_id, _e)
         if "agent_model" not in payload:
             try:
                 from sessions.manager import get_manager as _get_mgr

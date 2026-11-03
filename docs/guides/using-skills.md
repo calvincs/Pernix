@@ -81,7 +81,7 @@ To uninstall: delete the directory, or use the `×` on the skill's row in Explor
 
 ## Per-session skill control
 
-You can disable a particular skill from being auto-injected for a session by including a hint:
+You can keep the scout from recommending a particular skill for a session by including a hint:
 
 > *"Don't use the <skill-name> skill this session."*
 

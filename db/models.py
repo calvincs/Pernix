@@ -2596,6 +2596,27 @@ def session_last_message_at(session_id: str, after_id: int) -> str | None:
     return str(row[0]) if row and row[0] else None
 
 
+def turn_agent_model(session_id: str, turn_user_msg_id: int) -> str | None:
+    """The model that wrote the turn opened by `turn_user_msg_id`.
+
+    Read from the turn's own assistant rows, which record the model of each
+    call. A deferred grade runs minutes after the turn, and by then the user
+    may have switched the session to another model (session 7fdaf04b6918: a
+    Qwen turn was filed under the paid model picked three minutes later).
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT json_extract(metadata, '$.model') FROM messages "
+            "WHERE session_id = ? AND role = 'assistant' AND id > ? "
+            "AND json_valid(metadata) "
+            "AND json_extract(metadata, '$.parent_user_msg_id') = ? "
+            "AND json_extract(metadata, '$.model') IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (session_id, int(turn_user_msg_id), int(turn_user_msg_id)),
+        ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
 def token_usage_by_model_since(since_iso: str, until_iso: str | None = None) -> list[dict]:
     """Recorded streaming usage, grouped by route provenance and session.
 

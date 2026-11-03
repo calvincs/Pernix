@@ -2,6 +2,24 @@
 
 ## Unreleased — development
 
+- File each reflect grade under the model that ran the turn. A deferred grade
+  read the session's model minutes later, after the user had switched.
+- Fix refine reading tool calls in the wrong shape. It never saw `load_skill`,
+  showed no tool use, and credited the wrong skill. Repl exceptions now count
+  as failures.
+- Make refine's skill code come from calls that worked. Code that calls
+  anything the session never ran successfully is cut from the proposal, and
+  the proposal waits for review.
+- Skip distill and refine when the new rows are only a grade row or a "thanks"
+  turn. Messages with any content still go through.
+- In run-once mode, point the agent at the scout's skill with `load_skill`
+  instead of pasting a cut copy into the briefing. The scout's tool picks now
+  name tools outside the fixed list, shown in the briefing for `use_tool`.
+- Label later no-LLM scout turns as planned that way, not "scout unavailable".
+- Notify when a skill is too big for its proposals to apply.
+- Log our compiled prompt size beside the provider's count and cache hits for
+  each round.
+
 - Remove `retry_worker`. It cancelled workers with no check and dropped their
   task. Use `resume_worker` to keep the work, or `spawn_worker` to start fresh;
   a failed worker's reply now shows its original task.

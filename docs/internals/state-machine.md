@@ -615,7 +615,7 @@ Tools with `"worker"` in `denied_session_types`: every orchestration tool (`spaw
 
 - All core tools (`file_read`, `file_write`, `bash`, `call_model`, `ask_user`, …) — including `ask_user`: the question is posted to the global question registry and routed to **whichever user is watching the parent's UI**. From the worker's perspective the mechanism is identical to a main session — turn terminates with `waiting_for_input=True`, user's answer arrives as a new `manager.prompt()` into the worker.
 - All enabled extension tools (browser, vcs)
-- Skills (scout auto-injects top-1)
+- Skills (scout names the top one; the worker loads it with `load_skill`)
 - Shared workspace (reads/writes visible to parent), but its deliverable is isolated in `.worker_{id[:12]}_summary.md`
 
 ### 4.4 Result handoff

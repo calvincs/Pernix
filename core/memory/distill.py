@@ -318,6 +318,21 @@ async def distill_session(
     if not fresh:
         logger.debug("Distillation: nothing new past msg %d for session %s", watermark, session_id)
         return
+    from core.acks import trivial_delta_reason
+
+    skip_reason = trivial_delta_reason(fresh)
+    if skip_reason == "only reflect/notice rows":
+        # Leave the watermark: the grade row rides along with the next real
+        # turn, which is when it has something to explain.
+        logger.debug("Distillation: only grade/notice rows past msg %d for %s", watermark, session_id)
+        return
+    if skip_reason:
+        # Nothing to learn, so no LLM call. Move the watermark past it so the
+        # next real turn is not re-sent with this padding.
+        covered_to = max(int(m.get("id") or 0) for m in fresh)
+        await asyncio.to_thread(db.set_distill_watermark, session_id, covered_to)
+        logger.info("Distillation skipped for %s up to msg %d: %s", session_id, covered_to, skip_reason)
+        return
 
     # The header rides every chunk. The opening request is what states the
     # session's standing constraints, and dropping it in favour of the newest

@@ -210,7 +210,24 @@ def _scout_base_prompt(max_rounds: int) -> str:
         middle = _SCOUT_PROMPT_ONE_ROUND
     else:
         middle = _SCOUT_PROMPT_MULTI_ROUND.format(rounds=max_rounds, submit_by=max_rounds - 1)
-    return _SCOUT_PROMPT_HEAD + middle + _SCOUT_PROMPT_TAIL
+    tail = _SCOUT_PROMPT_TAIL
+    if settings.scout_first_turn_only:
+        tail = tail.replace(_TOOLS_GUIDANCE_PICK, _TOOLS_GUIDANCE_EXTRA)
+    return _SCOUT_PROMPT_HEAD + middle + tail
+
+
+_TOOLS_GUIDANCE_PICK = (
+    "- recommended_tools: Array of tool names the main agent will need (5-15 tools). "
+    "Only include extension tools — builtin tools are always available.\n"
+)
+# Run-once mode: the agent's tool list is fixed. What helps is naming the few
+# tools OUTSIDE it, which the agent can only reach through use_tool.
+_TOOLS_GUIDANCE_EXTRA = (
+    "- recommended_tools: Array of 0-5 tool names this task needs that are NOT in the agent's "
+    "fixed tool list (bash, file_read/file_write/file_edit, grep, glob, repl, search_web, "
+    "browse_web, http_get, load_skill, lookup, spawn_worker and the other everyday tools are "
+    "always there). The agent calls these through use_tool. Empty array when the fixed list covers the task.\n"
+)
 
 
 # The prompt at the default (one round). Kept as a module constant for the
@@ -430,7 +447,7 @@ _SCOUT_TOOLS = [
                     "recommended_tools": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Extension tool names the agent will need (5-15)",
+                        "description": "Tool names the agent will need (see REPORT FIELD GUIDANCE)",
                     },
                     "tool_rationale": {"type": "string", "description": "One sentence explaining tool selection"},
                     "recommended_skills": {
@@ -1368,10 +1385,12 @@ async def run_scout(
             if attempt > 1:
                 logger.info("Scout succeeded on attempt %d for session %s", attempt, session_id)
             logger.info(
-                "Scout completed for session %s in %dms (tools: %s)",
+                "Scout completed for session %s in %dms (task_type=%s skills=%s extra_tools=%s)",
                 session_id,
                 report.scout_latency_ms,
-                ", ".join(report.recommended_tools[:5]),
+                report.task_type or "-",
+                ", ".join(report.recommended_skills[:3]) or "-",
+                ", ".join(report.recommended_tools[:5]) or "-",
             )
             return report
 
@@ -2040,6 +2059,9 @@ def _try_parse_json(text: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+_EXTRA_TOOLS_MAX = 5
+
+
 def _validate_report(report: ScoutReport) -> ScoutReport:
     """Validate and sanitize scout report.
 
@@ -2060,6 +2082,14 @@ def _validate_report(report: ScoutReport) -> ScoutReport:
     disabled_tools = set(existing_tools) - set(valid_tools)
     if disabled_tools:
         logger.warning("Scout recommended disabled tools (stripped): %s", disabled_tools)
+
+    # Run-once mode: the tool list is fixed, so the picks that matter are the
+    # ones outside it. The briefing names them; the agent reaches them through
+    # use_tool. Without this the whole field was unread telemetry.
+    if settings.scout_first_turn_only:
+        from core.tools.native import NATIVE_TOOLS
+
+        report.extra_tools = sorted({t for t in valid_tools if t not in NATIVE_TOOLS})[:_EXTRA_TOOLS_MAX]
 
     # Ensure core minimum always present
     tool_set = set(valid_tools) | CORE_MINIMUM
@@ -2096,7 +2126,15 @@ def _validate_report(report: ScoutReport) -> ScoutReport:
             else:
                 report.injected_skill_name = top_skill
                 instructions = skill_reg.load_instructions(top_skill)
-                if instructions:
+                if instructions and settings.scout_first_turn_only:
+                    # Run-once mode names the skill and lets the agent load it.
+                    # An injected body lives only in this turn's briefing and is
+                    # gone on the next turn; a load_skill result is a history row
+                    # every later turn keeps, inside the cached prefix. A body cut
+                    # at the cap also made the agent load it anyway (7fdaf04b6918).
+                    report.injected_skill = ""
+                    logger.info("Scout recommends skill '%s' (load_skill pointer)", top_skill)
+                elif instructions:
                     if len(instructions) > SKILL_INJECT_MAX_CHARS:
                         # The cut is silent to the agent otherwise: it reads a
                         # procedure that stops mid-step and follows it as if
@@ -2226,7 +2264,7 @@ def _build_fallback_report(
         # lose the grader's strategy (session 3dc5a307d751).
         approach = _prior_turn_verdict_block(session_id)
 
-    return ScoutReport(
+    report = ScoutReport(
         memory_context=memory_context,
         recommended_tools=sorted(tool_names),
         tool_rationale="Fallback: core tools + recently used (scout unavailable)",
@@ -2235,6 +2273,12 @@ def _build_fallback_report(
         from_fallback=True,
         fallback_reason=reason,
     )
+    if reason == "no_llm":
+        # By design, not an outage: the session's one LLM scout already ran.
+        # "pending" read as "never validated" in post-mortems and metrics.
+        report.tool_rationale = "Planned without the scout LLM (run-once mode)"
+        report.viability = "inherited"
+    return report
 
 
 # Checkpoint-file surfacing (module level so the glob contract is testable).

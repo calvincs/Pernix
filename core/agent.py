@@ -15,6 +15,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 
 from config import settings
 from core.context.compaction import NOTHING_TO_SUMMARIZE, CompactionOutcome, compact_with_llm
@@ -1750,6 +1751,8 @@ async def run_agent(
     # token number the window actually constrains. One round stale by
     # construction — the status is built before this round's compile.
     _last_context_tokens: int | None = None
+    _round_prompt_tokens = 0
+    _round_cache_read = 0
 
     # Surface RLM runs that ended after their turn died. A cancel or budget
     # teardown abandons the in-flight rlm_process dispatch, so the engine's
@@ -2013,6 +2016,11 @@ async def run_agent(
         # answered, not the cumulative time across retries.
         _round_started_at = outcome.started_at
         _last_usage = outcome.usage or _last_usage
+        # This round's provider count, logged beside our own compiled count:
+        # a gap between them is tokens the provider added, not Pernix
+        # (session 7fdaf04b6918: 17k compiled, 77k billed on a paid model).
+        _round_prompt_tokens = outcome.usage.prompt_tokens if outcome.usage else 0
+        _round_cache_read = outcome.usage.cache_read_tokens if outcome.usage else 0
 
         if outcome.context_overflow is not None:
             # The provider rejected the request as too long. Compact and
@@ -2215,12 +2223,16 @@ async def run_agent(
             if collected_content:
                 await _save_turn_msg("assistant", collected_content, latency_ms=_round_latency_ms)
             logger.info(
-                "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=0 content_chars=%d (final)",
+                "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=0 content_chars=%d "
+                "compiled_tokens=%d prompt_tokens=%d cache_read=%d (final)",
                 session_id,
                 tool_round,
                 _stream_current_model,
                 _round_latency_ms,
                 len(collected_content or ""),
+                _last_context_tokens or 0,
+                _round_prompt_tokens,
+                _round_cache_read,
             )
             session.emit_event(
                 {
@@ -2343,13 +2355,17 @@ async def run_agent(
         # Now that the parent row exists, answer the calls it will never run.
         await gate.flush_rejections()
         logger.info(
-            "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=%d content_chars=%d",
+            "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=%d content_chars=%d "
+            "compiled_tokens=%d prompt_tokens=%d cache_read=%d",
             session_id,
             tool_round,
             _stream_current_model,
             _round_latency_ms,
             len(validated_tool_calls),
             len(collected_content or ""),
+            _last_context_tokens or 0,
+            _round_prompt_tokens,
+            _round_cache_read,
         )
 
         # Execute the surviving calls, then persist, emit and account for
@@ -2767,6 +2783,10 @@ def _resolve_tool_surface(
             allowlist=getattr(session, "tool_allowlist", None),
             excluded=session.turn.retry_excluded_tools,
         )
+        if report and report.extra_tools:
+            # A tool already on this session's list (a job's allow-list can
+            # hold non-native tools) is not "outside" it.
+            report = dc_replace(report, extra_tools=[t for t in report.extra_tools if t not in tools])
         return (report.to_system_prompt_section() if report else ""), tools
     # The prior-turn lookup is a transcript read; run_agent prefetches it
     # off-loop and hands it in so turn start does not block the event loop.
