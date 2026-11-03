@@ -105,7 +105,7 @@
       <p class="hero-category reveal">A self-hosted AI workspace · 3.3</p>
       <p class="release-notice"><strong>3.3 is available.</strong> Released on <code>main</code>.
         <a href="#release">What changed in 3.3</a> ·
-        <a href="https://github.com/calvincs/Pernix/tree/main">Get it from main</a>.</p>
+        <a href="https://github.com/calvincs/Pernix/tree/v3.3.0">Get v3.3.0</a>.</p>
       <h1 class="hero-title reveal">
         <span class="ht-line">Your model.</span>
         <span class="ht-line">Your memory.</span>
@@ -833,7 +833,7 @@ and communicate clearly.
 
 <section class="release" id="release">
   <p class="section-label reveal">Release notes</p><h2 class="section-title reveal">3.3. <em>Quicker to follow up.</em></h2>
-  <p class="section-sub reveal">Version <code>3.3.0</code> is available on <code>main</code>. The install commands on this page use main. One database migration runs on startup; read the upgrade guide first.</p>
+  <p class="section-sub reveal">Version <code>3.3.0</code> is available on <code>main</code>. The install commands on this page use main; choose <a class="link" href="https://github.com/calvincs/Pernix/tree/v3.3.0">the v3.3.0 tag</a> for this exact release. One database migration runs on startup; read the upgrade guide first.</p>
   <ul class="release-benefits"><li class="reveal"><span>01</span><h3>Plan once, keep the cache.</h3><p>Scout plans on the first message. Later turns skip the planning call, and a fixed tool list lets a local model reuse its cached prompt: a 67k-token chat went from about 12 s of prompt processing to about 3 s. The agent finds anything else with <code>lookup</code>.</p></li><li class="reveal"><span>02</span><h3>Memory that stays put.</h3><p>Entries moved into an archived file are no longer dropped at the next index rebuild, and startup repairs any file already affected. The memory store starts at boot.</p></li><li class="reveal"><span>03</span><h3>Cleaner learning signal.</h3><p>Grades name the model that ran the turn. Skill proposals only carry code the session ran successfully. Thank-you turns skip memory work.</p></li></ul>
   <p class="release-links reveal"><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/changelog.md">Full change summary →</a><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md">Upgrade &amp; migration guide →</a><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/operations.md">Operations guide →</a></p>
   <p class="section-note reveal">Upgrading an existing installation? Back up <code>data/</code> first. <code>retry_worker</code> is removed; skills or prompts that name it should use <code>resume_worker</code> or <code>spawn_worker</code>.</p>
