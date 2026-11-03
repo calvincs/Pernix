@@ -119,13 +119,14 @@ This used to be an unconditional hardcode: every tool result over 300 characters
 
 ## Scout (Planning Phase)
 
-The scout is a fast sub-agent that runs at the start of each turn to plan the approach: it reads the preloaded memory, tool and skill baseline, picks tools, and selects skills before handing off to the main agent.
+The scout is a fast sub-agent that plans the approach: it reads the preloaded memory, tool and skill baseline, names the skill to load and any tools outside the agent's fixed list, and drafts a plan before handing off to the main agent. By default it runs once per session (`scout_first_turn_only`).
 
 | Setting | Default | Description |
 |---|---|---|
 | `scout_enabled` | `true` | Enable/disable the scout phase. Disable only for debugging; the scout significantly improves response quality. |
 | `scout_timeout` | `90` | Seconds before the scout is abandoned and the main agent runs without its guidance. |
 | `scout_max_rounds` | `1` | LLM rounds the scout may use before the turn starts (1–6; Settings → Agent → **Scout Rounds**). At `1` scout gets the preloaded baseline (memory, tools, skills, cross-session findings) and is offered only `submit_report` — fastest, since the turn waits on scout. Raise it to give scout its search tools (`search_memory`, `search_skills`, `read_skill_instructions`, …) and the self-check revision loop back; each extra round adds a few seconds and re-sends the whole scout prompt. |
+| `scout_first_turn_only` | `true` | Run the scout LLM once per session. Later turns get a no-LLM memory search, the tool list stays fixed, and other tools are reached with `lookup` and `use_tool`. `false` restores a scout on every turn. |
 | `scout_retry_on_empty_approach` | `true` | Retry scout once if it returns no guidance (empty plan). |
 | `scout_preload_memory_char_limit` | `600` | Characters per memory result in the scout's auto-injected baseline. Only affects the preload phase — active recall tool calls return full entry content. |
 

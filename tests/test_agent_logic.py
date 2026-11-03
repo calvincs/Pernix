@@ -585,8 +585,8 @@ def test_hallucinated_tool_hint_includes_description_and_close_match():
     assert "completed worker" in hint
 
 
-def test_hallucinated_tool_hint_no_match_falls_back_to_discover_tools():
-    """When nothing resembles the bad name, tell the agent to call discover_tools."""
+def test_hallucinated_tool_hint_no_match_falls_back_to_lookup():
+    """When nothing resembles the bad name, tell the agent to call lookup."""
     from core.agent import _build_hallucinated_tool_hint
     from core.tools.registry import ToolRegistry
 
@@ -601,7 +601,7 @@ def test_hallucinated_tool_hint_no_match_falls_back_to_discover_tools():
     reg.rebuild_index()
 
     hint = _build_hallucinated_tool_hint("xyz_totally_unrelated", reg)
-    assert "discover_tools" in hint
+    assert "lookup" in hint
 
 
 # ---------------------------------------------------------------------------

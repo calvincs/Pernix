@@ -149,8 +149,17 @@ class OpenAIProvider:
             payload["stream_options"] = {"include_usage": True}
         if tools:
             payload["tools"] = tools
+            # A one-shot call offering one tool wants that tool. Left to choose,
+            # self-hosted Qwen skipped scout's submit_report on 25 of 184 calls.
+            if len(tools) == 1 and not stream:
+                payload["tool_choice"] = {"type": "function", "function": {"name": tools[0]["function"]["name"]}}
         if temperature is not None:
             payload["temperature"] = temperature
+        # Self-hosted Qwen with thinking off sometimes ends a finished answer
+        # with a stray `</think>` where its stop token belongs, then writes the
+        # answer again. Everything past that tag is noise, so end there.
+        if "api.openai.com" not in (self._config.base_url or ""):
+            payload["stop"] = ["</think>"]
         return payload
 
     @staticmethod

@@ -68,24 +68,65 @@ async def test_skill_auto_apply_is_log_tier(monkeypatch):
     assert len(rows) == 1 and rows[0]["tier"] == "log" and rows[0]["title"] == "Skill proposals auto-applied"
 
 
-async def test_fallback_burn_interrupts_once_a_day_across_the_deploy(monkeypatch, wires):
+async def test_fallback_incident_updates_resolves_and_reopens(monkeypatch, wires):
     from core.snooze import SnoozeRunner
 
-    finding = {"model": "paid", "share": 0.9, "window_hours": 24, "tokens": 9, "total_tokens": 10, "calls": 3}
+    finding = {
+        "model": "paid",
+        "share": 0.9,
+        "window_hours": 24,
+        "tokens": 9,
+        "total_tokens": 10,
+        "calls": 3,
+        "sessions": ["s1"],
+        "requested_models": ["local"],
+        "reasons": ["timeout"],
+        "window_start": "2026-10-25T00:00:00+00:00",
+        "window_end": "2026-10-26T00:00:00+00:00",
+    }
     monkeypatch.setattr("core.llm.burnwatch.check_fallback_burn", lambda: finding)
     runner = SnoozeRunner.__new__(SnoozeRunner)
     runner._stats = {}
-
+    # Old daily markers have no bearing on a newly proven incident.
     db.set_snooze_state(f"notify_dedup:{_today()}:fallback_burn", "1")
-    await SnoozeRunner._fallback_burn_check(runner)
-    assert _rows("system.fallback_burn") == []
-
-    with connect_sessions() as conn:
-        conn.execute("DELETE FROM snooze_state WHERE key LIKE 'notify_dedup:%'")
-    await SnoozeRunner._fallback_burn_check(runner)
+    await runner._fallback_burn_check()
     rows = _bell("system.fallback_burn")
     assert len(rows) == 1 and rows[0]["tier"] == "interrupt"
-    assert any(e.get("category") == "system.fallback_burn" for e in wires.events)
+    nid = rows[0]["id"]
+    events = len(wires.events)
+    finding["window_end"] = "2026-10-27T00:00:00+00:00"
+    finding["tokens"] = 12
+    await runner._fallback_burn_check()
+    assert len(_rows("system.fallback_burn")) == 1
+    assert len(wires.events) == events  # midnight does not interrupt again
+    assert "12 of 10" in _bell("system.fallback_burn")[0]["body"]
+    with connect_sessions() as conn:
+        conn.execute("UPDATE notifications SET dismissed_at='2026-10-27' WHERE id=?", (nid,))
+    await runner._fallback_burn_check()
+    assert len(_rows("system.fallback_burn")) == 1  # acknowledgement respected
+    monkeypatch.setattr("core.llm.burnwatch.check_fallback_burn", lambda: None)
+    await runner._fallback_burn_check()
+    with connect_sessions() as conn:
+        assert conn.execute("SELECT resolved_at FROM notifications WHERE id=?", (nid,)).fetchone()[0]
+    monkeypatch.setattr("core.llm.burnwatch.check_fallback_burn", lambda: finding)
+    await runner._fallback_burn_check()
+    assert len(_rows("system.fallback_burn")) == 2
+
+
+async def test_fallback_read_failure_does_not_resolve(monkeypatch):
+    from core.snooze import SnoozeRunner
+
+    nid = db.add_notification("", "existing", category="system.fallback_burn")
+
+    def fail():
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr("core.llm.burnwatch.check_fallback_burn", fail)
+    runner = SnoozeRunner.__new__(SnoozeRunner)
+    runner._stats = {}
+    await runner._fallback_burn_check()
+    with connect_sessions() as conn:
+        assert conn.execute("SELECT resolved_at FROM notifications WHERE id=?", (nid,)).fetchone()[0] is None
 
 
 # --- dream -----------------------------------------------------------------------

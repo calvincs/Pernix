@@ -22,7 +22,7 @@ Each one is a directory containing a `SKILL.md` file and optional `scripts/`, `r
 
 ## How skills get used
 
-You don't have to do anything explicit. On every turn, scout reads the metadata of every available skill (just the YAML frontmatter — name, description, tags) and decides whether one matches the user's request. If a top-scoring skill matches, scout injects it into the system prompt automatically.
+You don't have to do anything explicit. When scout plans (the first real message of a session, by default), it reads the metadata of every available skill (just the YAML frontmatter — name, description, tags) and decides whether one matches the request. If one does, the briefing names it and the agent loads it with `load_skill`. On later turns the agent finds skills itself with `lookup`.
 
 You can also invoke a skill explicitly:
 
@@ -81,7 +81,7 @@ To uninstall: delete the directory, or use the `×` on the skill's row in Explor
 
 ## Per-session skill control
 
-You can disable a particular skill from being auto-injected for a session by including a hint:
+You can keep the scout from recommending a particular skill for a session by including a hint:
 
 > *"Don't use the <skill-name> skill this session."*
 

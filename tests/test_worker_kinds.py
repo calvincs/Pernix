@@ -2,7 +2,7 @@
 
 Coverage: kind resolution (built-ins + data-root overrides), spawn_worker
 integration (unknown-kind refusal, charter injection, allowlist + persistence),
-the deterministic kind gate in get_worker_result, retry_worker kind
+the deterministic kind gate in get_worker_result, worker kind
 inheritance, and get_or_create identity restore (the Feature 5 seam).
 """
 
@@ -158,25 +158,6 @@ def test_spawn_kind_model_persisted(mgr, loop, monkeypatch):
     loop.run_until_complete(asyncio.sleep(0))
 
 
-def test_retry_worker_inherits_kind(mgr, loop, monkeypatch):
-    parent_id = _processing_parent(mgr)
-    out = orch.spawn_worker(
-        "original task",
-        title="R1",
-        kind="research",
-        _context={"session_id": parent_id, "_loop": loop},
-    )
-    wid = out.split()[2]
-    loop.run_until_complete(asyncio.sleep(0))
-
-    out2 = orch.retry_worker(wid, reason="stalled", _context={"session_id": parent_id, "_loop": loop})
-    assert out2.startswith("Worker spawned:")
-    assert "[research]" in out2
-    wid2 = out2.split()[2]
-    assert db.get_session(wid2)["worker_kind"] == "research"
-    loop.run_until_complete(asyncio.sleep(0))
-
-
 # ---------------------------------------------------------------------------
 # Deterministic kind gate in get_worker_result
 # ---------------------------------------------------------------------------
@@ -230,10 +211,10 @@ def test_get_or_create_restores_worker_identity(mgr):
     assert "bash" not in w.tool_allowlist
 
 
-def test_get_or_create_normal_session_untouched(mgr):
+def test_get_or_create_normal_session_restores_user_pin(mgr):
     sid = mgr.create_session(title="N")
-    db.update_session(sid, model_override="ghost:1b")  # column exists but must be ignored
+    db.update_session(sid, model_override="chosen:1b")
     mgr._sessions.pop(sid)
     s = mgr.get_or_create(sid)
-    assert s.model_override is None
+    assert s.model_override == "chosen:1b"
     assert s.tool_allowlist is None

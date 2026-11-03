@@ -1,5 +1,89 @@
 # Changelog
 
+## v3.3.0 — 2026-11-03
+
+Minor release on `main` as `v3.3.0`; application and API version: `3.3.0`.
+One migration (v45). One new setting, `scout_first_turn_only` (default
+`true`). One agent tool removed: `retry_worker`. Two tools added: `lookup`
+and `use_tool`. See docs/upgrade.md.
+
+- Stop losing memory entries moved into an archived file. The split sweep
+  wrote live entries into dead files, where the next reindex would drop them;
+  `move_entries` now reopens the file and keeps its old entries archived, the
+  split no longer offers archived files, and the health check repairs files
+  already left half live.
+- Warm the memory store at startup. A stale index made the first user turn
+  after a deploy wait 66 s for a rebuild.
+- Log which files drifted before any reindex, and skip files over 50 MB when
+  counting, as the rebuild already does.
+
+- File each reflect grade under the model that ran the turn. A deferred grade
+  read the session's model minutes later, after the user had switched.
+- Fix refine reading tool calls in the wrong shape. It never saw `load_skill`,
+  showed no tool use, and credited the wrong skill. Repl exceptions now count
+  as failures.
+- Make refine's skill code come from calls that worked. Code that calls
+  anything the session never ran successfully is cut from the proposal, and
+  the proposal waits for review.
+- Skip distill and refine when the new rows are only a grade row or a "thanks"
+  turn. Messages with any content still go through.
+- In run-once mode, point the agent at the scout's skill with `load_skill`
+  instead of pasting a cut copy into the briefing. The scout's tool picks now
+  name tools outside the fixed list, shown in the briefing for `use_tool`.
+- Label later no-LLM scout turns as planned that way, not "scout unavailable".
+- Notify when a skill is too big for its proposals to apply.
+- Log our compiled prompt size beside the provider's count and cache hits for
+  each round.
+
+- Remove `retry_worker`. It cancelled workers with no check and dropped their
+  task. Use `resume_worker` to keep the work, or `spawn_worker` to start fresh;
+  a failed worker's reply now shows its original task.
+- Tell the model to wait with `await_workers` when it spawns a worker, and say
+  who cancelled a worker and how old it was.
+- Say a worker is still running when its result is asked for too soon. "No
+  output, consider retrying" made the model cancel live workers.
+- Run the scout LLM once per session, on the first real message. Later turns
+  get a short memory search with no LLM. `scout_first_turn_only = false`
+  restores the old behaviour.
+- Keep the tool list fixed for a session, since one changed tool made the whole
+  prompt cold. Add `lookup` and `use_tool` to reach every other tool.
+- Move scout text and the goal block after the turn's user message, so a long
+  chat reuses its history on each new turn.
+- Give the container 45 s to stop. Docker's 10 s default killed Pernix before
+  its shutdown ran on deploys with a connection still open.
+- Run Files search, delete and upload off the event loop, so a search over a
+  large workspace no longer freezes every session. Same for the embedding sweep.
+- Run distill in the background, one run per session, so a follow-up message no
+  longer waits for it at the end of a turn.
+- Gzip the sidebar's session list, about 436 KB per poll from each open tab.
+- Let memory merges finish: raise the merge reply limit, which cut most replies
+  off mid-JSON. A fused entry now archives its original instead of deleting it,
+  so a bad merge can be undone.
+- Keep a merged memory file archived when it already holds archived entries,
+  and give memory merges 240 s, since real ones take about a minute.
+- Fix false fallback alerts when a user selects the configured backup model.
+  Record actual routing provenance; keep historical routes unknown.
+- Track one failover incident across midnight, with exact UTC windows and
+  affected sessions, quiet updates, and automatic resolution.
+- Stop self-hosted Qwen at a stray `</think>` so finished answers are not
+  written twice, and name the weekday in the clock block.
+- End repeat loops: after identical calls with nothing changing, interactive
+  sessions get one reply with tools off instead of more advice. Waits and polls
+  are exempt, and workers keep their tools.
+- Stop greetings pausing on `ask_user`, require a source for stated facts, and
+  give the clock block its UTC offset and part of day.
+- Search on the two ends of a large paste. The whole message stalled scout for
+  minutes and pushed it to the paid fallback.
+- Run the `deep_recall` search off the event loop, and log the loop's stack when
+  it stalls for 5 s. A stall freezes every session, scout and API route.
+- Challenge a reply once when it cites a link, PubMed id or DOI that nothing in
+  the turn showed.
+- Stop grading from walking the whole workspace on every turn. It starved the UI
+  and all sessions of CPU on a 285k-file workspace.
+- Fold each sidebar time group at 50 rows. A day of 490 sessions froze the tab.
+- Migration v45 adds routing fields and a durable model-selection audit;
+  model-picker and agent session selections now survive restart.
+
 
 ## v3.2.1 — 2026-10-14
 

@@ -15,10 +15,12 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 
 from config import settings
 from core.context.compaction import NOTHING_TO_SUMMARIZE, CompactionOutcome, compact_with_llm
 from core.context.compiler import attach_cache_breakpoints, compile_context, normalize_for_openrouter
+from core.context.local_times import local_time_note
 from core.context.tokens import get_estimator
 from core.llm.budget import derive_max_output, derive_model_budget, ensure_model_known
 from core.llm.client import get_llm_client
@@ -28,6 +30,7 @@ from core.llm.semaphore import PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
 from core.llm.stream_ladder import stream_with_failover
 from core.llm.types import REJECTED_CALL_KEY, is_rejected_call
 from core.tools.executor import execute_tool_round, is_command_failure
+from core.tools.native import frozen_surface
 from core.tools.registry import get_registry
 from db import models as db
 from sessions.state import AgentSession, turn_state
@@ -91,6 +94,17 @@ def _prior_turn_tool_names(session_id: str, lookback: int = 40) -> set[str]:
 
 _WEB_TOOLS = frozenset({"browse_web", "http_get", "search_web"})
 
+# Identical calls allowed since anything last changed, counting the one being
+# judged. A bash command's first run counts as a change, so in practice it runs
+# three times and the fourth try is refused. Advice does not stop a repeating model: a transcript showing the same call
+# and result several times teaches it to continue, and the 2026-10-31 replay
+# of c021aa9b0c79 kept repeating whatever the notice said.
+LOOP_BREAK_AT = 3
+
+# A bash command that waits is a poll. Its answer can stay the same for a while
+# without the agent being stuck.
+_BASH_WAIT_RE = re.compile(r"\b(?:sleep|wait|watch|timeout)\b")
+
 # Tool-result substrings that indicate "no useful info came back". Matched
 # case-insensitively against the tool result body. Kept narrow on purpose so
 # legitimate "404 documentation page" hits don't false-positive.
@@ -114,6 +128,20 @@ _FALSIFIED_FIT_RE = re.compile(
     r"|\bunsolved\b)",
     re.IGNORECASE,
 )
+
+
+def _is_poll_call(tc: dict, registry) -> bool:
+    """True for a call whose repeat is waiting, not looping."""
+    name = tc.get("name", "")
+    if name == "bash":
+        try:
+            args = json.loads(tc.get("arguments") or "{}")
+        except (ValueError, TypeError):
+            return False
+        cmd = args.get("command") if isinstance(args, dict) else None
+        return bool(_BASH_WAIT_RE.search(cmd or ""))
+    tool_def = registry.get(name) if hasattr(registry, "get") else None
+    return tool_def is not None and not getattr(tool_def, "idempotent", True)
 
 
 @dataclass
@@ -164,6 +192,13 @@ class StuckDetector:
     # How many times this turn the stuck handler let a change of approach run
     # instead of discarding it (see _is_recovery_move). Bounded per turn.
     recovery_passes: int = 0
+    # (call signature, mutation epoch) → how many times it was sent.
+    cycle_counts: dict = field(default_factory=dict)
+    # Highest count this round. Read by the stuck handler.
+    identical_calls: int = 0
+    # The next round runs without tools so the model has to answer.
+    force_text: bool = False
+    loop_break_used: bool = False
 
     def evaluate(self, content: str, tool_calls: list[dict] | None, tool_failures: dict, registry) -> tuple[float, int]:
         """Evaluate stuck signals. Returns (score 0-1, repeat_count)."""
@@ -196,6 +231,11 @@ class StuckDetector:
                 score += 0.4
                 self.behavioral_flags.add("tool_cycle")
             self.tool_call_history.append((sig, self.mutation_epoch))
+            self.identical_calls = 0
+            if not any(_is_poll_call(tc, registry) for tc in tool_calls):
+                key = (sig, self.mutation_epoch)
+                self.cycle_counts[key] = self.cycle_counts.get(key, 0) + 1
+                self.identical_calls = self.cycle_counts[key]
 
         # Signal 3: Error-retry without change
         if tool_calls:
@@ -673,6 +713,53 @@ _COURTESY_CLOSER_RE = re.compile(
 )
 
 
+# A reply saying the work was done. Only read on a turn where no tool ran.
+_CLAIMED_ACTION_RE = re.compile(
+    r"\bi(?:'ve| have)? (?:just |now |also )?(?:re-?ran|ran|fixed|updated|saved|wrote|edited|verified|confirmed"
+    r"|deleted|created|added|tested)\b"
+    r"|(?:^|[\n.!] ?)\s*(?:re-?ran|ran|fixed|updated|saved|verified|confirmed)\b",
+    re.IGNORECASE,
+)
+
+
+def _claims_unbacked_action(text: str, did_tool_calls: bool) -> bool:
+    """True when a turn with no tool call says it did something."""
+    return not did_tool_calls and bool(_CLAIMED_ACTION_RE.search(text or ""))
+
+
+# A link, PubMed id or DOI cited in a reply. Graded live: invented sources were
+# the most common serious failure, and a string match catches them for free.
+_SOURCE_REF_RE = re.compile(
+    r"https?://[^\s)\]>\"'`]+|\b(?:PMID|PubMed)(?: ID)?:?\s*\d{6,9}\b|\b10\.\d{4,9}/[^\s)\]>\"'`]+",
+    re.IGNORECASE,
+)
+
+
+def _normalize_source_ref(ref: str) -> str:
+    ref = ref.lower().split("#", 1)[0].rstrip(".,;:/*_")
+    ref = re.sub(r"^https?://(?:www\.)?", "", ref)
+    digits = re.fullmatch(r"(?:pmid|pubmed)(?: id)?:?\s*(\d+)", ref)
+    return digits.group(1) if digits else ref
+
+
+def _unsourced_refs(text: str, messages: list[dict]) -> list[str]:
+    """Sources cited in `text` that appear in nothing the model was shown.
+    Its own earlier replies do not count as a source."""
+    refs = _SOURCE_REF_RE.findall(text or "")
+    if not refs:
+        return []
+    shown = []
+    for m in messages:
+        if m.get("role") == "assistant":
+            continue
+        content = m.get("content")
+        if isinstance(content, list):
+            content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+        shown.append(str(content or ""))
+    corpus = "\n".join(shown).lower()
+    return list(dict.fromkeys(r for r in refs if _normalize_source_ref(r) not in corpus))[:6]
+
+
 def _announces_future_work(text: str) -> bool:
     """True when the reply's TAIL promises more work instead of doing it.
 
@@ -919,6 +1006,7 @@ class _ToolCallGate:
         # for the assistant row to be written. Both reset per admit().
         self._proposed: list[dict] = []
         self._rejected: list[dict] = []
+        self._wrapped: dict[str, dict] = {}  # call id -> original use_tool call
 
     async def admit(self, calls: list[dict], active_tools: list[str]) -> tuple[list[dict], dict[str, list[str]]]:
         """Return (executable calls, correction notes keyed by tool_call id).
@@ -936,6 +1024,8 @@ class _ToolCallGate:
         self._notes: dict[str, list[str]] = {}
         self._proposed = list(calls)
         self._rejected = []
+        self._wrapped: dict[str, dict] = {}
+        calls = await self._unwrap_use_tool(calls)
         unique = await self._dedup(calls)
         unique = await self._semantic_dedup(unique)
         valid = await self._correct_names(unique, active_tools)
@@ -975,6 +1065,10 @@ class _ToolCallGate:
             tc["id"] = f"rejected_{len(self._rejected)}_{_hash_args(tc.get('arguments', ''))}"
         tc[REJECTED_CALL_KEY] = True
         tc["arguments"] = _rejected_call_args(tc.get("arguments", ""))
+        # The assistant row holds the original use_tool call, not this copy.
+        wrapper = self._wrapped.get(tc["id"])
+        if wrapper is not None:
+            wrapper[REJECTED_CALL_KEY] = True
         self._rejected.append({"tc": tc, "message": message})
 
     def _note(self, tc: dict, text: str) -> None:
@@ -1076,6 +1170,41 @@ class _ToolCallGate:
                 else:
                     kept.append(tc)
             out.extend(kept)
+        return out
+
+    async def _unwrap_use_tool(self, calls: list[dict]) -> list[dict]:
+        """Turn use_tool(name, arguments) into a call to the named tool.
+
+        This runs first, so dedup, validation, stuck detection, the executor's
+        policy checks and reflect all see the real tool. The assistant row
+        keeps the original use_tool call: that is what the model sent, and
+        showing it a direct call would teach it to skip use_tool.
+        """
+        out: list[dict] = []
+        for tc in calls:
+            if (tc.get("name") or "").strip() != "use_tool":
+                out.append(tc)
+                continue
+            if not tc.get("id"):
+                tc["id"] = f"use_tool_{len(self._wrapped)}_{_hash_args(tc.get('arguments', ''))}"
+            raw = tc.get("arguments")
+            try:
+                outer = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
+                inner = outer.get("arguments", {})
+                inner = (json.loads(inner) if inner.strip() else {}) if isinstance(inner, str) else inner
+            except (AttributeError, json.JSONDecodeError, ValueError):
+                outer, inner = {}, None
+            name = outer.get("name") if isinstance(outer, dict) else None
+            if not isinstance(name, str) or not name.strip() or name.strip() == "use_tool":
+                problem = 'use_tool needs name="<tool>" and arguments={...}. Call lookup to find the tool.'
+            elif not isinstance(inner or {}, dict):
+                problem = "use_tool arguments must be a JSON object of the tool's parameters."
+            else:
+                unwrapped = {**tc, "name": name.strip(), "arguments": json.dumps(inner or {})}
+                self._wrapped[tc["id"]] = tc
+                out.append(unwrapped)
+                continue
+            await self._reject(tc, transcript_msg=f"Error: {problem}", event_msg=f"Error: {problem}", event_args={})
         return out
 
     async def _correct_names(self, calls: list[dict], active_tools: list[str]) -> list[dict]:
@@ -1556,8 +1685,12 @@ async def run_agent(
         tool_failures=tool_failures,
     )
     did_tool_calls = False
+    _action_claim_checked = False
+    _sources_checked = False
     compaction = _CompactionController(session, session_id)
     compaction.turn_user_msg_id = _turn_user_msg_id
+    _routing_requested_model = effective_model
+    _routing_failure_reason = None
     _tried_fallback = False  # sticky per-turn: once we fail over, stay on fallback for all remaining rounds
     _last_usage = None  # local tracker — avoids reading shared client.last_usage across sessions
     # Counter for "stuck + told to call ask_user but did not" consecutive rounds.
@@ -1618,6 +1751,8 @@ async def run_agent(
     # token number the window actually constrains. One round stale by
     # construction — the status is built before this round's compile.
     _last_context_tokens: int | None = None
+    _round_prompt_tokens = 0
+    _round_cache_read = 0
 
     # Surface RLM runs that ended after their turn died. A cancel or budget
     # teardown abandons the in-flight rlm_process dispatch, so the engine's
@@ -1841,7 +1976,9 @@ async def run_agent(
         # that the work is done.
         stream_tools = payload.tools
         _forced_synthesis = tool_round == settings.max_tool_rounds - 1
-        if _forced_synthesis:
+        _loop_break_round = stuck.force_text
+        stuck.force_text = False
+        if _forced_synthesis or _loop_break_round:
             stream_tools = None
 
         # --- Stream with retry/fallback ---
@@ -1862,10 +1999,14 @@ async def run_agent(
             sched_created_at=_sched_created_at,
             sched_priority=_sched_priority,
             tried_fallback=_tried_fallback,
+            requested_model=_routing_requested_model if _tried_fallback else effective_model,
+            failure_reason=_routing_failure_reason,
             # Only worth surfacing while we can still act on it; once the
             # budget is spent an overflow is just another fatal stream error.
             surface_context_overflow=compaction.can_help_with_overflow,
         )
+        _routing_requested_model = outcome.requested_model
+        _routing_failure_reason = outcome.failure_reason
         _tried_fallback = outcome.tried_fallback
         _stream_current_model = outcome.model
         collected_content = outcome.content
@@ -1875,6 +2016,11 @@ async def run_agent(
         # answered, not the cumulative time across retries.
         _round_started_at = outcome.started_at
         _last_usage = outcome.usage or _last_usage
+        # This round's provider count, logged beside our own compiled count:
+        # a gap between them is tokens the provider added, not Pernix
+        # (session 7fdaf04b6918: 17k compiled, 77k billed on a paid model).
+        _round_prompt_tokens = outcome.usage.prompt_tokens if outcome.usage else 0
+        _round_cache_read = outcome.usage.cache_read_tokens if outcome.usage else 0
 
         if outcome.context_overflow is not None:
             # The provider rejected the request as too long. Compact and
@@ -1957,7 +2103,7 @@ async def run_agent(
         # structured field still made the call; the provider layer knows the
         # wire formats and turns it back into one. Only consulted when the
         # structured field came back empty — a correctly framed call wins.
-        if not collected_tool_calls and collected_content:
+        if not collected_tool_calls and collected_content and stream_tools is not None:
             salvaged = salvage_tool_calls(collected_content, registry.exists)
             if salvaged:
                 logger.warning("Session %s: %s", session_id, salvaged.summary)
@@ -1971,6 +2117,62 @@ async def run_agent(
             if _followup_pending:
                 _followup_pending = False
                 await asyncio.to_thread(_record_followup_outcome, session, session_id, False)
+
+            # A reply claiming work on a turn with no tool call. Graded live as
+            # "Reran" with nothing run: the most trust-breaking failure left.
+            if (
+                not _action_claim_checked
+                and collected_content
+                and tool_round < settings.max_tool_rounds - 2
+                and not session.cancel_requested
+                and _claims_unbacked_action(collected_content, did_tool_calls)
+            ):
+                _action_claim_checked = True
+                await _save_turn_msg("assistant", collected_content)
+                await asyncio.to_thread(
+                    db.add_message,
+                    session_id,
+                    "system",
+                    "No tool ran this turn, but your reply says something was done. If you meant this turn, do it "
+                    "now with a tool and report the real result. If it happened in an earlier turn, say so in one "
+                    "line. Do not repeat your reply.",
+                )
+                session.touch()
+                collected_content = ""
+                tool_round += 1
+                _rounds_spent += 1
+                continue
+
+            # A cited source that no tool returned gets one chance to be fetched
+            # or removed. Bounded per turn, and never on a tool-less round.
+            _bad_refs = (
+                _unsourced_refs(collected_content, payload.messages)
+                if (
+                    not _sources_checked
+                    and collected_content
+                    and stream_tools
+                    and tool_round < settings.max_tool_rounds - 2
+                    and not session.cancel_requested
+                )
+                else []
+            )
+            if _bad_refs:
+                _sources_checked = True
+                await _save_turn_msg("assistant", collected_content)
+                await asyncio.to_thread(
+                    db.add_message,
+                    session_id,
+                    "system",
+                    "Your reply cites sources that appear in no tool result or message: "
+                    + ", ".join(_bad_refs)
+                    + ". Fetch each one now with a tool and check that it says what you claim, or remove it. "
+                    "If a tool cannot reach one, say so plainly. Then give the full corrected reply.",
+                )
+                session.touch()
+                collected_content = ""
+                tool_round += 1
+                _rounds_spent += 1
+                continue
 
             # Forced follow-up (spec Feature 9): the model narrated future work
             # ("Next, I'll…") and then went quiet. Ending the turn here means
@@ -2021,12 +2223,16 @@ async def run_agent(
             if collected_content:
                 await _save_turn_msg("assistant", collected_content, latency_ms=_round_latency_ms)
             logger.info(
-                "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=0 content_chars=%d (final)",
+                "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=0 content_chars=%d "
+                "compiled_tokens=%d prompt_tokens=%d cache_read=%d (final)",
                 session_id,
                 tool_round,
                 _stream_current_model,
                 _round_latency_ms,
                 len(collected_content or ""),
+                _last_context_tokens or 0,
+                _round_prompt_tokens,
+                _round_cache_read,
             )
             session.emit_event(
                 {
@@ -2073,7 +2279,10 @@ async def run_agent(
             # model to stop calling tools and summarize. Keep the allowance
             # exhaustion typed so reflect's ceiling-loop guard and the worker
             # INCOMPLETE header both see the wall this turn hit.
-            session.termination_reason = "round_ceiling" if _forced_synthesis else "complete"
+            if _loop_break_round:
+                session.termination_reason = "stuck_loop"
+            else:
+                session.termination_reason = "round_ceiling" if _forced_synthesis else "complete"
             return
 
         # --- Tool execution ---
@@ -2146,13 +2355,17 @@ async def run_agent(
         # Now that the parent row exists, answer the calls it will never run.
         await gate.flush_rejections()
         logger.info(
-            "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=%d content_chars=%d",
+            "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=%d content_chars=%d "
+            "compiled_tokens=%d prompt_tokens=%d cache_read=%d",
             session_id,
             tool_round,
             _stream_current_model,
             _round_latency_ms,
             len(validated_tool_calls),
             len(collected_content or ""),
+            _last_context_tokens or 0,
+            _round_prompt_tokens,
+            _round_cache_read,
         )
 
         # Execute the surviving calls, then persist, emit and account for
@@ -2243,6 +2456,8 @@ async def run_agent(
             sched_created_at=_sched_created_at,
             sched_priority=_sched_priority,
             tried_fallback=_tried_fallback,
+            requested_model=_routing_requested_model if _tried_fallback else effective_model,
+            failure_reason=_routing_failure_reason,
             last_usage=_last_usage,
         )
         return
@@ -2561,6 +2776,18 @@ def _resolve_tool_surface(
     allowed_tools (when set) intersects the result, and reflect's retry
     exclusions are subtracted last so they beat all four.
     """
+    if settings.scout_first_turn_only:
+        report = session.last_scout_report
+        tools = frozen_surface(
+            registry,
+            allowlist=getattr(session, "tool_allowlist", None),
+            excluded=session.turn.retry_excluded_tools,
+        )
+        if report and report.extra_tools:
+            # A tool already on this session's list (a job's allow-list can
+            # hold non-native tools) is not "outside" it.
+            report = dc_replace(report, extra_tools=[t for t in report.extra_tools if t not in tools])
+        return (report.to_system_prompt_section() if report else ""), tools
     # The prior-turn lookup is a transcript read; run_agent prefetches it
     # off-loop and hands it in so turn start does not block the event loop.
     if prior_tool_names is None:
@@ -2824,7 +3051,7 @@ async def _record_round_results(
         # result so the model sees the rewrite on its next turn. (A separate
         # role=system note would be stripped by normalize_for_openrouter;
         # tool-role messages are preserved.)
-        stored_content = result.content
+        stored_content = local_time_note(result.content) if not result.was_error else result.content
         gate_notes = notes_by_id.get(tc.get("id", ""))
         if gate_notes:
             stored_content = "\n".join(gate_notes) + "\n" + stored_content
@@ -2903,7 +3130,8 @@ async def _record_round_results(
         record_tool_outcome(session.turn, result)
 
         # Dynamic tool expansion via discover_tools
-        if result.tool_name == "discover_tools" and not result.was_error:
+        # Off with a fixed tool list: widening it mid-turn would cool the prompt.
+        if result.tool_name == "discover_tools" and not result.was_error and not settings.scout_first_turn_only:
             _expand_tools_from_discovery(result.content, active_tools)
 
 
@@ -3000,6 +3228,29 @@ async def _handle_stuck_signals(
     # a notice from an earlier turn was still being obeyed rounds later). The
     # rows stay in the DB for the transcript UI.
     _ephemeral = json.dumps({"ephemeral_turn": int(turn_user_msg_id)}) if turn_user_msg_id is not None else None
+
+    # Sessions with a user get an answer instead of another try. Workers and
+    # jobs keep their tools below, because they may still owe a file.
+    if (
+        stuck is not None
+        and not stuck.loop_break_used
+        and stuck.identical_calls >= LOOP_BREAK_AT
+        and "ask_user" in (active_tools or [])
+    ):
+        stuck.loop_break_used = True
+        stuck.force_text = True
+        names = ", ".join(sorted({tc.get("name", "") for tc in (tool_calls or [])})) or "n/a"
+        logger.warning("Session %s: loop break after %d identical calls (%s)", session_id, stuck.identical_calls, names)
+        await asyncio.to_thread(
+            db.add_message,
+            session_id,
+            "system",
+            f"Tools are off for this reply: {names} was called {stuck.identical_calls} times with the same "
+            "arguments and nothing changed. Answer the user now from what you already have. Say what is "
+            "done, what is not, and what you would try next.",
+            metadata=_ephemeral,
+        )
+        return "nudge-and-retry", nudges_used
 
     if repeats < 3:
         # Not stuck this round — reset the consecutive-nudge counter so a
@@ -3281,6 +3532,8 @@ async def _stream_final_answer(
     sched_priority,
     tried_fallback: bool,
     last_usage,
+    requested_model: str | None = None,
+    failure_reason: str | None = None,
 ):
     """One tools=None call to turn a finished tool loop into a text answer.
 
@@ -3330,6 +3583,8 @@ async def _stream_final_answer(
         sched_created_at=sched_created_at,
         sched_priority=sched_priority,
         tried_fallback=started_on_fallback,
+        requested_model=requested_model,
+        failure_reason=failure_reason,
         label="Final response stream",
     )
     usage = final.usage or last_usage
@@ -3414,7 +3669,7 @@ def _build_hallucinated_tool_hint(bad_name: str, registry) -> str:
 
     if not ordered:
         return (
-            "No close match found in the active tool set. Call discover_tools "
+            "No close match found in the active tool set. Call lookup "
             "with a keyword (e.g. the noun from your intent) to find the right tool."
         )
 

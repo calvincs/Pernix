@@ -60,6 +60,12 @@ const DEFAULT_COLLAPSED = {
 // looked at in a month.
 const SPACE_ROW_CAP = 15;
 
+// The same fold for the time groups. These repaint on every poll where any
+// session changed, collapsed or not, and a test run once put 490 rows in Today:
+// the tab spent its time rebuilding a list nobody could read and stopped
+// answering. Fifty is more than a real day holds.
+const TIME_GROUP_ROW_CAP = 50;
+
 // app.js asks for /api/sessions?limit=500. A full page means the tail was
 // silently cut off — and the sessions that fall off are exactly the old ones
 // a user goes looking for, so the list has to admit it is not everything.
@@ -781,8 +787,33 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
         header.addEventListener('click', toggleGroup);
         _activateOnKey(header, toggleGroup);
 
-        for (const s of group) {
-            _renderSessionWithWorkers(s, body, activeSid, childrenByParent, sidebarState);
+        const showAll = !!sidebarState.timeShowAll?.[label];
+        group.forEach((s, i) => {
+            // The open session keeps its row wherever it sorts.
+            const holdsActive = s.id === activeSid
+                || (childrenByParent[s.id] || []).some(w => w.id === activeSid);
+            if (showAll || i < TIME_GROUP_ROW_CAP || holdsActive) {
+                _renderSessionWithWorkers(s, body, activeSid, childrenByParent, sidebarState);
+            }
+        });
+        if (group.length > TIME_GROUP_ROW_CAP) {
+            body.appendChild(el('button', {
+                class: 'space-show-all',
+                type: 'button',
+                'data-group': `time:${label}:show-all`,
+                'aria-expanded': String(showAll),
+                title: showAll
+                    ? `Fold ${label} back to its first ${TIME_GROUP_ROW_CAP}`
+                    : `Show all ${group.length} sessions in ${label}`,
+                onClick: (e) => {
+                    e.stopPropagation();
+                    _saveTimeShowAll(label, !showAll);
+                    announce(showAll
+                        ? `${label} folded back to its first ${TIME_GROUP_ROW_CAP} sessions`
+                        : `${label} showing all ${group.length} sessions`);
+                    _repaint();
+                },
+            }, [text(showAll ? 'Show fewer' : `Show all ${group.length}`)]));
         }
 
         list.appendChild(header);
@@ -2398,6 +2429,14 @@ function _saveSpaceShowAll(spaceId, on) {
     const state = _loadState();
     if (!state.spaceShowAll) state.spaceShowAll = {};
     state.spaceShowAll[spaceId] = !!on;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+/** "Show all N" for one time group. */
+function _saveTimeShowAll(label, on) {
+    const state = _loadState();
+    if (!state.timeShowAll) state.timeShowAll = {};
+    state.timeShowAll[label] = !!on;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 

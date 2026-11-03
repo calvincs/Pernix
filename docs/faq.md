@@ -48,7 +48,7 @@ Two ways:
 
 ### Why does Pernix run "scout" before the agent? Doesn't that just slow things down?
 
-Scout is the planning phase, run on a smaller, faster model in a fresh context window. It picks which tools and skills the main agent should be aware of and pre-fetches relevant memory. The cost is small (one fast LLM call); the savings are large (the main model doesn't have to sift through every tool definition and every memory entry every turn).
+Scout is the planning phase, run on a smaller, faster model in a fresh context window. It finds the relevant memory and the right skill, notes any tool outside the agent's everyday list, and drafts an approach. By default it runs once per session, on the first real message; later turns get a fast memory search with no model call. Set `scout_first_turn_only = false` to plan every turn.
 
 If you really want to skip it, set `scout_enabled = false` in Settings — but expect higher token usage and worse tool selection.
 

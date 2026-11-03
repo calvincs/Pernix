@@ -9,8 +9,10 @@ Lifecycle: Scout → Agent → Post-hooks → Reflect → (retry if needed)
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -749,6 +751,44 @@ def _commands_run_section(attempt_msgs: list[dict]) -> str:
     )
 
 
+WORKSPACE_SCAN_BUDGET = 20_000
+
+
+def _newest_workspace_files(root, limit: int = 20, budget: int = WORKSPACE_SCAN_BUDGET) -> list[str]:
+    """The `limit` newest non-hidden files, relative to `root`.
+
+    Reads the most recently changed folders first and stops after `budget`
+    entries. A full walk of a 285k-file workspace took the GIL for the length
+    of every grade and starved the API and all other sessions.
+    """
+    dirs: list[tuple[float, int, str]] = [(0.0, 0, str(root))]
+    order = 0
+    seen = 0
+    found: list[tuple[float, str]] = []
+    while dirs and seen < budget:
+        _, _, path = heapq.heappop(dirs)
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if entry.name.startswith("."):
+                        continue
+                    seen += 1
+                    if seen > budget:
+                        break
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            order += 1
+                            heapq.heappush(dirs, (-entry.stat(follow_symlinks=False).st_mtime, order, entry.path))
+                        elif entry.is_file():
+                            found.append((entry.stat().st_mtime, entry.path))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    found.sort(reverse=True)
+    return [os.path.relpath(p, root) for _, p in found[:limit]]
+
+
 def _build_compact_evidence(
     session_id: str,
     user_request: str,
@@ -811,15 +851,7 @@ def _build_compact_evidence(
     # workspace's ~20 files while it correctly organized its temp mount).
     ws_root, ws_overridden = _effective_workspace(session_id)
     workspace = Path(ws_root)
-    ws_files = []
-    if workspace.exists():
-        candidates = [
-            f
-            for f in workspace.rglob("*")
-            if f.is_file() and not any(p.startswith(".") for p in f.relative_to(workspace).parts)
-        ]
-        candidates.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-        ws_files = [str(f.relative_to(workspace)) for f in candidates[:20]]
+    ws_files = _newest_workspace_files(workspace) if workspace.exists() else []
 
     ws_label = (
         "WORKSPACE FILES (session-scoped sandbox — the shared workspace is out of scope for this session):"
@@ -1749,6 +1781,15 @@ def _write_post_mortem(
         # model_override is an in-memory AgentSession field, never a DB
         # column — reading it from the sessions row mislabeled every
         # override-running session as settings.llm_model.
+        if "agent_model" not in payload and turn_user_msg_id:
+            # The turn's own rows first: the live override is the model NOW,
+            # which a deferred grade reads minutes after a user switch.
+            try:
+                _turn_model = db.turn_agent_model(session_id, int(turn_user_msg_id))
+                if _turn_model:
+                    payload["agent_model"] = _turn_model
+            except Exception as _e:
+                logger.debug("turn model lookup failed for %s: %s", session_id, _e)
         if "agent_model" not in payload:
             try:
                 from sessions.manager import get_manager as _get_mgr

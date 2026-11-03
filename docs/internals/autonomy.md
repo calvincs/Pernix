@@ -290,8 +290,7 @@ summary names zero sources, or an explore summary carries zero file:line
 citations). Operators add or override kinds by dropping a JSON file at
 `data/worker_kinds/<name>.json` — re-read on every resolve, so an edit
 applies to the next spawn without a restart; `"model": "background"`
-resolves to the Background role at spawn time. `retry_worker` replacements
-inherit the original's kind.
+resolves to the Background role at spawn time.
 
 `resume_worker(worker_id, note?, auto_resume_parent?)` unifies "bring a
 worker back" under one tool: a paused worker is released (unchanged); a

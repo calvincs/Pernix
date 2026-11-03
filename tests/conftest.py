@@ -22,6 +22,8 @@ def isolate_data(tmp_path, monkeypatch):
     # nested containers) after each test, not just its filesystem paths.
     for field in fields(config.settings):
         monkeypatch.setattr(config.settings, field.name, deepcopy(getattr(config.settings, field.name)))
+    # Tests of run-once scout turn it on themselves. The rest pin per-turn scout.
+    monkeypatch.setattr("config.settings.scout_first_turn_only", False)
     monkeypatch.setattr("config.settings.db_path", str(tmp_path / "sessions.db"))
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path / "workspace"))
     monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))

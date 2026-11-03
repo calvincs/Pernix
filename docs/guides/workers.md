@@ -125,9 +125,8 @@ plus the typed kind's allowlist and the pinned model), validates the model
 still exists (falling back to the default with a visible note if not), clears
 the stale summary stamp so the old `# CANCELLED` header can't shadow the new
 result, re-attaches the worker to its parent, and starts a continuation turn.
-The parent receives a `worker.resumed` event. `retry_worker` remains the right
-call when the prior work is *not* worth keeping — it spawns a fresh
-replacement.
+The parent receives a `worker.resumed` event. When the prior work is *not* worth
+keeping, call `spawn_worker` with the full task and what went wrong.
 
 The REST mirror is `POST /api/sessions/{id}/workers/{worker_id}/resume` with an
 optional `{"note": "..."}` body; it revives terminated workers the same way the

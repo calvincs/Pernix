@@ -25,7 +25,7 @@ import re
 from typing import Any
 
 from config import settings
-from core.llm.types import is_rejected_call
+from core.llm.types import extract_tool_call_fields, is_rejected_call
 from db import models as db
 
 logger = logging.getLogger("pernix.refine")
@@ -166,10 +166,14 @@ def _identify_active_skill(messages: list[dict]) -> str | None:
         if not isinstance(calls, list):
             continue
         for call in calls:
-            fn = (call or {}).get("function") or {}
-            if fn.get("name") != "load_skill":
+            if not isinstance(call, dict):
                 continue
-            args_raw = fn.get("arguments")
+            # Pernix stores calls flat ({"id","name","arguments"}); reading only
+            # the nested OpenAI shape meant this signal never fired on real
+            # sessions (7fdaf04b6918 credited the wrong skill).
+            _, call_name, args_raw = extract_tool_call_fields(call)
+            if call_name != "load_skill":
+                continue
             if isinstance(args_raw, str):
                 try:
                     args = json.loads(args_raw)
@@ -250,11 +254,9 @@ def _build_tool_summary(messages: list[dict]) -> dict[str, dict[str, Any]]:
             if not isinstance(calls, list):
                 continue
             for call in calls:
-                if is_rejected_call(call):
+                if not isinstance(call, dict) or is_rejected_call(call):
                     continue  # refused at admission, so it never ran
-                fn = (call or {}).get("function") or {}
-                tname = fn.get("name")
-                tid = (call or {}).get("id")
+                tid, tname, _ = extract_tool_call_fields(call)
                 if not tname:
                     continue
                 bucket = summary.setdefault(tname, {"calls": 0, "failures": 0})
@@ -272,6 +274,11 @@ def _build_tool_summary(messages: list[dict]) -> dict[str, dict[str, Any]]:
     return summary
 
 
+# The repl's own failure shapes only, so a log or source file that merely
+# mentions an exception does not read as a failed call.
+_EXCEPTION_LINE_RE = re.compile(r'(?m)^(?:FAILED: |\s+File "<cell>")')
+
+
 def _is_failure_content(content: str) -> bool:
     """Does a tool result read as a failure?
 
@@ -281,6 +288,11 @@ def _is_failure_content(content: str) -> bool:
     """
     head = content[:400]
     if content.startswith("Error") or "\nError" in head:
+        return True
+    # The repl reports an exception as "FAILED: AttributeError ..." or as a
+    # bare cell traceback with no "Traceback" header (7fdaf04b6918's failures
+    # read as successes, so the failure arc was empty).
+    if _EXCEPTION_LINE_RE.search(head):
         return True
     if "state=failed" in head or "Traceback (most recent call last)" in head:
         return True
@@ -319,6 +331,173 @@ def _build_failure_arc(messages: list[dict], cap: int = 10) -> tuple[str, int]:
                 intent = f"  intent: {last_narration[:240]}\n" if last_narration else ""
                 excerpts.append(f"- FAILURE {total}:\n{intent}  result: {content[:300]}")
     return ("\n".join(excerpts), total)
+
+
+_SKILL_BODY_CHARS = 12_000
+_CODE_TOOLS = ("repl", "bash", "job_start")
+_WORKED_MAX = 6
+_WORKED_CHARS = 700
+_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+_CALLED_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+# Calls a snippet may make without the session having made them first.
+_COMMON_CALLS = frozenset(
+    {
+        "print",
+        "len",
+        "open",
+        "dict",
+        "list",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "range",
+        "enumerate",
+        "zip",
+        "sorted",
+        "min",
+        "max",
+        "sum",
+        "set",
+        "tuple",
+        "isinstance",
+        "getattr",
+        "hasattr",
+        "round",
+        "abs",
+        "any",
+        "all",
+        "map",
+        "filter",
+        "repr",
+        "dump",
+        "dumps",
+        "load",
+        "loads",
+        "join",
+        "split",
+        "strip",
+        "replace",
+        "format",
+        "write",
+        "read",
+        "append",
+        "get",
+        "items",
+        "keys",
+        "values",
+        "Path",
+    }
+)
+
+
+def _code_args(call: dict) -> str:
+    """The code or command a repl/bash call ran, or ""."""
+    _, name, raw = extract_tool_call_fields(call)
+    if name not in _CODE_TOOLS:
+        return ""
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(args, dict):
+        return ""
+    return str(args.get("code") or args.get("command") or "")
+
+
+def _successful_code(messages: list[dict]) -> list[str]:
+    """Code and commands from repl/bash calls whose result was not a failure.
+
+    A repl traceback can come back without the "Error" prefix ("FAILED:
+    AttributeError ..."), so any exception name in the head counts as failed.
+    """
+    pending: dict[str, str] = {}
+    worked: list[str] = []
+    for m in messages:
+        role = m.get("role")
+        if role == "assistant" and m.get("tool_calls"):
+            try:
+                calls = json.loads(m["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for call in calls if isinstance(calls, list) else []:
+                if not isinstance(call, dict) or is_rejected_call(call):
+                    continue
+                code = _code_args(call)
+                tid = extract_tool_call_fields(call)[0]
+                if code and tid:
+                    pending[tid] = code
+        elif role == "tool":
+            code = pending.pop(m.get("tool_call_id") or "", "")
+            if not code:
+                continue
+            content = m.get("content") or ""
+            if _is_failure_content(content):
+                continue
+            worked.append(code)
+    return worked
+
+
+def _calls_that_worked(messages: list[dict]) -> str:
+    worked = _successful_code(messages)[-_WORKED_MAX:]
+    return "\n".join(f"- {code.strip()[:_WORKED_CHARS]}" for code in worked)
+
+
+# Words that sit before "(" without being calls.
+_NOT_CALLS = frozenset(
+    {
+        "if",
+        "elif",
+        "while",
+        "for",
+        "in",
+        "not",
+        "and",
+        "or",
+        "return",
+        "yield",
+        "assert",
+        "with",
+        "lambda",
+        "except",
+        "del",
+        "is",
+        "print",
+        "await",
+        "async",
+        "else",
+        "raise",
+    }
+)
+_DEFINED_RE = re.compile(r"\b(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _calls_in(code: str) -> set[str]:
+    """Names `code` calls, leaving out keywords and what it defines itself."""
+    defined = set(_DEFINED_RE.findall(code))
+    return {n for n in _CALLED_RE.findall(code) if n not in _NOT_CALLS and n not in defined}
+
+
+def _ungrounded_calls(change: str, worked: list[str]) -> list[str]:
+    """Calls in the change's code blocks that no successful call in the session made.
+
+    One positive rule instead of parsing error messages: proposal d2334b6eda8d
+    recommended list_transcripts(), which this session had only ever called
+    in a call that failed.
+    """
+    made: set[str] = set()
+    for code in worked:
+        made.update(_CALLED_RE.findall(code))
+    missing: list[str] = []
+    for block in _FENCE_RE.findall(change or ""):
+        for name in sorted(_calls_in(block)):
+            if name not in made and name not in _COMMON_CALLS and name not in missing:
+                missing.append(name)
+    return missing
+
+
+def _strip_code_blocks(change: str) -> str:
+    return _FENCE_RE.sub("", change or "").strip()
 
 
 def _latest_reflect_verdict(messages: list[dict]) -> dict | None:
@@ -403,6 +582,13 @@ def _build_user_content(
     else:
         arc_section = ""
 
+    worked = _calls_that_worked(messages)
+    if worked:
+        arc_section += (
+            "\nCALLS THAT WORKED (code and commands that ran without error, newest last). "
+            "Any code in a proposed_change must be copied from here:\n" + worked + "\n"
+        )
+
     tool_lines = [
         f"  - {name}: calls={info.get('calls', 0)}, failures={info.get('failures', 0)}"
         for name, info in tool_summary.items()
@@ -410,7 +596,7 @@ def _build_user_content(
     tool_block = "\n".join(tool_lines) if tool_lines else "  (no tool calls)"
 
     skill_block = (
-        f"\nCurrent SKILL.md content for '{active_skill}':\n{(skill_body or '')[:3000]}\n"
+        f"\nCurrent SKILL.md content for '{active_skill}':\n{(skill_body or '')[:_SKILL_BODY_CHARS]}\n"
         if active_skill
         else "\n(no active skill identified — proposals impossible, lessons only)\n"
     )
@@ -486,6 +672,21 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
         stats["skipped_reason"] = "insufficient_exchange"
         return stats
 
+    # Only new material can change the answer. Refine re-reads the whole
+    # session each time it grows; growth that is just a grade row or a
+    # "thanks" re-ran it for nothing (7fdaf04b6918).
+    try:
+        prior_mark = int(db.get_snooze_state(f"refined:{session_id}") or 0)
+    except (TypeError, ValueError):
+        prior_mark = 0
+    if prior_mark:
+        from core.acks import trivial_delta_reason
+
+        fresh = [m for m in messages if int(m.get("id") or 0) > prior_mark]
+        if fresh and trivial_delta_reason(fresh):
+            stats["skipped_reason"] = "trivial_delta"
+            return stats
+
     reflect_data = _latest_reflect_verdict(messages)  # optional — None is fine
 
     active_skill = _identify_active_skill(messages)
@@ -543,6 +744,7 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
     # dedupe against every non-rejected proposal already on file for the
     # skill — the same session revisited must not mint the same change twice.
     if active_skill:
+        worked_code = _successful_code(messages)
         existing_norms: set[str] = set()
         try:
             for prior in db.list_skill_proposals(skill_name=active_skill, limit=200):
@@ -569,7 +771,22 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
                     active_skill,
                 )
                 continue
-            change_norm = _norm_change(str(p.get("proposed_change", "") or ""))
+            change_text = str(p.get("proposed_change", "") or "")
+            missing = _ungrounded_calls(change_text, worked_code)
+            if missing:
+                # Keep the prose, drop the code nobody saw work, and keep it
+                # below the auto-apply bar so a human looks first.
+                logger.info(
+                    "refine: ungrounded_code in proposal for %s: %s never ran successfully",
+                    active_skill,
+                    ", ".join(missing),
+                )
+                change_text = _strip_code_blocks(change_text)
+                p_conf = min(p_conf, 0.5)
+                stats["proposals_ungrounded"] = stats.get("proposals_ungrounded", 0) + 1
+                if not change_text:
+                    continue
+            change_norm = _norm_change(change_text)
             if not change_norm or change_norm in existing_norms:
                 stats["proposals_deduped"] = stats.get("proposals_deduped", 0) + 1
                 continue
@@ -579,7 +796,7 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
                     skill_name=p_skill,
                     section=str(p.get("section", "") or "").strip(),
                     problem=str(p.get("problem", "") or "").strip(),
-                    proposed_change=str(p.get("proposed_change", "") or "").strip(),
+                    proposed_change=change_text.strip(),
                     confidence=p_conf,
                     source_origin="refine",
                     session_id=session_id,
@@ -628,12 +845,13 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
 
     stats["active_skill"] = active_skill
     logger.info(
-        "refine: session=%s active_skill=%s nothing_actionable=%s proposals=%d deduped=%d lessons=%d",
+        "refine: session=%s active_skill=%s nothing_actionable=%s proposals=%d deduped=%d ungrounded=%d lessons=%d",
         session_id,
         active_skill or "-",
         nothing_actionable,
         stats["proposals_saved"],
         stats.get("proposals_deduped", 0),
+        stats.get("proposals_ungrounded", 0),
         stats["lessons_saved"],
     )
     return stats

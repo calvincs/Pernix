@@ -7,13 +7,13 @@ and saves them to persistent memory with dedup.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
 from dataclasses import dataclass
 
 from config import settings
+from core.llm.jsonx import extract_json
 
 logger = logging.getLogger("pernix.memory.distill")
 
@@ -109,6 +109,8 @@ def _is_saved(result: str) -> bool:
 
 # The FILE ROUTING RULES below name canonical memory files — keep in sync
 # with the routing vocabulary in core/memory/routing.py.
+DISTILL_READ_ATTEMPTS = 2
+
 DISTILL_PROMPT = """You are a session memory distiller. Extract the most important findings,
 decisions, and skills from this conversation.
 
@@ -316,6 +318,21 @@ async def distill_session(
     if not fresh:
         logger.debug("Distillation: nothing new past msg %d for session %s", watermark, session_id)
         return
+    from core.acks import trivial_delta_reason
+
+    skip_reason = trivial_delta_reason(fresh)
+    if skip_reason == "only reflect/notice rows":
+        # Leave the watermark: the grade row rides along with the next real
+        # turn, which is when it has something to explain.
+        logger.debug("Distillation: only grade/notice rows past msg %d for %s", watermark, session_id)
+        return
+    if skip_reason:
+        # Nothing to learn, so no LLM call. Move the watermark past it so the
+        # next real turn is not re-sent with this padding.
+        covered_to = max(int(m.get("id") or 0) for m in fresh)
+        await asyncio.to_thread(db.set_distill_watermark, session_id, covered_to)
+        logger.info("Distillation skipped for %s up to msg %d: %s", session_id, covered_to, skip_reason)
+        return
 
     # The header rides every chunk. The opening request is what states the
     # session's standing constraints, and dropping it in favour of the newest
@@ -355,7 +372,7 @@ async def distill_session(
     # Build existing file list for the prompt (rich catalog: name + count + description)
     from core.memory.ingest import _build_file_catalog
 
-    file_list_str = _build_file_catalog(store)
+    file_list_str = await asyncio.to_thread(_build_file_catalog, store)
     prompt = DISTILL_PROMPT.format(existing_files=file_list_str)
 
     # Space routing (v33): a space session's knowledge belongs in the
@@ -398,25 +415,36 @@ async def distill_session(
     covered_to = watermark
 
     for index, chunk in enumerate(chunks):
-        try:
-            response = await client.chat(
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": chunk.text},
-                ],
-                model=model,
-                max_tokens=2000,
-            )
-            text = response.content.strip()
-        except Exception as e:
-            logger.warning("Distillation LLM call failed on chunk %d/%d: %s", index + 1, len(chunks), e)
+        entries: list[dict] = []
+        skipped = False
+        failed = False
+        # Qwen sometimes returns nothing or a sentence for no reason (2 of 40 on
+        # one fixed prompt), so one more call usually gets a readable answer.
+        for _attempt in range(DISTILL_READ_ATTEMPTS):
+            try:
+                response = await client.chat(
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": chunk.text},
+                    ],
+                    model=model,
+                    max_tokens=2000,
+                )
+                text = response.content.strip()
+            except Exception as e:
+                logger.warning("Distillation LLM call failed on chunk %d/%d: %s", index + 1, len(chunks), e)
+                failed = True
+                break
+            skipped = text.upper().rstrip(".") == "SKIP"
+            entries = [] if skipped else _parse_entries(text)
+            if skipped or entries:
+                break
+        if failed:
             break
 
-        if text.upper() == "SKIP":
+        if skipped:
             logger.debug("Distillation: LLM returned SKIP for session %s chunk %d", session_id, index + 1)
-            entries: list[dict] = []
         else:
-            entries = _parse_entries(text)
             if not entries:
                 # Unparseable output is a failed extraction, not an empty
                 # one. Committing coverage here would retire the material on
@@ -510,24 +538,13 @@ def _session_used_web_tools(messages: list[dict]) -> bool:
 
 
 def _parse_entries(text: str) -> list[dict]:
-    """Parse JSON array from LLM response, handling markdown fences."""
-    # Strip markdown code fences
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:])
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict):
-            return [data]
-        if isinstance(data, list):
-            return data
-    except json.JSONDecodeError:
-        logger.debug("Failed to parse distillation JSON: %s", text[:200])
+    """Parse the JSON array in an LLM response, with or without fences or prose."""
+    data = extract_json(text)
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return data
+    logger.debug("Failed to parse distillation JSON: %s", (text or "")[:200])
     return []
 
 

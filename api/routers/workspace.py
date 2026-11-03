@@ -11,6 +11,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from config import settings
+from core.pools import run_background
 
 router = APIRouter(tags=["workspace"])
 
@@ -64,7 +65,9 @@ async def list_workspace(
 
     # ── Search mode ──────────────────────────────────────────────────
     if q:
-        return _search_workspace(workspace, q.strip(), path)
+        # A full tree walk: 2.3 s over the box's 285k files, which froze every
+        # session's stream when it ran on the event loop.
+        return await run_background(_search_workspace, workspace, q.strip(), path)
 
     # ── Directory listing mode ───────────────────────────────────────
     target = (workspace / path).resolve() if path else workspace
@@ -253,6 +256,12 @@ async def delete_workspace_entry(path: str):
         raise HTTPException(403, detail="Path traversal blocked")
     if target == workspace:
         raise HTTPException(400, detail="Cannot delete workspace root")
+    # A folder here can hold 100k+ files, so the scan and rmtree stay off the loop.
+    await run_background(_delete_entry, workspace, target)
+    return {"deleted": True, "path": path}
+
+
+def _delete_entry(workspace: Path, target: Path) -> None:
     if not target.exists():
         raise HTTPException(404, detail="Not found")
     if target.is_file():
@@ -282,7 +291,6 @@ async def delete_workspace_entry(path: str):
         shutil.rmtree(target)
     else:
         raise HTTPException(400, detail="Not a file or directory")
-    return {"deleted": True, "path": path}
 
 
 _SENSITIVE_FILES = {"settings.json", ".env", "secrets.json", "credentials.json"}
@@ -327,7 +335,7 @@ async def upload_file(file: UploadFile = File(...), path: str = Form("")):
     if len(content) > MAX_UPLOAD_SIZE:
         raise HTTPException(400, detail=f"File too large ({len(content)} bytes, max {MAX_UPLOAD_SIZE})")
 
-    # Save to workspace
+    # Save to workspace. Up to 250 MB of disk writes, so this stays off the loop.
     workspace = Path(settings.workspace_dir)
     workspace.mkdir(parents=True, exist_ok=True)
     workspace = workspace.resolve()
@@ -338,19 +346,24 @@ async def upload_file(file: UploadFile = File(...), path: str = Form("")):
         if not candidate.is_relative_to(workspace):
             raise HTTPException(403, detail="Path traversal blocked")
         dest_dir = candidate
-        dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / filename
 
-    # Handle collision
-    if dest.exists():
-        stem = dest.stem
-        for i in range(1, 101):
-            dest = dest_dir / f"{stem}_{i}{ext}"
-            if not dest.exists():
-                break
-        else:
-            raise HTTPException(409, detail="Too many filename collisions")
-
-    dest.write_bytes(content)
+    dest = await run_background(_write_upload, dest_dir, filename, content)
     rel = dest.relative_to(workspace).as_posix()
     return {"filename": dest.name, "path": rel, "size": len(content)}
+
+
+def _write_upload(dest_dir: Path, filename: str, content: bytes) -> Path:
+    """Write to the first free name. Off the loop, two uploads can overlap, so
+    exclusive create picks the name: an exists() check could lose that race."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    plain = Path(filename)
+    candidates = [plain.name, *(f"{plain.stem}_{i}{plain.suffix}" for i in range(1, 101))]
+    for name in candidates:
+        dest = dest_dir / name
+        try:
+            with open(dest, "xb") as f:
+                f.write(content)
+            return dest
+        except FileExistsError:
+            continue
+    raise HTTPException(409, detail="Too many filename collisions")

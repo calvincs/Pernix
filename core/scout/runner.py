@@ -129,6 +129,23 @@ When [MODEL ROUTING INTEL] is present (observed verdict rates by model and task 
 
 """
 
+# Characters kept from each end of a message when it is used as a search query.
+SEARCH_TEXT_EDGE = 1000
+
+
+def _search_text(message) -> str:
+    """The part of a message worth searching on.
+
+    A large paste used as a query takes minutes to embed and match, and a
+    timeout cannot stop that work in its thread, so every retry piled on top of
+    the last. The request usually sits at the start or the end of a paste.
+    """
+    text = message if isinstance(message, str) else str(message)
+    if len(text) <= 2 * SEARCH_TEXT_EDGE:
+        return text
+    return f"{text[:SEARCH_TEXT_EDGE]}\n{text[-SEARCH_TEXT_EDGE:]}"
+
+
 _SCOUT_PROMPT_MULTI_ROUND = """You also have tools to search deeper if the baseline is insufficient:
 - search_memory: Run additional memory queries with different keywords or modes. If a preloaded snippet is truncated and looks relevant, call search_memory with keywords from that entry and file=<file_name> to retrieve the complete content from that file.
 - search_sessions: Search other sessions with different queries
@@ -193,7 +210,24 @@ def _scout_base_prompt(max_rounds: int) -> str:
         middle = _SCOUT_PROMPT_ONE_ROUND
     else:
         middle = _SCOUT_PROMPT_MULTI_ROUND.format(rounds=max_rounds, submit_by=max_rounds - 1)
-    return _SCOUT_PROMPT_HEAD + middle + _SCOUT_PROMPT_TAIL
+    tail = _SCOUT_PROMPT_TAIL
+    if settings.scout_first_turn_only:
+        tail = tail.replace(_TOOLS_GUIDANCE_PICK, _TOOLS_GUIDANCE_EXTRA)
+    return _SCOUT_PROMPT_HEAD + middle + tail
+
+
+_TOOLS_GUIDANCE_PICK = (
+    "- recommended_tools: Array of tool names the main agent will need (5-15 tools). "
+    "Only include extension tools — builtin tools are always available.\n"
+)
+# Run-once mode: the agent's tool list is fixed. What helps is naming the few
+# tools OUTSIDE it, which the agent can only reach through use_tool.
+_TOOLS_GUIDANCE_EXTRA = (
+    "- recommended_tools: Array of 0-5 tool names this task needs that are NOT in the agent's "
+    "fixed tool list (bash, file_read/file_write/file_edit, grep, glob, repl, search_web, "
+    "browse_web, http_get, load_skill, lookup, spawn_worker and the other everyday tools are "
+    "always there). The agent calls these through use_tool. Empty array when the fixed list covers the task.\n"
+)
 
 
 # The prompt at the default (one round). Kept as a module constant for the
@@ -413,7 +447,7 @@ _SCOUT_TOOLS = [
                     "recommended_tools": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Extension tool names the agent will need (5-15)",
+                        "description": "Tool names the agent will need (see REPORT FIELD GUIDANCE)",
                     },
                     "tool_rationale": {"type": "string", "description": "One sentence explaining tool selection"},
                     "recommended_skills": {
@@ -1152,11 +1186,15 @@ _CONVERSATIONAL_RE = re.compile(
 )
 
 
-def should_bypass_scout(message: str, turn_count: int) -> bool:
+def should_bypass_scout(message: str, turn_count: int, scouted_before: bool = False) -> bool:
     """Determine if scout should be skipped for trivial interactions."""
     if not settings.scout_enabled:
         return True
     words = len(message.split())
+    # One LLM scout per session, spent on the first message worth planning: a
+    # "hi" must not use it up before the real task arrives.
+    if settings.scout_first_turn_only and (scouted_before or words <= 3):
+        return True
     # Short follow-ups in active sessions
     if words <= 3 and turn_count > 1:
         return True
@@ -1255,9 +1293,13 @@ async def run_scout(
     brief = session_brief or build_session_brief(session_id)
 
     # Check bypass
-    if should_bypass_scout(message, brief.turn_count):
+    run_once = settings.scout_first_turn_only
+    scouted_before = run_once and await asyncio.to_thread(db.session_has_llm_scout, session_id)
+    if should_bypass_scout(message, brief.turn_count, scouted_before):
         logger.debug("Scout bypassed, using fallback for session %s", session_id)
-        return _build_fallback_report(message, brief, reason="bypass")
+        return await asyncio.to_thread(
+            _build_fallback_report, message, brief, reason="no_llm" if run_once else "bypass", session_id=session_id
+        )
 
     # A retry/escalate grade on the turn just finished is planning input for
     # this one. Kept out of `message` itself so memory/tool discovery still
@@ -1343,10 +1385,12 @@ async def run_scout(
             if attempt > 1:
                 logger.info("Scout succeeded on attempt %d for session %s", attempt, session_id)
             logger.info(
-                "Scout completed for session %s in %dms (tools: %s)",
+                "Scout completed for session %s in %dms (task_type=%s skills=%s extra_tools=%s)",
                 session_id,
                 report.scout_latency_ms,
-                ", ".join(report.recommended_tools[:5]),
+                report.task_type or "-",
+                ", ".join(report.recommended_skills[:3]) or "-",
+                ", ".join(report.extra_tools) or "-",
             )
             return report
 
@@ -1426,7 +1470,9 @@ async def run_scout(
     )
     # Reuse the fallback we already built (it carries scout_model/latency and
     # any partial context) rather than rebuilding an identical one.
-    return degraded_report if degraded_report is not None else _build_fallback_report(message, brief)
+    if degraded_report is not None:
+        return degraded_report
+    return await asyncio.to_thread(_build_fallback_report, message, brief)
 
 
 async def _run_scout_llm(
@@ -1526,6 +1572,7 @@ async def _run_scout_llm(
     # non-memory preload (tools, skills, models, workspace
     # state) is the treatment being measured and stays.
     _no_recall = memory_recall_denied(brief)
+    search_text = _search_text(message)
 
     def _gather_memory_baseline() -> str | None:
         if _no_recall:
@@ -1537,7 +1584,7 @@ async def _run_scout_llm(
             store = get_memory_store()
             if not store:
                 return None
-            results = store.search(message, limit=10, _track_hits=False, space_slug=_space_slug)
+            results = store.search(search_text, limit=10, _track_hits=False, space_slug=_space_slug)
             if results:
                 _step("memory", f"Found {len(results)} relevant memories")
                 mem_lines = ["", "MEMORY SEARCH RESULTS (use search_memory tool for deeper/different queries):"]
@@ -1567,7 +1614,7 @@ async def _run_scout_llm(
         try:
             from core.scout.search import gather_deep_memory
 
-            deep_mem = gather_deep_memory(message, char_cap=_mem_cap, space_slug=_space_slug)
+            deep_mem = gather_deep_memory(search_text, char_cap=_mem_cap, space_slug=_space_slug)
             if deep_mem:
                 _step("memory", "Deep search found additional results")
                 return f"\nDEEP MEMORY SEARCH:\n{deep_mem}"
@@ -1582,7 +1629,7 @@ async def _run_scout_llm(
         try:
             from core.scout.search import gather_cross_session_data
 
-            cross = gather_cross_session_data(message, brief.session_id)
+            cross = gather_cross_session_data(search_text, brief.session_id)
             if cross:
                 _step("sessions", "Found relevant data in other sessions")
                 return f"\n{cross}"
@@ -1596,7 +1643,7 @@ async def _run_scout_llm(
             from core.tools.registry import get_registry
 
             registry = get_registry()
-            discovered = registry.discover(message, limit=15)
+            discovered = registry.discover(search_text, limit=15)
             if discovered:
                 _step("tools", f"Found {len(discovered)} candidate tools")
                 tool_lines = ["", "AVAILABLE TOOLS (from discovery search):"]
@@ -1613,7 +1660,7 @@ async def _run_scout_llm(
             from core.skills.registry import get_skill_registry
 
             skill_reg = get_skill_registry()
-            discovered_skills = skill_reg.discover(message, limit=5)
+            discovered_skills = skill_reg.discover(search_text, limit=5)
             if discovered_skills:
                 _step("skills", f"Found {len(discovered_skills)} candidate skills")
                 skill_lines = ["", "AVAILABLE SKILLS (domain expertise packages — recommend when task matches):"]
@@ -1637,7 +1684,7 @@ async def _run_scout_llm(
         # Relevant past lessons (entry_type='lesson') — workarounds extracted
         # by the refine pass from prior failed sessions, via hybrid search.
         try:
-            lessons_section = _build_lessons_section(message, space_slug=_space_slug)
+            lessons_section = _build_lessons_section(search_text, space_slug=_space_slug)
             if lessons_section:
                 _step("lessons", "Injecting relevant past lessons")
                 return lessons_section
@@ -1887,10 +1934,10 @@ async def _run_scout_llm(
     # that context, so a degraded scout turn stays workable.
     if report is None:
         logger.warning("Scout did not submit report after %d rounds, using deterministic fallback", max_rounds)
-        report = _build_fallback_report(message, brief)
+        report = await asyncio.to_thread(_build_fallback_report, message, brief)
     elif _is_degenerate_report(report):
         logger.warning("Scout returned an empty report — replacing with deterministic fallback")
-        report = _build_fallback_report(message, brief)
+        report = await asyncio.to_thread(_build_fallback_report, message, brief)
 
     # Best-effort validation for reports that skipped the in-loop path
     # (last-round native tool-call, text fallback, or fabricated empty report).
@@ -2012,6 +2059,9 @@ def _try_parse_json(text: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+_EXTRA_TOOLS_MAX = 5
+
+
 def _validate_report(report: ScoutReport) -> ScoutReport:
     """Validate and sanitize scout report.
 
@@ -2032,6 +2082,14 @@ def _validate_report(report: ScoutReport) -> ScoutReport:
     disabled_tools = set(existing_tools) - set(valid_tools)
     if disabled_tools:
         logger.warning("Scout recommended disabled tools (stripped): %s", disabled_tools)
+
+    # Run-once mode: the tool list is fixed, so the picks that matter are the
+    # ones outside it. The briefing names them; the agent reaches them through
+    # use_tool. Without this the whole field was unread telemetry.
+    if settings.scout_first_turn_only:
+        from core.tools.native import NATIVE_TOOLS
+
+        report.extra_tools = sorted({t for t in valid_tools if t not in NATIVE_TOOLS})[:_EXTRA_TOOLS_MAX]
 
     # Ensure core minimum always present
     tool_set = set(valid_tools) | CORE_MINIMUM
@@ -2068,7 +2126,15 @@ def _validate_report(report: ScoutReport) -> ScoutReport:
             else:
                 report.injected_skill_name = top_skill
                 instructions = skill_reg.load_instructions(top_skill)
-                if instructions:
+                if instructions and settings.scout_first_turn_only:
+                    # Run-once mode names the skill and lets the agent load it.
+                    # An injected body lives only in this turn's briefing and is
+                    # gone on the next turn; a load_skill result is a history row
+                    # every later turn keeps, inside the cached prefix. A body cut
+                    # at the cap also made the agent load it anyway (7fdaf04b6918).
+                    report.injected_skill = ""
+                    logger.info("Scout recommends skill '%s' (load_skill pointer)", top_skill)
+                elif instructions:
                     if len(instructions) > SKILL_INJECT_MAX_CHARS:
                         # The cut is silent to the agent otherwise: it reads a
                         # procedure that stops mid-step and follows it as if
@@ -2121,12 +2187,20 @@ def _validate_report(report: ScoutReport) -> ScoutReport:
 # ---------------------------------------------------------------------------
 
 
-def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "degraded") -> ScoutReport:
+# Bounds for the no-LLM report: it rides on every later turn of a session.
+_NO_LLM_QUERY_CHARS = 600
+_NO_LLM_MEMORY_CHARS = 1800
+
+
+def _build_fallback_report(
+    message: str, brief: SessionBrief, *, reason: str = "degraded", session_id: str = ""
+) -> ScoutReport:
     """Deterministic fallback when scout LLM fails or is bypassed.
 
-    reason: "bypass" when scout was skipped on purpose (cheap turn), "degraded"
-    when it ran and produced nothing usable. Only "degraded" warns the agent
-    that its tool list is an uncurated default.
+    reason: "bypass" when scout was skipped on purpose (cheap turn), "no_llm"
+    for a turn that is planned without the scout LLM by design, "degraded" when
+    it ran and produced nothing usable. Only "degraded" warns the agent that
+    its tool list is an uncurated default.
 
     Skills are intentionally excluded — skill discovery requires NLP matching
     which is too expensive for a synchronous fallback. The agent can still
@@ -2146,9 +2220,12 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
 
             store = get_memory_store()
             if store:
-                memory_context = store.recall(message, top=3) or ""
+                query = message[:_NO_LLM_QUERY_CHARS] if reason == "no_llm" else message
+                memory_context = store.recall(query, top=3) or ""
         except Exception:
             pass
+    if reason == "no_llm":
+        memory_context = memory_context[:_NO_LLM_MEMORY_CHARS]
 
     # Default tools: core + recently used
     from core.tools.registry import get_registry
@@ -2178,12 +2255,16 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
             tool_names.add(name)
 
     approach = (
-        "Scout unavailable — proceed conservatively. Use discover_tools / "
-        "discover_skills before assuming tool surface. Verify file paths "
-        "with glob/grep before file_write. Aim to write any deliverable early."
+        "Scout unavailable — proceed conservatively. Use lookup before assuming "
+        "tool surface. Verify file paths with glob/grep before file_write. Aim "
+        "to write any deliverable early."
     )
+    if reason == "no_llm":
+        # Only the LLM scout read the prior grade. A turn without it must not
+        # lose the grader's strategy (session 3dc5a307d751).
+        approach = _prior_turn_verdict_block(session_id)
 
-    return ScoutReport(
+    report = ScoutReport(
         memory_context=memory_context,
         recommended_tools=sorted(tool_names),
         tool_rationale="Fallback: core tools + recently used (scout unavailable)",
@@ -2192,6 +2273,12 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
         from_fallback=True,
         fallback_reason=reason,
     )
+    if reason == "no_llm":
+        # By design, not an outage: the session's one LLM scout already ran.
+        # "pending" read as "never validated" in post-mortems and metrics.
+        report.tool_rationale = "Planned without the scout LLM (run-once mode)"
+        report.viability = "inherited"
+    return report
 
 
 # Checkpoint-file surfacing (module level so the glob contract is testable).

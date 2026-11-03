@@ -198,3 +198,25 @@ def test_call_model_transient_failure_without_fallback_is_classified(monkeypatch
 
     assert out.startswith("Error:")
     assert "[transient]" in out
+
+
+def test_agent_selections_audited_without_persisting_temporary_choice():
+    from db.database import connect_sessions
+    from sessions.manager import SessionManager
+
+    session = _make_session()
+    sid = session.session_id
+    switch_model("some/persistent", scope="session", _context={"session_id": sid})
+    switch_model("some/temporary", scope="turn", _context={"session_id": sid})
+    assert SessionManager().get_or_create(sid).model_override == "some/persistent"
+    get_manager()._restore_agent_model(session)
+    assert session.model_override == "some/persistent"
+    with connect_sessions() as conn:
+        events = conn.execute(
+            "SELECT source, selected_model FROM model_selection_events WHERE session_id=? ORDER BY id", (sid,)
+        ).fetchall()
+    assert [tuple(e) for e in events] == [
+        ("agent_session", "some/persistent"),
+        ("agent_turn", "some/temporary"),
+        ("turn_restore", "some/persistent"),
+    ]

@@ -19,7 +19,7 @@ When you send a message to Pernix, it goes through five distinct phases:
 ```
 
 1. **Session** — your message is queued onto a session (a persistent conversation thread)
-2. **Scout** — a fast planning agent reads the request, picks tools and skills, drafts an approach
+2. **Scout** — a fast planning agent reads the first request, finds memory and the right skill, drafts an approach (once per session by default)
 3. **Agent Loop** — the main model executes the plan, calling tools and streaming responses
 4. **Reflect** — a verification pass checks whether the user's intent was actually fulfilled
 5. **Post-hooks** — auto-titling, memory distillation, worker cleanup happen in the background
@@ -50,24 +50,27 @@ For work you keep coming back to, sessions can belong to a **space** — a named
 
 ### 2. Scout — the planner
 
-Before the main agent runs, a **scout** runs first. Scout runs on the Background role (`background_model` — a smaller, faster model) in a fresh context window. Its job is to plan.
+Before the main agent handles a session's first real message, a **scout** runs. By default it runs once per session (`scout_first_turn_only = true`): later turns get a fast memory search with no model call. Scout runs on the Background role (`background_model` — a smaller, faster model) in a fresh context window. Its job is to plan.
 
 What scout does:
 
 - Reads the user's new message
 - Gets a preloaded baseline: memory search results, relevant tools and skills, cross-session findings, workspace state and available models
-- Decides which tools the main agent should be aware of, which skills to load, and what the high-level approach should be
+- Decides which skill the agent should load, which tools outside the agent's fixed list it may need, and what the high-level approach should be
 - Submits a `ScoutReport` — the structured plan handed off to the main agent
 
 Why this matters:
 
-- The main agent doesn't see every tool definition every turn — only the ones scout decided are relevant. This keeps prompts focused and saves tokens.
+- The main agent gets a fixed list of everyday tools that stays the same for the whole session (`core/tools/native.py`). The model server renders tools at the very start of the prompt, so a list that changed between calls made the whole prompt uncached. Any other tool, skill or memory is one `lookup` away, and `use_tool` runs a tool outside the list.
 - Scout has a fresh context, so its judgment isn't biased by long conversation history.
-- If you have 30 skills installed, scout decides which 1–2 to load full instructions for, rather than always paying that token cost.
+- If you have 30 skills installed, scout names the one to load, rather than the agent paying for all of them. The agent loads it with `load_skill`, so the full text stays in the conversation for later turns.
+- Scout's text goes after the turn's message, not in the system prompt, so a long chat keeps reusing its cached history.
 
 By default scout gets **one round** (`scout_max_rounds = 1`): everything it needs is preloaded and it is offered only `submit_report`, because the turn waits on it — on the reference box a one-round scout ran at a p50 of about 9 s, against about 30 s when it was allowed six rounds of searching. Raise `scout_max_rounds` (up to 6) and scout becomes a multi-round LLM agent again: it can call its own read-only tools (`search_memory`, `search_skills`, `read_skill_instructions`, `search_post_mortems`, …) and a self-check can send its report back for revision before it submits. Either way, if scout produces nothing usable the turn runs on a deterministic fallback report, and the `scout.done` event records why (`fallback_reason`: `bypass` or `degraded`). It's defined in `core/scout/runner.py`.
 
 The tool list scout curates isn't limited to Pernix's own extensions: Pernix ships a native **MCP** (Model Context Protocol) client, on by default (`mcp_enabled=true`) but inert with zero servers configured — connect one under Settings → Integrations → MCP Servers and its tools register as ordinary entries (`mcp_<server>_<tool>`) that scout picks from and the safety gate governs exactly like a builtin. See `core/extensions/mcp/` and [mcp.md](mcp.md).
+
+**Scout runs once per session by default** (`scout_first_turn_only = true`). A later turn gets a short memory search with no LLM. The tool list stays fixed for the session, because the served template puts tools ahead of the system text and any change makes the whole prompt cold. Tools outside that list are found with `lookup` and run with `use_tool`. Scout text and the goal block sit after the turn's user message, so the history stays reusable.
 
 ### 3. The Agent Loop — the worker
 

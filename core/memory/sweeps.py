@@ -288,6 +288,7 @@ async def consolidate_files(
     Returns (used_llm, files_consolidated).
     """
     from core.memory.consolidate import (
+        LLM_MERGE_MAX_TOKENS,
         build_budgeted_merge_prompt,
         build_signatures,
         execute_merge,
@@ -400,7 +401,7 @@ async def consolidate_files(
                         {"role": "user", "content": prompt},
                     ],
                     model=settings.background_model or settings.llm_model,
-                    max_tokens=2000,
+                    max_tokens=LLM_MERGE_MAX_TOKENS,
                 )
                 decision = parse_llm_merge_response(response.content.strip(), cluster)
                 used_llm = True
@@ -711,7 +712,7 @@ async def reroute_misplaced_entries(
             )
 
         prompt = REROUTE_PROMPT.format(
-            file_catalog=_build_file_catalog(store),
+            file_catalog=await asyncio.to_thread(_build_file_catalog, store),
             entry_list="\n\n".join(entry_lines),
         )
 
@@ -735,7 +736,8 @@ async def reroute_misplaced_entries(
             # Build lookups from candidate list
             epoch_to_src: dict[int, str] = {item["entry"].epoch: item["src_file"] for item in medium_conf}
             _known = await asyncio.to_thread(store.list_files)
-            known_files: set[str] = {f.name for f in _known}
+            # Archived files list with entry_count 0; they are not live targets.
+            known_files: set[str] = {f.name for f in _known if f.entry_count > 0}
 
             # Count how many entries the LLM wants to send to each proposed new
             # file. A new file is only justified if >=2 entries share it
@@ -1064,7 +1066,9 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
     # files to a space split (or the reverse) invited the LLM to name one,
     # and the move below would have carried the entries across.
     _target_bucket = space_bucket(target.name)
-    existing_files = [f.name for f in _existing if space_bucket(f.name) == _target_bucket]
+    # Archived files are listed too (entry_count 0). Offering them is how a
+    # split moved 21 live entries into two dead files on 2026-11-03.
+    existing_files = [f.name for f in _existing if space_bucket(f.name) == _target_bucket and f.entry_count > 0]
 
     from core.llm.client import get_llm_client
 

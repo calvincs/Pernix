@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from core.memory.consolidate import (
     _MIN_ENTRIES_PER_FILE,
+    LLM_MERGE_MAX_TOKENS,
     _estimate_tokens,
     build_budgeted_merge_prompt,
     build_signatures,
@@ -109,8 +110,8 @@ def test_a_budget_below_the_floor_reports_that_it_does_not_fit(tmp_path):
 def test_the_budget_derives_from_the_window_minus_the_output_reservation(monkeypatch):
     monkeypatch.setattr("config.settings.context_auto", False)
     monkeypatch.setattr("config.settings.context_budget", 196_608)
-    # window*0.9 − the 2000 output tokens the merge call asks for.
-    assert merge_prompt_token_budget("any-model") == int(196_608 * 0.9) - 2_000
+    # window*0.9 − the output tokens the merge call asks for.
+    assert merge_prompt_token_budget("any-model") == int(196_608 * 0.9) - LLM_MERGE_MAX_TOKENS
 
 
 def test_largest_overlap_pair_picks_the_two_most_similar_files(tmp_path):

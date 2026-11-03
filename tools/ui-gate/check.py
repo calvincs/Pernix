@@ -1738,6 +1738,49 @@ def sidebar_scale(browser):
         "m2",
     )
     pg.screenshot(path=f"{shots}/{tag}-desktop-space-expanded.png")
+
+    # A test run once put 490 sessions in Today and the tab stopped answering.
+    def _flood_today(route):
+        resp = route.fetch()
+        data = resp.json()
+        now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+        model = dict(data["items"][0])
+        model.update(space_id=None, pinned=False, parent_session_id=None, updated_at=now)
+        for i in range(490):
+            data["items"].append({**model, "id": f"flood{i:07d}", "title": f"Flood {i}"})
+        route.fulfill(response=resp, json=data)
+
+    today_rows = """() => {
+      const h = document.querySelector('.session-group-header[data-group="Today"]');
+      const b = h && h.nextElementSibling;
+      return b ? {rows: b.querySelectorAll('.session-item').length,
+                  more: b.querySelector('.space-show-all')?.textContent || ''} : null; }"""
+    pg.route("**/api/sessions?limit=*", _flood_today)
+    pg.reload()
+    pg.wait_for_selector('.session-group-header[data-group="Today"]')
+    time.sleep(0.7)
+    flooded = pg.evaluate(today_rows)
+    check(
+        "sidebar-scale",
+        "m2: a day of 490 sessions builds about 50 rows and offers Show all",
+        bool(flooded) and 0 < flooded["rows"] <= 60 and flooded["more"].startswith("Show all"),
+        flooded,
+        "m2",
+    )
+    pg.click('.session-group-header[data-group="Today"] + * > .space-show-all')
+    time.sleep(0.7)
+    opened = pg.evaluate(today_rows)
+    check(
+        "sidebar-scale",
+        "m2: Show all opens the whole day",
+        bool(opened) and opened["rows"] >= 490 and opened["more"] == "Show fewer",
+        opened,
+        "m2",
+    )
+    pg.click('.session-group-header[data-group="Today"] + * > .space-show-all')
+    pg.unroute("**/api/sessions?limit=*", _flood_today)
+    pg.reload()
+    time.sleep(1.5)
     pg.evaluate(CLICK_SHOW_ALL, "Scale")  # back to at-rest for the legend pass
     time.sleep(0.6)
 

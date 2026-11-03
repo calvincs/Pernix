@@ -66,6 +66,7 @@ Generated from `core/notices.py`. *Session types* lists where a category's tier 
 | `canary.sweep_failed` | bell | a canary gate-failed in a deploy, model-swap or Run-all sweep; coalesces, resolved by a sweep where every canary passes |
 | `canary.sweep_result` | log | any other finished full sweep (all passed, or only timeouts/errors) |
 | `skills.rolled_back`, `skills.proposals_auto_applied` | log | |
+| `skills.saturated` | bell | Once per blocked proposal, one open row per skill. The skill is at its size cap, so its proposals cannot auto-apply. |
 | `dream.corrections_applied`, `dream.queue_stalled`, `dream.promotion_stalled` | log | |
 | `spaces.suggested` | log | the suggestion row in the sidebar is the surface |
 | `system.fallback_burn` | interrupt | the fallback model is carrying the load |

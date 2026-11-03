@@ -395,7 +395,8 @@ async def test_pending_queue_list_and_remove():
 async def test_patch_session_model_override_set_and_clear():
     from api.routers import sessions
     from db import models as db
-    from sessions.manager import get_manager
+    from db.database import connect_sessions
+    from sessions.manager import SessionManager, get_manager
 
     app = _make_app(sessions.router)
     sid = db.create_session(title="Override me")
@@ -409,11 +410,23 @@ async def test_patch_session_model_override_set_and_clear():
         # A user-set override must NOT register as an agent switch (which
         # would be reverted at turn end).
         assert session._model_before_agent_switch is None
+        assert db.get_session(sid)["model_override"] == "some/model"
+        assert SessionManager().get_or_create(sid).model_override == "some/model"
 
         resp = await client.patch(f"/api/sessions/{sid}", json={"model_override": ""})
         assert resp.status_code == 200
         assert resp.json()["model_override"] is None
         assert get_manager().get(sid).model_override is None
+        assert SessionManager().get_or_create(sid).model_override is None
+        with connect_sessions() as conn:
+            events = conn.execute(
+                "SELECT * FROM model_selection_events WHERE session_id=? ORDER BY id", (sid,)
+            ).fetchall()
+        assert [(e["previous_model"], e["selected_model"], e["source"]) for e in events] == [
+            (None, "some/model", "user"),
+            ("some/model", None, "user"),
+        ]
+        assert all(e["created_at"] for e in events)
 
 
 # ---------------------------------------------------------------------------

@@ -129,7 +129,7 @@ There is also an optional non-chat role: `embedding_model` — a local Ollama em
 
 ### Why run scout on the Background role?
 
-Scout runs in a fresh context window every turn. Its job is fast and structured: read the user message, search memory, pick tools/skills, draft a plan. A small model is fine — sometimes better, since it tends to follow the structured-output instructions more reliably.
+Scout runs in a fresh context window, once per session by default (`scout_first_turn_only`). Its job is fast and structured: read the user message, search memory, pick the skill, draft a plan. A small model is fine — sometimes better, since it tends to follow the structured-output instructions more reliably.
 
 Running scout on the same heavy model as the main agent is wasteful — you'd pay the slow model's latency for a job a fast model handles in 2 seconds. If scout exhausts its retries on Background it makes one final attempt on Backup before falling through to a deterministic stub report.
 

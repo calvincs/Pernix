@@ -13,6 +13,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from config import settings
 from db import models as db
@@ -33,23 +34,18 @@ _spawn_lock = threading.Lock()
 _WORKER_INACTIVE_STATUSES = frozenset({"idle", "error", "deleted", "unknown"})
 
 
-def _count_active_workers(manager, parent, *, ignore: str = "") -> int:
+_TASK_PREVIEW_CHARS = 1500
+
+
+def _count_active_workers(manager, parent) -> int:
     """Workers of `parent` still occupying a slot.
 
     Single definition shared by both spawn gates below. They used to carry
     separate inline tuples that disagreed about "unknown", so the capacity
     warning and the max_concurrent_workers limit counted different things.
-
-    `ignore` excludes one worker that the caller has just cancelled but that
-    has not finished unwinding: retry_worker cancels the old worker and
-    immediately spawns its replacement, and at the cap the still-CANCELLING
-    original made the retry fail with "Max active workers reached" instead
-    of retrying.
     """
     return sum(
-        1
-        for wid in list(parent.worker_ids)
-        if wid != ignore and manager.get_status(wid).get("status") not in _WORKER_INACTIVE_STATUSES
+        1 for wid in list(parent.worker_ids) if manager.get_status(wid).get("status") not in _WORKER_INACTIVE_STATUSES
     )
 
 
@@ -60,7 +56,6 @@ def spawn_worker(
     kind: str = "",
     auto_resume_parent: bool = False,
     _context: dict | None = None,
-    _replacing: str = "",
 ) -> str:
     """Spawn a worker session for a subtask. Returns worker session ID.
 
@@ -119,7 +114,7 @@ def spawn_worker(
             from core.llm.client import _get_semaphore_stats
 
             stats = _get_semaphore_stats()
-            active_workers = _count_active_workers(manager, parent, ignore=_replacing)
+            active_workers = _count_active_workers(manager, parent)
             if active_workers >= stats["capacity"]:
                 return (
                     f"Warning: {active_workers} worker(s) already active but only "
@@ -160,9 +155,9 @@ def spawn_worker(
     with _spawn_lock:
         parent = manager.get(parent_id)
         if parent:
-            active_count = _count_active_workers(manager, parent, ignore=_replacing)
+            active_count = _count_active_workers(manager, parent)
             if active_count >= settings.max_concurrent_workers:
-                return f"Error: Max active workers ({settings.max_concurrent_workers}) reached. Wait for running workers to complete."
+                return f"Error: Max active workers ({settings.max_concurrent_workers}) reached. Wait for running workers to complete. A worker you just cancelled counts until it has stopped, so try again in a moment."
 
         # Create session inside the lock to atomically reserve the slot.
         # Workers inherit the parent's space (v33): space_id is persisted so
@@ -367,7 +362,12 @@ def spawn_worker(
     )
 
     _kind_note = f" [{worker_kind.name}]" if worker_kind is not None else ""
-    return f'Worker spawned: {worker_id} — "{worker_title}"{_kind_note}'
+    # Steered here because this is the moment a model polls too early. A result
+    # asked for now can only say "not ready".
+    return (
+        f'Worker spawned: {worker_id} — "{worker_title}"{_kind_note}. It has no result yet. '
+        "Spawn any other workers you need, then call await_workers."
+    )
 
 
 def _worker_has_output(wid: str) -> bool:
@@ -573,13 +573,13 @@ class TrustState:
         check ever ran."""
         r = self.term_reason
         if r == "cancelled":
-            return "# CANCELLED (worker stopped before it finished)\n"
+            return "# CANCELLED (stopped by its parent or the user before it finished; not a worker failure)\n"
         if r in self._CAPS:
             return (
                 f"# INCOMPLETE (worker terminated: {r} — a hard cap, not completion)\n"
                 f"# Its final message should state what is unfinished; treat missing "
                 f"deliverables as NOT DONE, and use get_worker_transcript({self.worker_id[:12]!r}) "
-                f"or retry_worker to close the gap.\n"
+                f"or resume_worker to close the gap.\n"
             )
         if r == "error" or (r is None and self.error):
             if self.error:
@@ -709,6 +709,21 @@ def worker_termination_reason(worker_id: str, worker_obj=None) -> tuple[str | No
     return reason, error
 
 
+def _next_step(worker_id: str) -> str:
+    """What to do about a worker with no result, with its task to reuse.
+
+    The parent knows what it wanted, so a fresh worker's brief comes from it:
+    the task is shown here so the parent can extend it, not retype it from
+    memory.
+    """
+    task = next((m.get("content", "") for m in db.get_messages(worker_id) if m["role"] == "user"), "")
+    note = (
+        " To continue its work, call resume_worker. To start fresh, call spawn_worker "
+        "with the full task and what went wrong."
+    )
+    return f"{note}\nOriginal task: {task[:_TASK_PREVIEW_CHARS]}" if task else note
+
+
 def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
     """Get the final output from a completed worker.
 
@@ -806,8 +821,19 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
 
     # No output at all
     if _worker_obj and _worker_obj.error:
-        return f"Worker {worker_id[:8]} FAILED with error: {_worker_obj.error}. Consider retrying with retry_worker()."
-    return f"Worker {worker_id[:8]} produced no output. It may have failed silently or timed out. Consider retrying with retry_worker()."
+        return f"Worker {worker_id[:8]} FAILED with error: {_worker_obj.error}.{_next_step(worker_id)}"
+    # Still working is not the same as no output. Told "may have failed
+    # silently, consider retrying", the model retried live workers, and each
+    # retry cancelled the run it replaced. A queued worker is IDLE_READY too,
+    # so a turn must have started before idle can mean finished.
+    if _worker_obj is not None:
+        _started = getattr(_worker_obj, "_turn_id", 0) > 0 or db.latest_turn_id(worker_id) > 0
+        if _worker_is_mid_turn(_worker_obj) or not _started:
+            return (
+                f"Worker {worker_id[:8]} is still running, so it has no result yet. "
+                "Call await_workers to wait for it."
+            )
+    return f"Worker {worker_id[:8]} finished with no output.{_next_step(worker_id)}"
 
 
 def _archived_result(worker_id: str) -> str:
@@ -831,7 +857,7 @@ def _archived_result(worker_id: str) -> str:
         f"{str(manifest.get('last_active_at') or '')[:10]}"
         + (f", ended by {manifest['termination_reason']}" if manifest.get("termination_reason") else "")
         + f"\n# Result source: {manifest.get('result_source') or 'unknown'}. The full transcript is not "
-        f"recoverable; retry_worker would redo the work, not retrieve it.\n\n"
+        f"recoverable; a new spawn_worker would redo the work, not retrieve it.\n\n"
     )
     body = manifest.get("result") or ""
     if not body.strip():
@@ -1280,9 +1306,9 @@ def await_workers(
             if min_satisfied and not all_done:
                 result = f"[Partial: {done_count}/{len(worker_snapshot)} done]\n" + result
             if fail_ids:
-                result += f"\n⚠ {len(fail_ids)} FAILED: {', '.join(fail_ids)} — use retry_worker() to retry."
+                result += f"\n⚠ {len(fail_ids)} FAILED: {', '.join(fail_ids)} — call get_worker_result on each for its task and next step."
             if empty_ids:
-                result += f"\n⚠ {len(empty_ids)} produced NO OUTPUT: {', '.join(empty_ids)} — check errors or retry."
+                result += f"\n⚠ {len(empty_ids)} produced NO OUTPUT: {', '.join(empty_ids)} — call get_worker_result on each for its task and next step."
             return result
 
         if stalled:
@@ -1497,6 +1523,18 @@ async def _report_steer_outcome(manager, parent_id: str, worker_id: str, message
         logger.warning("Could not record worker-steer note for %s: %s", parent_id[:12], e)
 
 
+def _age_note(worker_id: str) -> str:
+    """How old a worker is, as " at N s old", or "" if unknown."""
+    try:
+        created = (db.get_session(worker_id) or {}).get("created_at", "")
+        started = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return f" at {int((datetime.now(timezone.utc) - started).total_seconds())} s old"
+    except (TypeError, ValueError):
+        return ""
+
+
 def cancel_worker(worker_id: str, _context: dict | None = None) -> str:
     """Cancel a running worker."""
     from sessions.manager import get_manager
@@ -1519,7 +1557,9 @@ def cancel_worker(worker_id: str, _context: dict | None = None) -> str:
     # sweep are loop-affine, so marshal like pause_worker does.
     def _cancel_on_loop() -> str:
         if manager.cancel_session(session):
-            return f"Worker {worker_id[:8]} cancelled"
+            # Says who stopped it, so reflect and distill cannot read this as
+            # a worker that failed on its own.
+            return f"Worker {worker_id[:8]} cancelled by this session{_age_note(worker_id)}"
         return f"Worker {worker_id[:8]} is not running"
 
     from core.events import call_on_loop
@@ -1733,42 +1773,6 @@ def set_worker_state(worker_id: str, paused: bool, _context: dict | None = None)
     if paused:
         return pause_worker(worker_id, _context=_context)
     return resume_worker(worker_id, _context=_context)
-
-
-def retry_worker(
-    worker_id: str,
-    new_instructions: str = "",
-    reason: str = "",
-    _context: dict | None = None,
-) -> str:
-    """Retry a failed worker with fresh context. Spawns a replacement."""
-
-    # Get old worker's output
-    old_output = get_worker_result(worker_id)[:2000]
-    old_session = db.get_session(worker_id)
-    old_title = old_session.get("title", "worker") if old_session else "worker"
-    old_kind = (old_session or {}).get("worker_kind") or ""
-
-    # Cancel old worker
-    cancel_worker(worker_id)
-
-    # Build retry task
-    task = "[Retry of previous worker that failed]\n"
-    if reason:
-        task += f"Reason for retry: {reason}\n"
-    if old_output:
-        task += f"Previous output:\n{old_output}\n"
-    if new_instructions:
-        task += f"\nNew instructions: {new_instructions}\n"
-    else:
-        task += "\nPlease try again with a different approach.\n"
-
-    # The replacement inherits the original's typed kind so its allowlist and
-    # verification gate survive the retry.
-    # _replacing: the worker we just cancelled is still unwinding, so at the
-    # cap it would otherwise count against its own replacement and the retry
-    # would fail with "Max active workers reached".
-    return spawn_worker(task, title=f"Retry: {old_title}", kind=old_kind, _context=_context, _replacing=worker_id)
 
 
 def cross_pollinate(_context: dict | None = None) -> str:
@@ -2012,7 +2016,7 @@ def register(reg) -> None:
             "cancelled, errored, round-capped, reaped or restart-lost worker is REVIVED: "
             "its persisted history, kind and model are rehydrated and a continuation "
             "turn starts from where it left off (optionally carrying your note). "
-            "Cheaper than retry_worker when the prior partial work is worth keeping."
+            "Cheaper than a new spawn_worker when the prior partial work is worth keeping."
         ),
         parameters={
             "type": "object",
@@ -2219,24 +2223,5 @@ def register(reg) -> None:
         tags=orch_tags + ["pause", "resume", "suspend", "continue", "unpause"],
         timeout=15,
         parallel_safe=False,
-        **common,
-    )
-    reg.register(
-        name="retry_worker",
-        func=retry_worker,
-        description="Retry a failed worker with fresh context. Spawns replacement with previous output as context.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "worker_id": {"type": "string"},
-                "new_instructions": {"type": "string", "description": "Updated instructions"},
-                "reason": {"type": "string", "description": "Why retrying"},
-            },
-            "required": ["worker_id"],
-        },
-        tags=orch_tags + ["retry", "redo", "restart"],
-        timeout=60,
-        parallel_safe=False,
-        safety_level="safe",
         **common,
     )

@@ -545,7 +545,7 @@ class ToolRegistry:
         """Synchronous tool execution with context injection and argument recovery."""
         tool = self._tools.get(name)
         if not tool:
-            return f"Error: Unknown tool '{name}'. Use discover_tools to find available tools."
+            return f"Error: Unknown tool '{name}'. Use lookup to find available tools."
         if name in self._disabled:
             return f"Error: Tool '{name}' is currently disabled."
 

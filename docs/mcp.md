@@ -4,7 +4,7 @@ Pernix speaks the Model Context Protocol as a client: point it at any MCP
 server — local (a subprocess over stdio) or remote (Streamable HTTP) — and
 that server's tools become normal Pernix tools named `mcp_<server>_<tool>`.
 They show up in the Explorer's Capabilities → Tools tab, go through the
-dangerous-tool gate, get scout-curated into turns like everything else, and
+dangerous-tool gate, are found with `lookup` and run with `use_tool`, and
 accrue the same health
 metrics and reputation signals.
 
@@ -71,9 +71,12 @@ Three equivalent ways:
 - **Safety**: default `caution`. A server-sent `destructiveHint` escalates
   that tool to `dangerous`; server annotations can never *lower* a level.
   Per-tool overrides in Capabilities → Tools work and survive reconnects.
-- **Surface**: MCP tools are scout-curated — they enter a turn's schema when
-  scout recommends them (or once the session has used them), so a server
-  with 40 tools doesn't bloat every prompt.
+- **Surface**: MCP tools are not in the agent's fixed tool list, so a server
+  with 40 tools doesn't bloat every prompt. The agent finds them with
+  `lookup`, which returns each schema, and calls them with `use_tool`; the
+  scout can also point at one in the first turn's briefing. With
+  `scout_first_turn_only = false`, scout-recommended MCP tools enter the
+  turn's schema directly, as before.
 - **Sessions**: canary sessions never call MCP tools (external side effects
   in synthetic runs).
 - **Results**: text comes back inline; images/audio are saved under

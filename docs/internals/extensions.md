@@ -43,7 +43,7 @@ Always enabled. The worker model lives here.
 | `get_worker_result` / `get_worker_transcript` | safe | Fetch a finished worker's final response / full transcript |
 | `message_worker` | safe | Inject a message into a running worker mid-turn |
 | `set_worker_state` | safe | Pause/unpause a worker at the next round boundary |
-| `cancel_worker` / `retry_worker` | safe | Stop a worker / respawn it with revised instructions |
+| `cancel_worker` | safe | Stop a worker |
 | `await_workers` | safe | Block parent until specified workers settle |
 | `notify_parent` | safe | Worker-side: push a status note up to the parent session |
 

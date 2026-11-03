@@ -103,6 +103,8 @@ class ScoutReport:
     # Tool selection
     recommended_tools: list[str] = field(default_factory=list)
     tool_rationale: str = ""
+    # Run-once mode: scout picks outside the fixed tool list, reached via use_tool.
+    extra_tools: list[str] = field(default_factory=list)
 
     # Skill selection
     recommended_skills: list[str] = field(default_factory=list)
@@ -208,6 +210,12 @@ class ScoutReport:
                 f"The following skill has been loaded for this task. Follow its instructions:\n\n"
                 f"{self.injected_skill}"
             )
+        elif self.injected_skill_name:
+            # Run-once mode: a pointer, not the body (see scout runner).
+            parts.append(
+                f"[SKILL FOR THIS TASK: {self.injected_skill_name}]\n"
+                f'Call load_skill("{self.injected_skill_name}") before you start, then follow it.'
+            )
         remaining_skills = [s for s in self.recommended_skills if s != self.injected_skill_name]
         if remaining_skills:
             skill_list = ", ".join(remaining_skills)
@@ -215,6 +223,12 @@ class ScoutReport:
                 f"[AVAILABLE SKILLS]\n"
                 f"Additional relevant skills: {skill_list}\n"
                 f"Use load_skill(name) to get full instructions if needed."
+            )
+        if self.extra_tools:
+            parts.append(
+                "[TOOLS OUTSIDE YOUR LIST]\n"
+                f"{', '.join(self.extra_tools)} fit this task. Call them through use_tool; "
+                "lookup gives each one's schema."
             )
 
         if self.approach_guidance:
@@ -238,10 +252,10 @@ class ScoutReport:
                 "Scout's plan was submitted without full self-validation. "
                 "Outstanding concerns:\n- "
                 + "\n- ".join(self.viability_notes)
-                + "\nProceed with extra care and call discover_tools if recommendations look off."
+                + "\nProceed with extra care and call lookup if recommendations look off."
             )
 
-        if self.from_fallback and self.fallback_reason != "bypass":
+        if self.from_fallback and self.fallback_reason not in ("bypass", "no_llm"):
             # Render whenever scout degraded, not only when identity/rules are
             # also missing. The deterministic fallback fills those in from
             # SOUL.md/RULES.md, so gating on them hid the notice exactly when
@@ -252,8 +266,8 @@ class ScoutReport:
                 "[SCOUT STATUS]\n"
                 "Scout planning was unavailable for this turn — the tool list "
                 "below is a conservative default, not a curated one. Before "
-                "concluding a capability is missing, call discover_tools "
-                "(and recall) to check what this deployment already provides."
+                "concluding a capability is missing, call lookup to check "
+                "what this deployment already provides."
             )
 
         return "\n\n".join(parts)
