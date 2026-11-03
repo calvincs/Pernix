@@ -102,10 +102,10 @@
 
   <div class="hero-inner">
     <div class="hero-copy">
-      <p class="hero-category reveal">A self-hosted AI workspace · 3.2</p>
-      <p class="release-notice"><strong>3.2 is available.</strong> Released on <code>main</code>.
-        <a href="#release">What changed in 3.2</a> ·
-        <a href="https://github.com/calvincs/Pernix/tree/v3.2.0">Get v3.2.0</a>.</p>
+      <p class="hero-category reveal">A self-hosted AI workspace · 3.3</p>
+      <p class="release-notice"><strong>3.3 is available.</strong> Released on <code>main</code>.
+        <a href="#release">What changed in 3.3</a> ·
+        <a href="https://github.com/calvincs/Pernix/tree/main">Get it from main</a>.</p>
       <h1 class="hero-title reveal">
         <span class="ht-line">Your model.</span>
         <span class="ht-line">Your memory.</span>
@@ -201,7 +201,7 @@
   <h2 class="section-title reveal">See the work. <em>Keep the result.</em></h2>
   <p class="section-sub reveal">Conversations, tool output, project files, and a code editor in one browser workspace. Follow a task from the first request to the saved result.</p>
   <div class="window-mock reveal">
-    <div class="window-chrome"><span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span><span class="window-url">Pernix · 3.2</span>
+    <div class="window-chrome"><span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span><span class="window-url">Pernix · 3.3</span>
       <span class="shot-tabs" role="tablist" aria-label="Screen size">
         <button class="shot-tab active" type="button" role="tab" id="tab-desktop" aria-selected="true" aria-controls="shot-desktop" data-shot="desktop">Desktop</button>
         <button class="shot-tab" type="button" role="tab" id="tab-phone" aria-selected="false" aria-controls="shot-phone" data-shot="phone" tabindex="-1">Phone</button>
@@ -209,7 +209,7 @@
     </div>
     <div class="shot-pane" id="shot-desktop" role="tabpanel" aria-labelledby="tab-desktop"><a href="img/shots/app-32.webp" target="_blank" rel="noopener" aria-label="Open desktop screenshot at full size"><img class="window-shot" src="img/shots/app-32.webp" loading="lazy" decoding="async" width="1360" height="850" alt="Pernix 3.2 showing a project session, expanded test output, a saved-file reference, and the message composer. Synthetic demonstration."></a></div>
     <div class="shot-pane hidden" id="shot-phone" role="tabpanel" aria-labelledby="tab-phone"><img class="phone-shot" src="img/shots/phone-32.webp" loading="lazy" decoding="async" width="390" height="844" alt="The same synthetic CSV review session in the narrow-screen Pernix layout, with the composer below the conversation."></div>
-    <p class="window-caption">Current 3.2 interface · synthetic demo transcript, not a live run. Expand tool output, inspect the result, and continue in the same session. Select the image for a closer look.</p>
+    <p class="window-caption">Current interface · synthetic demo transcript, not a live run. Expand tool output, inspect the result, and continue in the same session. Select the image for a closer look.</p>
     <p class="window-caption phone-caption">The same demo in the narrow-screen layout. Use the PWA on your phone with trusted network access to your server.</p>
   </div>
   <ul class="workspace-highlights reveal"><li><strong>Follow the execution</strong><span>Tool calls and worker reports stay with the conversation.</span></li><li><strong>Open the result</strong><span>Browse files and edit code in the built-in Explorer.</span></li><li><strong>Continue anywhere</strong><span>Desktop browser or phone PWA, connected to your server.</span></li></ul>
@@ -415,10 +415,10 @@
         <p>Your message lands on a stored thread: text and supported attachments. History survives restarts; interrupted work has recovery paths, not a guarantee of seamless completion.</p>
         <span class="phase-model">queue</span>
       </li>
-      <li class="phase reveal" data-phase="2" tabindex="0" data-log="scout.done · 3 tools &nbsp;·&nbsp; 840ms &nbsp;·&nbsp; skill: morning-brief">
+      <li class="phase reveal" data-phase="2" tabindex="0" data-log="scout.done · first turn &nbsp;·&nbsp; 840ms &nbsp;·&nbsp; skill: morning-brief">
         <div class="phase-node"><span>02</span></div>
         <h4>Scout</h4>
-        <p>Scout uses one planning round by default to select an approach, tools and skills from preloaded context. Additional rounds are configurable. It uses Background, or Primary when no separate Background model is set.</p>
+        <p>Scout plans once per session by default, on the first real message: an approach, the skill to load and relevant memory, from preloaded context. Later turns get a quick memory search with no model call, and the tool list stays fixed so a local model reuses its cached prompt. It uses Background, or Primary when no separate Background model is set.</p>
         <span class="phase-model">background role</span>
       </li>
       <li class="phase reveal" data-phase="3" tabindex="0" data-log="tool.call · search_web(&quot;…&quot;) → 8 results &nbsp;·&nbsp; round 2 &nbsp;·&nbsp; streaming">
@@ -682,7 +682,7 @@ and communicate clearly.
 - When a task requires capabilities your current model
   lacks, <span class="hl">discover what is available</span> rather than
   giving up.
-- Use <span class="kw">list_available_models</span> and <span class="kw">discover_tools</span>
+- Use <span class="kw">list_available_models</span> and <span class="kw">lookup</span>
   to find models and tools that can fill the gap.
 
 <span class="dim">## Delegation</span>
@@ -832,11 +832,11 @@ and communicate clearly.
 </section>
 
 <section class="release" id="release">
-  <p class="section-label reveal">Release notes</p><h2 class="section-title reveal">3.2. <em>Built to keep going.</em></h2>
-  <p class="section-sub reveal">Version <code>3.2.0</code> is available on <code>main</code>. The install commands on this page use main; choose <a class="link" href="https://github.com/calvincs/Pernix/tree/v3.2.0">the v3.2.0 tag</a> for this exact release.</p>
-  <ul class="release-benefits"><li class="reveal"><span>01</span><h3>Long work, fewer loose ends.</h3><p>Stronger cancellation, queued turns, worker delivery, and stream recovery. Maintenance resumes interrupted work and reports degraded state.</p></li><li class="reveal"><span>02</span><h3>Safer skill changes.</h3><p>Exact backups and guarded rollback keep recovery available. Settings and schedules save atomically.</p></li><li class="reveal"><span>03</span><h3>Clearer review.</h3><p>Evidence-backed factual corrections, complete hold-out totals, and separate Needs you / Activity notifications.</p></li></ul>
+  <p class="section-label reveal">Release notes</p><h2 class="section-title reveal">3.3. <em>Quicker to follow up.</em></h2>
+  <p class="section-sub reveal">Version <code>3.3.0</code> is available on <code>main</code>. The install commands on this page use main. One database migration runs on startup; read the upgrade guide first.</p>
+  <ul class="release-benefits"><li class="reveal"><span>01</span><h3>Plan once, keep the cache.</h3><p>Scout plans on the first message. Later turns skip the planning call, and a fixed tool list lets a local model reuse its cached prompt: a 67k-token chat went from about 12 s of prompt processing to about 3 s. The agent finds anything else with <code>lookup</code>.</p></li><li class="reveal"><span>02</span><h3>Memory that stays put.</h3><p>Entries moved into an archived file are no longer dropped at the next index rebuild, and startup repairs any file already affected. The memory store starts at boot.</p></li><li class="reveal"><span>03</span><h3>Cleaner learning signal.</h3><p>Grades name the model that ran the turn. Skill proposals only carry code the session ran successfully. Thank-you turns skip memory work.</p></li></ul>
   <p class="release-links reveal"><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/changelog.md">Full change summary →</a><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md">Upgrade &amp; migration guide →</a><a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/operations.md">Operations guide →</a></p>
-  <p class="section-note reveal">Upgrading an existing installation? Back up first and read the migration and legacy skill-recovery notes in the upgrade guide.</p>
+  <p class="section-note reveal">Upgrading an existing installation? Back up <code>data/</code> first. <code>retry_worker</code> is removed; skills or prompts that name it should use <code>resume_worker</code> or <code>spawn_worker</code>.</p>
 </section>
 
 <section class="honest" id="limits">
