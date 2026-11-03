@@ -422,8 +422,8 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 50); when the ca
 
 - ~35 **builtin tools** always registered (`file_read`, `file_write`, `bash`, `ask_user`, etc.); `call_model` is a model_mgmt extension, and `spawn_worker` / `get_worker_result` are orchestration extensions
 - **Extensions** — the modules listed in `BUNDLED_EXTENSIONS` (`core/extensions/__init__.py`): `web`, `orchestration`, `evaluation`, `scheduling`, `packages`, `model_mgmt`, `session_tools` always register; `rlm` and `mcp` register conditionally on their own settings (`rlm_enabled`, `mcp_enabled`). Full inventory and gating: [extensions.md](extensions.md)
-- Agent sees only the schema slice for `active_tools` — scout-picked plus a monotonically-growing allowlist (`_resolve_tool_surface()`, `agent.py:1216`)
-- `discover_tools()` during the loop can expand `active_tools` mid-turn (`agent.py:2269-2270`)
+- With `scout_first_turn_only` (default) the agent's schema is the fixed `NATIVE_TOOLS` set (`core/tools/native.py`, `frozen_surface()`), the same on every call so the prompt prefix stays cached; a job or worker kind's allow-list replaces it. Other tools run through `use_tool`, which the call gate unwraps before any check (`_ToolCallGate.admit`), and `lookup` returns their schemas
+- With the flag off: scout-picked tools plus a monotonically-growing allowlist (`_resolve_tool_surface()`), and `discover_tools()` can expand `active_tools` mid-turn
 
 ### 2.4 Safety gate (`core/tools/executor.py:322-400`)
 
@@ -639,7 +639,7 @@ Workers are typically single-turn (spawn → complete). But nothing stops a pare
 | Compaction             | `core/context/compaction.py`, `core/context/compiler.py` | Non-destructive 3-phase view: prune → orphan-filter → `role="compaction"` summary marker; metadata in `messages.metadata` (v5+) |
 | LLM router             | `core/llm/router.py`, `core/llm/client.py`       | Ollama + OpenRouter + OpenAI-compatible; per-provider semaphores; typed `FailoverError`; remote rate-limit → Ollama fallback; CONTEXT_OVERFLOW → compaction-retry |
 | Scout                  | `core/scout/runner.py`                           | Fresh-context fast model, 6-round budget, emits `ScoutReport` + `deliverables_plan` |
-| Tool registry          | `core/tools/registry.py`, `core/extensions/`     | ~13 core + discoverable extensions; `active_tools` slice per turn              |
+| Tool registry          | `core/tools/registry.py`, `core/extensions/`     | fixed `NATIVE_TOOLS` list per session; the rest via `lookup` / `use_tool`      |
 | Safety gate            | `core/tools/executor.py:322-400`                 | `safety_level` check; workers not exempt (unattended cron/worker sessions skip it); `denied_session_types` gates flat hierarchy |
 | Reflect                | `core/reflect.py`, `sessions/hooks.py`           | verdict ∈ {pass, retry, escalate}; retry bounded by `reflect_max_retries[_worker]` |
 | Reflect retry loop     | `sessions/manager.py:1564-1617`                  | re-enters SCOUTING→PROCESSING→FINALIZING within one user turn until verdict passes or cap |

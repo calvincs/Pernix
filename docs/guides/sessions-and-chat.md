@@ -13,7 +13,7 @@ For the formal state machine and reaper rules, see [../internals/state-machine.m
 When you send a message, it goes through five phases:
 
 1. **Session accepts** — your message lands on the session queue. If a turn is already running, your message queues behind it (up to `max_pending_messages`, default 10).
-2. **Scout** plans the approach: searches memory, picks tools and skills, drafts a plan. Runs on the Background role (`background_model`, small/fast). Visible in the State timeline as the `SCOUTING` phase of the turn, and readable in full under **Plan** in that turn's story.
+2. **Scout** plans the approach: searches memory, picks the skill, drafts a plan. By default the scout model runs only on the first real message of a session; later turns get a quick memory search instead. Runs on the Background role (`background_model`, small/fast). Visible in the State timeline as the `SCOUTING` phase of the turn, and readable in full under **Plan** in that turn's story.
 3. **Agent loop** executes the plan, streaming response tokens and tool calls. Runs on `llm_model` (your primary). Visible as `PROCESSING`.
 4. **Reflect** checks whether the agent fulfilled your intent. If not, it triggers up to 2 retries (`reflect_max_retries`). Reuses the same `turn_id` with a higher `retry_index`.
 5. **Post-hooks** run in the background: auto-titling, distillation into long-term memory, worker cleanup. Visible as `FINALIZING`.

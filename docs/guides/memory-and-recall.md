@@ -29,7 +29,7 @@ These are **just markdown files**. Open `user.profile.md` in any text editor and
 
 ## How recall works
 
-At the start of each turn, scout searches the memory store and injects the most relevant entries into the system prompt:
+At the start of each turn, Pernix searches the memory store and adds the most relevant entries to the turn's briefing (the scout does it on the first turn; later turns run the same search with no model call):
 
 1. The user's incoming message is the search query.
 2. The FTS5 index returns matches scored with BM25.

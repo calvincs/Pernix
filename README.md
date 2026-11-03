@@ -24,7 +24,7 @@ It is **not** a polished commercial product. It is a working personal tool with 
 
 ## Version 3.2
 
-Version **3.2.1** is available on `main`, tagged as `v3.2.1`.
+Version **3.3.0** is available on `main`, tagged as `v3.3.0`.
 Read the [change summary](docs/changelog.md#v320--2026-10-04),
 [upgrade checklist](docs/upgrade.md#upgrading-to-32), and
 [operations guide](docs/operations.md) before upgrading an existing installation.
@@ -47,7 +47,7 @@ Read the [change summary](docs/changelog.md#v320--2026-10-04),
 - **Workspace** — sandboxed file area the agent can read, write, and organize
 - **Worker orchestration** — spawn parallel sub-agents running on different models for complex multi-part work
 - **Skills system** — installable capability packs that teach the agent domain-specific procedures
-- **MCP client** ([docs](docs/mcp.md)) — plug in any Model Context Protocol server, local (stdio) or remote (Streamable HTTP); its tools register as first-class Pernix tools with scout curation, the safety gate, and health metrics, managed from the Explorer → Capabilities → Servers (MCP) tab with paste-compatible Claude Code / Cursor configs
+- **MCP client** ([docs](docs/mcp.md)) — plug in any Model Context Protocol server, local (stdio) or remote (Streamable HTTP); its tools register as first-class Pernix tools, found with `lookup` and run with `use_tool`, with the safety gate, and health metrics, managed from the Explorer → Capabilities → Servers (MCP) tab with paste-compatible Claude Code / Cursor configs
 - **Cron scheduling** — run agents on a schedule for recurring tasks
 - **Reflect & retry** — model review checks responses against task evidence; ordinary chats are reviewed in the background by default, while worker and scheduled turns can use bounded retries. Unsupported factual corrections are withheld; model review is not proof of correctness
 - **Session kernel** — an optional persistent per-session Python REPL (`repl` tool) whose variables survive turns, compaction, and restarts; huge tool results auto-bind as variables instead of flooding context

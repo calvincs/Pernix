@@ -6,6 +6,33 @@ For the full list of changes by date, see [changelog.md](changelog.md). For DB s
 
 ---
 
+## Upgrading to 3.3.0
+
+Minor release, tagged as `v3.3.0`. Back up `data/` first (see Backups below),
+then update `main` (or check out `v3.3.0`) and restart. For Docker, pull the
+new `docker-compose.yml` too and rebuild: `docker compose up -d --build pernix`.
+
+- **Migration v45** runs on startup. It adds routing fields to token usage and
+  a model-selection audit table, so a session's chosen model survives a restart.
+  It also closes old "fallback model" alerts, which could not tell a real
+  failover from a model you picked.
+- **The scout runs once per session.** The new setting `scout_first_turn_only`
+  (default `true`) runs the scout LLM on the first real message only. Later
+  turns get a fast memory search with no LLM, and the tool list stays fixed for
+  the session. The agent reaches other tools with `lookup` and `use_tool`. Set
+  it to `false` to get the old scout on every turn.
+- **`retry_worker` is gone.** A skill, `RULES.md` or scheduled prompt that
+  names it should use `resume_worker` to keep a worker's work, or
+  `spawn_worker` to start again. A failed worker's reply now shows its task.
+- **Container stop time.** `docker-compose.yml` sets `stop_grace_period: 45s`
+  so Pernix finishes its shutdown. A local override file keeps working.
+- **Memory repair at first start.** If any memory file was archived while it
+  still held live entries (a bug in the split sweep), the startup check
+  reopens it and keeps exactly those entries live. It logs each file it
+  repairs. No action needed.
+
+---
+
 ## Upgrading to 3.2.1
 
 Patch release, tagged as `v3.2.1`. No migrations and no settings changes.

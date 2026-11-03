@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased — development
+## v3.3.0 — 2026-11-03
+
+Minor release on `main` as `v3.3.0`; application and API version: `3.3.0`.
+One migration (v45). One new setting, `scout_first_turn_only` (default
+`true`). One agent tool removed: `retry_worker`. Two tools added: `lookup`
+and `use_tool`. See docs/upgrade.md.
 
 - Stop losing memory entries moved into an archived file. The split sweep
   wrote live entries into dead files, where the next reindex would drop them;

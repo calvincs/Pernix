@@ -119,7 +119,7 @@ This used to be an unconditional hardcode: every tool result over 300 characters
 
 ## Scout (Planning Phase)
 
-The scout is a fast sub-agent that runs at the start of each turn to plan the approach: it reads the preloaded memory, tool and skill baseline, picks tools, and selects skills before handing off to the main agent.
+The scout is a fast sub-agent that plans the approach: it reads the preloaded memory, tool and skill baseline, names the skill to load and any tools outside the agent's fixed list, and drafts a plan before handing off to the main agent. By default it runs once per session (`scout_first_turn_only`).
 
 | Setting | Default | Description |
 |---|---|---|

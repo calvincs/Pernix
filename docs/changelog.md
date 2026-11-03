@@ -6,6 +6,48 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## v3.3.0 — 2026-11-03
+
+Version 3.3.0 is a minor release on `main`, tagged as `v3.3.0`. One migration
+(v45) and one new setting. See [upgrade.md](upgrade.md) before updating.
+
+- **Faster follow-up turns.** The scout plans once per session, on the first
+  real message. Later turns get a quick memory search with no model call. The
+  tool list stays the same for the whole session, so a local model reuses the
+  cached prompt: on a 67k-token chat a new turn went from about 12 s of prompt
+  processing to about 3 s. The agent finds any other tool, skill or memory with
+  `lookup` and runs a tool outside its list with `use_tool`. Set
+  `scout_first_turn_only = false` to plan every turn as before.
+- **Skills load whole.** The scout names the skill for the task and the agent
+  loads it with `load_skill`, so the full text stays in the conversation
+  instead of a copy cut at 5,000 characters.
+- **Workers.** `retry_worker` is removed: it cancelled a worker with no check
+  and lost its task. Use `resume_worker` or `spawn_worker`. Asking for a
+  result too soon now says the worker is still running and points at
+  `await_workers`, instead of calling it failed.
+- **No memory lost to archived files.** A maintenance pass could move live
+  entries into an archived file, where the next index rebuild dropped them.
+  Moves now reopen the file and keep its old entries archived, and startup
+  repairs any file already affected. The memory store also starts at boot, so
+  the first turn after a restart no longer waits for an index rebuild.
+- **Better self-improvement data.** Each grade is filed under the model that
+  ran the turn, even after a mid-session switch. Skill proposals may only
+  contain code the session actually ran successfully, and refine now reads tool
+  calls correctly. A "thanks" turn no longer triggers memory or skill passes.
+  A skill too full for its proposals to apply raises one notification.
+- **Smoother under load.** Files search, uploads, embedding work and memory
+  distillation run off the event loop, so one slow job no longer freezes other
+  sessions. The sidebar list is gzipped, and long days fold at 50 rows.
+- **Clean shutdowns.** Docker now gives Pernix 45 s to stop, so deploys stop
+  cutting off its shutdown.
+- **Answers you can check.** A reply that claims work with no tool call, or
+  cites a source nothing in the turn showed, is challenged once. Repeat loops
+  end with a forced answer. Self-hosted Qwen stops at a stray `</think>`.
+- **Failover alerts that mean it.** Choosing your backup model is no longer
+  reported as a failover, and one incident is tracked across midnight.
+
+---
+
 ## v3.2.1 — 2026-10-14
 
 Version 3.2.1 is a patch release on `main`, tagged as `v3.2.1`. No migrations.

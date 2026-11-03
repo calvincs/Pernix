@@ -44,7 +44,7 @@ The file is created automatically on first run with a `<!-- @birthdate: ... -->`
 RULES.md defines operational guidelines — the agent's decision-making discipline. The defaults cover:
 
 **Capability discovery**
-Before reporting that something is impossible, use `list_available_models` and `discover_tools` to check whether a capability exists.
+Before reporting that something is impossible, use `list_available_models` and `lookup` to check whether a capability exists.
 
 **Delegation**
 Spawn workers (`spawn_worker`) for specialized tasks that benefit from a different model, parallelism, or isolation. Don't try to do everything in one context window.
