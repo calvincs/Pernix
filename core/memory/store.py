@@ -1150,17 +1150,34 @@ class MemoryStore:
         # Ensure target exists
         self._ensure_file(target_file)
 
+        # An archived target must be reopened first. Appending to it indexed
+        # the moved entries while the file still read as archived, so the next
+        # reindex dropped them: on 2026-11-03 a split sweep moved 21 live
+        # entries into two archived files this way. Old entries stay archived.
+        from core.memory.format import is_file_archived, reopen_archived_file
+
+        if self.rewrite_file(target_file, lambda raw: reopen_archived_file(raw) if is_file_archived(raw) else None):
+            logger.info("Reopened archived memory file to receive moved entries: %s", target_file)
+        # Archived sections are not in the index but still hold their epochs;
+        # a moved entry must not reuse one, or two sections share an address.
+        target_raw = self.read_file(target_file) or ""
+        taken = {int(m) for m in re.findall(r"<!-- @epoch:\s*(\d+)\s*-->", target_raw)}
+
         moved = 0
         conn = self._connect()
         try:
             for entry in to_move:
                 # Check for epoch collision in target; loop until clear
                 actual_epoch = entry.epoch
-                while conn.execute(
-                    "SELECT epoch FROM memory_fts WHERE file_name = ? AND epoch = ?",
-                    (target_file, str(actual_epoch)),
-                ).fetchone():
+                while (
+                    actual_epoch in taken
+                    or conn.execute(
+                        "SELECT epoch FROM memory_fts WHERE file_name = ? AND epoch = ?",
+                        (target_file, str(actual_epoch)),
+                    ).fetchone()
+                ):
                     actual_epoch += 1
+                taken.add(actual_epoch)
 
                 # Format and append to target markdown
                 formatted = format_entry(
@@ -1767,6 +1784,10 @@ class MemoryStore:
         for md_path in self._dir.glob("*.md"):
             if not _NAME_RE.match(md_path.stem):
                 continue  # not indexable (see reindex) — not a drift signal either
+            if md_path.stat().st_size > 50 * 1024 * 1024:
+                # reindex skips these too; counting them made in_sync False
+                # forever and every reconcile a full rebuild.
+                continue
             try:
                 raw = md_path.read_text(encoding="utf-8", errors="replace")
             except OSError as e:
@@ -1785,6 +1806,82 @@ class MemoryStore:
             "files": len(list(self._dir.glob("*.md"))),
         }
 
+    def repair_archived_with_live_rows(self) -> int:
+        """Reopen archived files that still have rows in the index.
+
+        Such a file is half live: search returns its indexed entries, but the
+        markdown reads as archived, so the next reindex drops them for good.
+        `move_entries` made these before it learned to reopen its target. The
+        repair keeps live exactly the epochs the index holds and marks every
+        other entry archived, so nothing the archive retired comes back.
+        Returns the number of files reopened.
+        """
+        from core.memory.format import is_file_archived, reopen_archived_file
+
+        conn = self._connect()
+        try:
+            rows = conn.execute("SELECT file_name, epoch, content FROM memory_fts").fetchall()
+        finally:
+            conn.close()
+        live: dict[str, dict[int, str]] = {}
+        for row in rows:
+            try:
+                live.setdefault(row["file_name"], {})[int(row["epoch"])] = row["content"] or ""
+            except (TypeError, ValueError):
+                continue
+
+        reopened = 0
+        for name, epochs in sorted(live.items()):
+            md_path = self._dir / f"{name}.md"
+            if not _NAME_RE.match(name) or not md_path.exists():
+                continue
+            try:
+                head = md_path.read_text(encoding="utf-8", errors="replace").split("\n---\n", 1)[0]
+            except OSError:
+                continue
+            if not is_file_archived(head):
+                continue
+            if self.rewrite_file(
+                name, lambda raw, keep=epochs: reopen_archived_file(raw, keep) if is_file_archived(raw) else None
+            ):
+                reopened += 1
+                kept = len(parse_entries_from_markdown(name, self.read_file(name) or ""))
+                conn = self._connect()
+                try:
+                    conn.execute("UPDATE memory_files SET entry_count = ? WHERE name = ?", (kept, name))
+                    conn.commit()
+                finally:
+                    conn.close()
+                logger.info(
+                    "Reopened archived memory file %s: %d of %d indexed entries kept live", name, kept, len(epochs)
+                )
+        return reopened
+
+    def _drifted_files(self, limit: int = 5) -> str:
+        """Up to `limit` files whose index and markdown entry counts differ."""
+        conn = self._connect()
+        try:
+            indexed = {
+                r["file_name"]: r["n"]
+                for r in conn.execute("SELECT file_name, COUNT(*) AS n FROM memory_fts GROUP BY file_name").fetchall()
+            }
+        finally:
+            conn.close()
+        out = []
+        names = {p.stem for p in self._dir.glob("*.md") if _NAME_RE.match(p.stem)} | set(indexed)
+        for name in sorted(names):
+            md_path = self._dir / f"{name}.md"
+            try:
+                text = md_path.read_text(encoding="utf-8", errors="replace") if md_path.exists() else ""
+            except OSError:
+                continue
+            md = len(parse_entries_from_markdown(name, text)) if text else 0
+            if md != indexed.get(name, 0):
+                out.append(f"{name} (md {md}, idx {indexed.get(name, 0)})")
+                if len(out) >= limit:
+                    break
+        return ", ".join(out)
+
     def health_check(self, fix: bool = False) -> dict:
         """Check index health. Optionally auto-fix by reindexing and
         repairing epoch collisions.
@@ -1794,6 +1891,11 @@ class MemoryStore:
         lock is not reentrant — wrapping this would deadlock on the first
         repaired file.
         """
+        if fix:
+            reopened = self.repair_archived_with_live_rows()
+            if reopened:
+                logger.info("Memory health: reopened %d archived file(s) that still had live entries", reopened)
+
         result = self._survey()
 
         if result["epoch_collisions"] and fix:
@@ -1808,6 +1910,14 @@ class MemoryStore:
             result = {**result, **self._survey()}
 
         if not result["in_sync"] and fix:
+            # Name the files that drifted before the rebuild hides them, so an
+            # unexplained reindex points at its writer.
+            logger.info(
+                "Memory index drift before reindex: indexed=%d markdown=%d; files: %s",
+                result["indexed_entries"],
+                result["markdown_entries"],
+                self._drifted_files() or "none found",
+            )
             result["indexed_entries"] = self.reindex()
             result["action"] = "reindexed"
             result["in_sync"] = True

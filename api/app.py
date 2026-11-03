@@ -114,6 +114,21 @@ async def lifespan(app: FastAPI):
     # the pattern everywhere else (SessionManager._spawn_detached).
     app.state.warm_estimator_task = asyncio.create_task(_warm_token_estimator())
 
+    # 2.4b Memory store — also lazy, and its first caller runs the startup
+    # health check, which on drift is a full reindex (66 s at ~15k entries).
+    # On 2026-11-03 that first caller was a user's first scout after a deploy:
+    # 75 s to plan. Warmed here, later callers get the store at once and read
+    # the previous index (WAL, one rebuild transaction) while it runs.
+    async def _warm_memory_store() -> None:
+        try:
+            from core.memory.store import get_memory_store
+
+            await asyncio.to_thread(get_memory_store)
+        except Exception as e:
+            logger.debug("Memory store warm-up failed (falls back on first use): %s", e)
+
+    app.state.warm_memory_task = asyncio.create_task(_warm_memory_store())
+
     # 2.5 Model registry — populate from provider APIs
     from core.llm.client import get_llm_client
 

@@ -133,6 +133,41 @@ def is_file_archived(text: str) -> bool:
     return "<!-- @file:" in header and "<!-- @archived: true -->" in header
 
 
+_ARCHIVED_MARK = "<!-- @archived: true -->"
+_EPOCH_LINE_RE = re.compile(r"<!-- @epoch:\s*(\d+)\s*-->")
+
+
+def _section_body(section: str) -> str:
+    """An entry's content as the parser (and so the index) sees it."""
+    return "\n".join(line for line in section.split("\n") if not line.strip().startswith("<!--")).strip()
+
+
+def reopen_archived_file(text: str, keep_live: dict[int, str] | None = None) -> str:
+    """Make an archived file live again while its old entries stay archived.
+
+    `archive_file` marks only the header, so dropping that marker alone (what
+    `add_entry` does on purpose) brings every old entry back. Here each entry
+    gets its own archived marker first, except those in `keep_live`: epoch
+    mapped to the indexed content, and both must match. An old archived entry
+    can share an epoch with a moved one, so the epoch alone is not enough.
+    Returns `text` unchanged when the header is not archived.
+    """
+    keep_live = keep_live or {}
+    if not is_file_archived(text):
+        return text
+    sections = text.split("\n---\n")
+    header = sections[0].replace("\n" + _ARCHIVED_MARK, "", 1)
+    out = [header]
+    for section in sections[1:]:
+        match = _EPOCH_LINE_RE.search(section)
+        epoch = int(match.group(1)) if match else None
+        kept = epoch in keep_live and (keep_live[epoch] or "").strip() == _section_body(section)
+        if match and _ARCHIVED_MARK not in section and not kept:
+            section = section[: match.end()] + "\n" + _ARCHIVED_MARK + section[match.end() :]
+        out.append(section)
+    return "\n---\n".join(out)
+
+
 def parse_entries_from_markdown(file_name: str, text: str) -> list[MemoryEntry]:
     """Parse all entries from a markdown memory file.
 

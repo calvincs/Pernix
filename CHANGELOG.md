@@ -2,6 +2,16 @@
 
 ## Unreleased — development
 
+- Stop losing memory entries moved into an archived file. The split sweep
+  wrote live entries into dead files, where the next reindex would drop them;
+  `move_entries` now reopens the file and keeps its old entries archived, the
+  split no longer offers archived files, and the health check repairs files
+  already left half live.
+- Warm the memory store at startup. A stale index made the first user turn
+  after a deploy wait 66 s for a rebuild.
+- Log which files drifted before any reindex, and skip files over 50 MB when
+  counting, as the rebuild already does.
+
 - File each reflect grade under the model that ran the turn. A deferred grade
   read the session's model minutes later, after the user had switched.
 - Fix refine reading tool calls in the wrong shape. It never saw `load_skill`,
