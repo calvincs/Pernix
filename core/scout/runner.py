@@ -1390,7 +1390,7 @@ async def run_scout(
                 report.scout_latency_ms,
                 report.task_type or "-",
                 ", ".join(report.recommended_skills[:3]) or "-",
-                ", ".join(report.recommended_tools[:5]) or "-",
+                ", ".join(report.extra_tools) or "-",
             )
             return report
 
