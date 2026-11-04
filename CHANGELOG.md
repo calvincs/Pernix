@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.3.3 — 2026-11-04
+
+Patch release on `main` as `v3.3.3`; application and API version: `3.3.3`.
+Web client only: no migration, no setting, no API change.
+
+- Stop a deleted session from coming back and opening. After its undo window
+  the sidebar let go of the id and repainted from a list that could be older
+  than the DELETE, so the row returned for up to one poll and a click opened a
+  session the server no longer had (a row of 404s). A settled delete is now
+  remembered for the life of the page: every render hides it and
+  `selectSession` refuses it.
+- Report a failed delete. `deleteSession` swallowed the error, so the sidebar
+  never showed "Could not delete" and the row silently returned.
+
 ## v3.3.2 — 2026-11-04
 
 Patch release on `main` as `v3.3.2`; application and API version: `3.3.2`.

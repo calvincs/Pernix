@@ -6,6 +6,16 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## v3.3.3 — 2026-11-04
+
+Version 3.3.3 is a patch release on `main`, tagged as `v3.3.3`. It changes
+only the web client: no migration, no new setting.
+
+- **Deleted sessions stay deleted.** Deleting several sessions in a row could
+  bring one back in the sidebar for a few seconds, and clicking it showed
+  errors. A deleted session now stays out of the list and cannot be opened.
+- **A delete that fails now says so**, and the session stays in the list.
+
 ## v3.3.2 — 2026-11-04
 
 Version 3.3.2 is a patch release on `main`, tagged as `v3.3.2`. It changes
