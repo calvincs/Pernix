@@ -522,8 +522,28 @@ reopen and catch up — the jobs indicator re-`GET`s `/api/jobs/status`, and
 "refetch `/api/notifications` now" signal. A hide and show inside the grace
 closes nothing, so alt-tabbing costs nothing.
 
-The session stream is deliberately exempt: it is what lets a background tab
-show a finished turn.
+The session stream follows on a longer grace (`SESSION_HIDDEN_GRACE_MS`, 30 s,
+in `sse.js`) and one extra condition: it closes only while the session is
+idle. `app.js` registers the check with `setStreamBusyCheck` (`state.streaming`
+or a busy `state_v2`); until it does, the answer is "busy", so an unknown state
+never closes the stream that would show a turn's end. Mid-turn the timer just
+asks again later. On return the stream reopens from the last event seen
+(`last_event_id`) and emits `sse.reconnected`, so `app.js` reconciles anything
+that happened while it was closed. A hidden, idle tab then holds no
+connection at all. (Until 2026-11-04 this stream was exempt, and one
+connection per hidden tab plus keep-alive sockets was still enough to fill the
+pool.)
+
+The service worker backs this up for page loads: a navigation that has not
+had a first byte within 3 s (`NAV_NETWORK_TIMEOUT_MS` in `sw.js`) is answered
+from the cached app shell, and the network answer, when it comes, refreshes
+that cache. A reload can no longer sit for a minute behind someone else's
+streams.
+
+`loadSessions()` is guarded for the same reason a pool is finite: calls while
+one is in flight, or within 250 ms of the last start, share one trailing
+fetch, and a burst of more than 20 in 5 s logs its caller's stack once a
+minute (`[pernix] session list asked for …` in the console).
 
 ---
 

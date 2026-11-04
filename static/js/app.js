@@ -2,7 +2,7 @@
 
 import { state, subscribe } from './store.js';
 import { get, post, del, patch, getAuthToken, setAuthToken, humanizeError } from './api.js';
-import { connectSSE, disconnectSSE } from './sse.js';
+import { connectSSE, disconnectSSE, setStreamBusyCheck } from './sse.js';
 import { getPermission, requestPermission, connectGlobalNotifications, registerServiceWorker, subscribePush } from './notifications.js';
 import { el, text, clear, initMarked, renderMarkdown } from './render.js';
 import { initSigil } from './sigil.js';
@@ -127,6 +127,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     initMarked();
     initMobile();
     initSidebar(selectSession, deleteSession);
+    // A hidden tab may give the session stream back, but never mid-turn: the
+    // stream is what shows the turn's end. Either signal counts as busy.
+    setStreamBusyCheck(() => !!state.streaming
+        || _BUSY_STATES.has(_knownSession(state.sid)?.state_v2));
     await loadSessions();
     await loadHealth();
     setupInput();
@@ -531,7 +535,59 @@ function _knownSession(sid) {
     return (state.sessions || []).find((x) => x.id === sid) || _offListSessions.get(sid) || null;
 }
 
-async function loadSessions() {
+// ---------------------------------------------------------------------------
+// Session-list reload guard (2026-11-04)
+// ---------------------------------------------------------------------------
+// On 2026-11-04 one browser fetched /api/sessions?limit=500 plus the
+// suggestions about 58 times a second, twice (27 s on wake, 3 s during a
+// reload). It could not be reproduced headless, so the trigger is unknown. Two
+// things are certain whatever it was: nothing needs this list more often than
+// a few times a second, and the next occurrence has to say where it came from.
+//
+// So every caller goes through here. A call while one is in flight, or
+// within _SESSIONS_MIN_GAP_MS of the last start, joins ONE trailing reload
+// rather than starting its own. Every caller still gets a promise that
+// settles after a fetch that began after its call, so `await loadSessions()`
+// keeps meaning "the list is fresh now". A burst logs one warning a minute
+// with the caller's stack.
+const _SESSIONS_MIN_GAP_MS = 250;
+const _SESSIONS_BURST = { windowMs: 5000, limit: 20 };
+let _sessionsInFlight = null;
+let _sessionsTrailing = null;
+let _sessionsLastStart = 0;
+let _sessionsCalls = [];
+let _sessionsBurstWarnedAt = 0;
+
+function loadSessions() {
+    const now = Date.now();
+    _sessionsCalls.push(now);
+    _sessionsCalls = _sessionsCalls.filter((t) => now - t < _SESSIONS_BURST.windowMs);
+    if (_sessionsCalls.length > _SESSIONS_BURST.limit && now - _sessionsBurstWarnedAt > 60000) {
+        _sessionsBurstWarnedAt = now;
+        console.warn(`[pernix] session list asked for ${_sessionsCalls.length} times in `
+            + `${_SESSIONS_BURST.windowMs / 1000}s — coalescing. Caller:`, new Error().stack);
+    }
+    if (_sessionsTrailing) return _sessionsTrailing;
+    if (!_sessionsInFlight && now - _sessionsLastStart >= _SESSIONS_MIN_GAP_MS) {
+        return _startSessionsLoad();
+    }
+    _sessionsTrailing = (async () => {
+        if (_sessionsInFlight) await _sessionsInFlight;
+        const gap = _sessionsLastStart + _SESSIONS_MIN_GAP_MS - Date.now();
+        if (gap > 0) await new Promise((r) => setTimeout(r, gap));
+        _sessionsTrailing = null;
+        return _startSessionsLoad();
+    })();
+    return _sessionsTrailing;
+}
+
+function _startSessionsLoad() {
+    _sessionsLastStart = Date.now();
+    _sessionsInFlight = _loadSessionsNow().finally(() => { _sessionsInFlight = null; });
+    return _sessionsInFlight;
+}
+
+async function _loadSessionsNow() {
     try {
         // In parallel, not in series: the suggestion rows are painted by the
         // same renderSidebar call below, and refreshSuggestions never throws,

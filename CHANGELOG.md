@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.3.1 — 2026-11-04
+
+Patch release on `main` as `v3.3.1`; application and API version: `3.3.1`.
+Web client only: no migration, no setting, no API change.
+
+- Stop a reload from hanging for a minute. The service worker's page fetch had
+  no deadline, and with every browser connection to the server held by other
+  tabs' streams it waited 60 s. After 3 s it now answers with the cached app
+  shell and refreshes the cache when the network answers.
+- Give the session stream back in a hidden tab, while the session is idle. A
+  hidden tab already closed its notification and jobs streams; the session
+  stream now follows after 30 s, stays open mid-turn, and resumes from the
+  last event when the tab returns. A hidden tab now holds no connection.
+- Guard the session-list reload. Calls in a burst share one trailing fetch,
+  spaced at least 250 ms apart, and a burst logs its caller once a minute. One
+  browser was seen asking for the list ~58 times a second.
+
 ## v3.3.0 — 2026-11-03
 
 Minor release on `main` as `v3.3.0`; application and API version: `3.3.0`.

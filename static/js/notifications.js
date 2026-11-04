@@ -18,9 +18,10 @@ let _hiddenTimer = null;
 // three leaves room for both windows and their requests.
 //
 // The grace is what keeps a tab switch and back free — closing on the first
-// `hidden` would tear both streams down for an alt-tab. The SESSION stream is
-// deliberately not in this scheme: it is what lets a background tab show a
-// finished turn.
+// `hidden` would tear both streams down for an alt-tab. The SESSION stream
+// joined the scheme on 2026-11-04 with a longer grace and one condition: it
+// closes only while the session is idle, since it is what lets a background
+// tab show a finished turn (see SESSION_HIDDEN_GRACE_MS in sse.js).
 export const STREAM_HIDDEN_GRACE_MS = 5000;
 
 window.addEventListener('pernix:offline', () => {
