@@ -76,6 +76,11 @@ function _updateScrollPin() {
 }
 
 function scrollToBottom(force = false) {
+    // A transcript replay appends every message through code that calls this,
+    // and each call read scrollHeight — a full layout of the growing
+    // transcript, once per message: 244 ms of a 198-message open on
+    // 2026-11-04. loadMessages scrolls once when the replay is done.
+    if (_replayingTranscript) return;
     const scroll = _messagesScroll();
     if (!scroll) return;
     if (force) _scrollPinned = true;
@@ -5316,13 +5321,19 @@ async function _cancelSession() {
 let _lastMsgTs = 0;
 const _MSG_GAP_MS = 10 * 60 * 1000;  // gaps over 10 minutes get a divider
 
+// toLocale*String with options builds a new Intl.DateTimeFormat on every
+// call; two per message was 30 ms of a large transcript open. Same output,
+// built once.
+const _MSG_TIME_FMT = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+const _MSG_FULL_FMT = new Intl.DateTimeFormat(undefined, {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit',
+});
+
 function _msgTimestamp(ts) {
     const d = new Date(ts);
     if (isNaN(d.getTime())) return null;
-    const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-    const full = d.toLocaleString(undefined, {
-        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit',
-    });
+    const time = _MSG_TIME_FMT.format(d);
+    const full = _MSG_FULL_FMT.format(d);
     return el('span', { class: 'msg-time', title: full }, [text(time)]);
 }
 

@@ -101,6 +101,11 @@ async def list_sessions(
 
     rows = await _asyncio.to_thread(db.list_sessions_enriched, limit, offset, archived=archived, exclude_types=excluded)
     sessions = [annotate_read_only(s) for s in rows]
+    # The sidebar never reads a session's system prompt, and on one install it
+    # was 250 KB of a 425 KB page (59%) that every open tab re-downloaded and
+    # re-parsed every ten seconds. GET /api/sessions/{id} still carries it.
+    for s in sessions:
+        s.pop("system_prompt", None)
     spaces = await _asyncio.to_thread(db.list_spaces)
     type_counts = await _asyncio.to_thread(db.count_sessions_by_type)
     space_counts = {} if archived else await _asyncio.to_thread(db.count_live_sessions_by_space)

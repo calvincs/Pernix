@@ -80,6 +80,10 @@ let _onSelect = null;
 let _onDelete = null;
 let _tooltipTimer = null;
 let _lastJson = '';
+// The fingerprint minus the open session, and the rebuild a session switch
+// put off by one frame (see renderSessionList).
+let _lastBase = '';
+let _switchRebuild = null;
 let _spaces = [];  // last /api/sessions payload's spaces list
 
 // Pending space suggestions (v35). Their own fetch, not part of the sessions
@@ -445,7 +449,7 @@ function _createSearchBox() {
         if (q.length < 2) {
             if (_searchActive) {
                 _searchActive = false;
-                _lastJson = '';  // force the normal list to re-render
+                _lastJson = ''; _lastBase = '';  // force the normal list to re-render
                 window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
             }
             return;
@@ -653,20 +657,53 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     for (const s of _archived) _sessionsById.set(s.id, s);
     // The guard must see spaces too: a label/color edit with an unchanged
     // session list would otherwise never repaint.
-    const json = JSON.stringify(sessions) + '|' + JSON.stringify(spaces) + '|' + activeSid
+    const base = JSON.stringify(sessions) + '|' + JSON.stringify(spaces)
         + '|' + (_showArchived() ? _archived.map(s => s.id).join(',') : 'off')
         + '|' + _archivedLoading + _archivedFailed
         // Declining a suggestion changes no session and no space, so without
         // the suggestions in the fingerprint the row it just removed would
         // stay on screen until something else happened to move.
         + '|' + _suggestions.map(s => s.id).join(',');
+    const json = base + '|' + activeSid;
     if (json === _lastJson) return;
-    _lastJson = json;
 
-    const list = document.getElementById('session-list');
-    const scrollTop = list.scrollTop;
-    const focusMark = _focusMark(list);
-    clear(list);
+    // Opening a session changes only which row is active, and a full rebuild
+    // of a big list took 70-160 ms inside the click, before the transcript
+    // fetch had even started. Move the highlight now and rebuild a frame
+    // later, while that fetch is in flight. The rebuild still runs, because
+    // the open session also decides which groups are forced open, which rows
+    // a capped group keeps, and the "finished while away" marks.
+    const liveList = document.getElementById('session-list');
+    if (base === _lastBase && !_switchRebuild) {
+        const next = activeSid && liveList.querySelector(`[data-sid="${CSS.escape(activeSid)}"]`);
+        if (!activeSid || next) {
+            for (const row of liveList.querySelectorAll('.session-item.active')) row.classList.remove('active');
+            if (next) next.classList.add('active');
+            _lastJson = json;
+            // A token, not the rAF id: once the frame has fired, cancelling
+            // it cannot stop the timeout, and a rebuild from this call's
+            // arguments after a newer render would draw a stale list.
+            const token = {};
+            _switchRebuild = token;
+            requestAnimationFrame(() => setTimeout(() => {
+                if (_switchRebuild !== token) return;
+                _switchRebuild = null;
+                _lastJson = ''; _lastBase = '';
+                renderSessionList(sessions, activeSid, spaces);
+            }, 0));
+            return;
+        }
+    }
+    _switchRebuild = null;   // this full render supersedes a pending one
+    _lastJson = json;
+    _lastBase = base;
+
+    // Built off-document and swapped in with one replaceChildren. Emptying
+    // the live list first threw its scroll position away, and putting it back
+    // forced a synchronous layout of the whole new list (55 ms in one trace).
+    // A list that is never empty between two layouts keeps its own scrollTop.
+    const focusMark = _focusMark(liveList);
+    const list = document.createDocumentFragment();
 
     const sidebarState = _loadState();
     const hidden = sidebarState.hiddenTypes || {};
@@ -877,8 +914,8 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     // are in, and it must never push the live list down the panel.
     _renderArchivedGroup(list, activeSid, sidebarState);
 
-    list.scrollTop = scrollTop;
-    _restoreFocus(list, focusMark);
+    liveList.replaceChildren(list);
+    _restoreFocus(liveList, focusMark);
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,7 +1057,7 @@ async function _archiveIdleInSpace(space) {
         const done = res.count || 0;
         notify('success', `Archived ${done} session${done === 1 ? '' : 's'} from “${space.label}”.`);
         announce(`${done} session${done === 1 ? '' : 's'} archived`);
-        _lastJson = '';
+        _lastJson = ''; _lastBase = '';
         window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
         if (_showArchived()) _loadArchived();
     } catch (err) {
@@ -1110,7 +1147,7 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
             e.stopPropagation();
             try {
                 const r = await post('/api/sessions', { title: 'New session', space_id: space.id });
-                _lastJson = '';
+                _lastJson = ''; _lastBase = '';
                 window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
                 if (r.session_id) _select(r.session_id);
             } catch (err) {
@@ -1904,7 +1941,7 @@ function _deleteWithUndo(sessionId, titleText) {
 }
 
 function _repaint() {
-    _lastJson = '';
+    _lastJson = ''; _lastBase = '';
     window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
 }
 
@@ -1927,7 +1964,7 @@ async function _moveSessionToSpace(session, spaceId) {
     if ((spaceId || null) === (session.space_id || null)) return;
     try {
         await patch(`/api/sessions/${session.id}`, { space_id: spaceId });
-        _lastJson = '';
+        _lastJson = ''; _lastBase = '';
         window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
     } catch (err) {
         const to = spaceId ? (spaceById(spaceId)?.label || 'that space') : 'no space';
@@ -2137,7 +2174,7 @@ function _toggleType(typeKey) {
     }
 
     // Force re-render
-    _lastJson = '';
+    _lastJson = ''; _lastBase = '';
 
     // Three events, because a toggle now changes three things.
     //
@@ -2352,6 +2389,13 @@ function _timeGroup(isoStr) {
     return 'Older';
 }
 
+// Built once: toLocaleDateString with options makes a new formatter per call,
+// and the list formats a date for every row on every rebuild.
+const _ROW_DATE_FMT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+const _ROW_DATETIME_FMT = new Intl.DateTimeFormat(undefined, {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+});
+
 function _relativeTime(isoStr) {
     if (!isoStr) return '';
     let s = isoStr.replace(/\+00:00$/, 'Z');
@@ -2363,14 +2407,14 @@ function _relativeTime(isoStr) {
     if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m`;
     if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h`;
     if (diffSec < 604800) return `${Math.floor(diffSec / 86400)}d`;
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return _ROW_DATE_FMT.format(date);
 }
 
 function _formatDate(isoStr) {
     if (!isoStr) return '';
     const d = new Date(isoStr.replace(/\+00:00$/, 'Z'));
     if (isNaN(d.getTime())) return '';
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    return _ROW_DATETIME_FMT.format(d);
 }
 
 function _formatTokens(n) {
