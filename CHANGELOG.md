@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.3.2 — 2026-11-04
+
+Patch release on `main` as `v3.3.2`; application and API version: `3.3.2`.
+Web client only: no migration, no setting, no API change.
+
+- Stop the Archived group from rebuilding every row on every list refresh.
+  It had no row cap and built its rows even while folded; with 408 archived
+  sessions shown, each rebuild (every ten-second poll while any session was
+  working) blocked the page for 160-185 ms and typing lagged behind it. A
+  folded archive now builds nothing, and an open one shows its first 50 rows
+  behind a "Show all N" button, like the time groups.
+
 ## v3.3.1 — 2026-11-04
 
 Patch release on `main` as `v3.3.1`; application and API version: `3.3.1`.

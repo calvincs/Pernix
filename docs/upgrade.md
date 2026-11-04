@@ -6,6 +6,15 @@ For the full list of changes by date, see [changelog.md](changelog.md). For DB s
 
 ---
 
+## Upgrading to 3.3.2
+
+Patch release, tagged as `v3.3.2`. Web client only: no migrations and no
+settings changes. Update `main` (or check out `v3.3.2`) and restart. For
+Docker, rebuild the image: `docker compose up -d --build pernix`. Open tabs
+pick up the new service worker on their next reload.
+
+---
+
 ## Upgrading to 3.3.1
 
 Patch release, tagged as `v3.3.1`. Web client only: no migrations and no

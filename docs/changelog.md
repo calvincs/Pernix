@@ -6,6 +6,17 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## v3.3.2 — 2026-11-04
+
+Version 3.3.2 is a patch release on `main`, tagged as `v3.3.2`. It changes
+only the web client: no migration, no new setting.
+
+- **No more typing lag with a big archive.** With "Show archived" on, the
+  sidebar redrew every archived session each time the list refreshed, which
+  froze the page for a fifth of a second every ten seconds while an agent
+  worked. The Archived group now shows its first 50 sessions, with a
+  "Show all" button for the rest, and draws nothing while folded.
+
 ## v3.3.1 — 2026-11-04
 
 Version 3.3.1 is a patch release on `main`, tagged as `v3.3.1`. It changes
