@@ -6,6 +6,21 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## v3.4.0 — 2026-11-04
+
+Version 3.4.0 is a minor release on `main`, tagged as `v3.4.0`. No migration,
+no new setting. It adds one dependency, `granian`.
+
+- **HTTP/2 for every network install.** Pernix now serves with Granian, so the
+  browser talks to it over one HTTP/2 connection instead of up to six HTTP/1.1
+  ones. With several tabs or the app plus a tab open, requests no longer
+  queue behind the live streams, which is what made reloads and buttons hang.
+- **Faster restarts.** A stop or restart finishes in under a second instead
+  of waiting 15 seconds for open streams.
+- **Uvicorn is deprecated.** A local install on plain HTTP still runs on
+  uvicorn and logs a warning saying so. It will be removed in a future
+  release, when Pernix serves every mode with Granian.
+
 ## v3.3.4 — 2026-11-04
 
 Version 3.3.4 is a patch release on `main`, tagged as `v3.3.4`. No migration,

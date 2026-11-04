@@ -6,6 +6,33 @@ For the full list of changes by date, see [changelog.md](changelog.md). For DB s
 
 ---
 
+## Upgrading to 3.4.0
+
+Minor release, tagged as `v3.4.0`. No migrations and no settings changes.
+Update `main` (or check out `v3.4.0`), then install the new dependency:
+`pip install -r requirements.txt`. For Docker, rebuild the image:
+`docker compose up -d --build pernix`.
+
+- **Server.** With TLS on (`network_enabled`, the default for network
+  installs), Pernix now serves with Granian and negotiates HTTP/2. Check it in
+  devtools → Network → Protocol: `h2`. Nothing to configure.
+- **Deprecation: uvicorn.** On plain HTTP Pernix still serves with uvicorn and
+  logs `Serving with uvicorn is deprecated`. That fallback will be removed in
+  a future release, and Pernix will serve every mode with Granian. To try it
+  now, start with `--server granian` (or set `PERNIX_SERVER=granian`). To go
+  back to uvicorn everywhere for now, use `--server uvicorn`.
+- **Custom TLS keys.** Granian reads PKCS#8 keys only. A traditional
+  `BEGIN RSA PRIVATE KEY` / `BEGIN EC PRIVATE KEY` file is converted on start
+  to `<key>.pkcs8.pem` beside it (mode 0600). Encrypted keys are refused.
+- **Access log.** Lines now come from `granian.access` and read
+  `addr - "GET /path HTTP/2" 200 1.2ms`. The path no longer includes the query
+  string. They still go to `data/logs/access.log`.
+- **Reverse proxy in front?** If a proxy already terminates TLS and talks
+  plain HTTP to Pernix, nothing changes: Pernix stays on uvicorn until you opt
+  in with `--server granian`.
+
+---
+
 ## Upgrading to 3.3.4
 
 Patch release, tagged as `v3.3.4`. No migrations and no settings changes.

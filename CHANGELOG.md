@@ -1,5 +1,30 @@
 # Changelog
 
+## v3.4.0 — 2026-11-04
+
+Minor release on `main` as `v3.4.0`; application and API version: `3.4.0`.
+No migration, no setting. New dependency: `granian`. New flag: `--server`
+(env `PERNIX_SERVER`). **Deprecated:** serving with uvicorn. See
+docs/upgrade.md.
+
+- Serve with Granian, HTTP/2 over TLS. Every network install (TLS on) now
+  negotiates HTTP/2, so all streams and requests of every tab share one
+  connection, and the browser's six-connections-per-host limit on HTTP/1.1
+  no longer queues requests behind open streams. Granian runs embedded, in
+  the `run.py` process, so `--dangerous` and the log filters work as before.
+- Keep uvicorn as a deprecated fallback. `--server auto` (the default) uses
+  uvicorn only on plain HTTP, where browsers cannot use HTTP/2 anyway, and
+  logs a deprecation warning. `--server granian` or `--server uvicorn`
+  forces either. The uvicorn path will be removed in a future release.
+- Stop in under a second instead of 15. A stop signal now ends every open
+  stream before the server stops; open streams used to hold every stop for
+  the full grace, and under Granian were then cancelled before the shutdown
+  could drain turns and close the browser and MCP.
+- End `/api/jobs/events` on shutdown. It forwarded the shutdown wake-up as an
+  ordinary event and kept going, holding every stop for 15 s.
+- Convert a custom TLS key to PKCS#8 when needed; Granian reads no other
+  format. The converted copy sits beside the original, owner-readable only.
+
 ## v3.3.4 — 2026-11-04
 
 Patch release on `main` as `v3.3.4`; application and API version: `3.3.4`.
