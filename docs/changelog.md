@@ -6,6 +6,23 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## v3.3.1 — 2026-11-04
+
+Version 3.3.1 is a patch release on `main`, tagged as `v3.3.1`. It changes
+only the web client: no migration, no new setting.
+
+- **No more minute-long reloads.** With two Pernix windows open, the
+  browser's connections to the server could all be held by live streams, and
+  a reload waited 60 s for one. The app now opens from its cached copy after
+  3 s and updates that copy in the background.
+- **Background tabs let go of their connections.** A tab you are not looking
+  at closes its live session stream after 30 s, unless the agent is still
+  working, and catches up when you come back.
+- **Session-list reload guard.** The sidebar list reloads at most four times
+  a second, however many things ask for it at once.
+
+---
+
 ## v3.3.0 — 2026-11-03
 
 Version 3.3.0 is a minor release on `main`, tagged as `v3.3.0`. One migration
