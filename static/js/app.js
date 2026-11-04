@@ -17,6 +17,7 @@ import {
     sessionsQuery,
     setListMeta,
     refreshSuggestions,
+    isDeletedSession,
 } from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel, EXPLORER_GROUPS } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
@@ -680,6 +681,9 @@ async function deleteSession(sid) {
         await loadSessions();
     } catch (e) {
         console.error('Failed to delete session:', e);
+        // Rethrown so the sidebar's undo flow can say so and keep the row.
+        // Swallowing it here made a failed delete look like a done one.
+        throw e;
     }
 }
 
@@ -898,6 +902,9 @@ function _ownsView(owner) {
 }
 
 async function selectSession(sid) {
+    // A row drawn from a list older than its DELETE, a notification, the
+    // palette: none of them may open a session this page has deleted.
+    if (isDeletedSession(sid)) return;
     const prevSid = state.sid;
     const mySeq = ++_selectSeq;
     if (isCompact()) closeSidebar();

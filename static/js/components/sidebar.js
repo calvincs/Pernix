@@ -101,6 +101,19 @@ const _sessionsById = new Map();
 const _deferredDeletes = new Set();
 const UNDO_MS = 5000;
 
+// Sessions this page has deleted for good. The undo set lets go of an id the
+// moment its DELETE settles, but the list the next render draws from can be
+// older than that DELETE — two list fetches can land out of order — so the
+// row used to come back for up to one poll, and a click on it opened a session
+// the server no longer had (2026-11-04: five 404s after deleting three in a
+// row). Ids are never reused, so this set never has to forget one.
+const _deletedForGood = new Set();
+
+/** Has this page deleted that session? app.js asks before opening one. */
+export function isDeletedSession(sid) {
+    return _deletedForGood.has(sid);
+}
+
 // The archive: sessions that have left the list without leaving the database.
 // The COUNT rides on every /api/sessions answer, so the legend can offer
 // "Archived (12)" for free; the ROWS are fetched only once the user turns
@@ -631,7 +644,8 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     // what makes both sets part of it — the payload itself has not changed.
     _reconcileArchived(sessions || []);
     sessions = (sessions || []).filter(
-        s => !_deferredDeletes.has(s.id) && !s.archived_at && !_archivedLocal.has(s.id));
+        s => !_deferredDeletes.has(s.id) && !_deletedForGood.has(s.id)
+            && !s.archived_at && !_archivedLocal.has(s.id));
     _sessionsById.clear();
     for (const s of sessions) _sessionsById.set(s.id, s);
     // Archived sessions are not in the list, but the session header still
@@ -1873,6 +1887,10 @@ function _deleteWithUndo(sessionId, titleText) {
         // hovering must not keep offering an Undo that no longer exists.
         dismiss();
         Promise.resolve(_onDelete ? _onDelete(sessionId) : null)
+            .then(() => {
+                _deletedForGood.add(sessionId);
+                _archived = _archived.filter(x => x.id !== sessionId);
+            })
             .catch((err) => {
                 notify('error', `Could not delete “${titleText}” — ${_reason(err)}.`);
             })
