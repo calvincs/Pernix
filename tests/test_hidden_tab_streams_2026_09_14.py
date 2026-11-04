@@ -253,10 +253,11 @@ def test_the_jobs_indicator_shares_that_one_number():
     assert "5000" not in src
 
 
-def test_the_session_stream_is_not_in_the_scheme():
-    """Deliberate: a background tab still has to show a finished turn. sse.js
-    watches visibility for staleness only — it never closes on hidden."""
+def test_the_session_stream_joins_the_scheme_only_while_idle():
+    """Superseded 2026-11-04: one stream per hidden tab still filled the pool.
+    The session stream now closes in a hidden tab too, but never mid-turn — a
+    background tab still has to show a finished turn. Driven in
+    tests/regressions/test_2026-11-04_a_reload_waited_sixty_seconds_for_a_connection.py."""
     src = (STATIC_JS / "sse.js").read_text()
-    assert "if (document.visibilityState === 'visible') _checkStale();" in src
-    assert "document.hidden" not in src
-    assert "'hidden'" not in src
+    assert "if (busy) { _armHiddenClose(); return; }" in src
+    assert "let _busyCheck = () => true;" in src

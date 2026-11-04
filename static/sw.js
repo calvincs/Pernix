@@ -9,7 +9,8 @@
 // version. Strategy:
 //   - static assets (/static/*): cache-first with background revalidate —
 //     instant loads, survives server downtime, refreshes itself when online
-//   - navigation (/): network-first, cached shell as offline fallback
+//   - navigation (/): network-first, cached shell as the fallback when the
+//     server is down or has not started answering within 3 s
 //   - API/SSE requests and /sw.js itself: never intercepted (pass through)
 const CACHE_VERSION = 'pernix-shell-__BUILD__';
 
@@ -137,23 +138,57 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Navigations: network-first, cached shell when the server is down.
+    // Navigations: network-first, cached shell when the server is down — or
+    // when the network is merely slow to start answering.
     if (event.request.mode === 'navigate') {
-        event.respondWith(
-            fetch(event.request)
-                .then((resp) => {
-                    if (resp && resp.ok) {
-                        // Clone synchronously — the page starts consuming the
-                        // body as soon as we return, after which clone() throws.
-                        const copy = resp.clone();
-                        caches.open(CACHE_VERSION).then((c) => c.put('/', copy)).catch(() => {});
-                    }
-                    return resp;
-                })
-                .catch(() => caches.match('/'))
-        );
+        event.respondWith(_navigate(event));
     }
 });
+
+// How long a navigation waits for the network before the cached shell
+// answers instead. A fetch here has no deadline of its own: on 2026-11-04 a
+// reload sat for exactly 60 s before its first byte because the browser's
+// six HTTP/1.1 connections to the box were all held by other tabs' streams,
+// and the request queued behind them. The shell is the same page the server
+// would send (index.html is static; the build id that stamps it is the one
+// this worker's cache is named after), so after this long it is the better
+// answer. The network fetch keeps going and refreshes the cached copy.
+const NAV_NETWORK_TIMEOUT_MS = 3000;
+
+function _navigate(event) {
+    const network = fetch(event.request);
+    // Refresh the cached shell from the network answer, and keep the worker
+    // alive until that is written even when the shell answered first.
+    // waitUntil has to be called during dispatch, hence here and not inside a
+    // later callback. This handler is registered on `network` before the
+    // race's, so it clones before the page can start reading the body (after
+    // which clone() throws). Its catch also keeps a late network failure from
+    // surfacing as an unhandled rejection.
+    event.waitUntil(network.then((resp) => {
+        if (!resp || !resp.ok) return undefined;
+        const copy = resp.clone();
+        return caches.open(CACHE_VERSION).then((c) => c.put('/', copy));
+    }).catch(() => {}));
+
+    let timer;
+    const slow = new Promise((resolve) => {
+        timer = setTimeout(resolve, NAV_NETWORK_TIMEOUT_MS);
+    }).then(() => caches.match('/'));
+
+    return Promise.race([
+        network.catch(() => null),
+        slow,
+    ]).then(async (first) => {
+        clearTimeout(timer);
+        if (first) return first;
+        // The race produced nothing usable: either the network failed, or the
+        // timer fired with no cached shell. Fall back to whichever is left —
+        // the shell if the network failed, the network if there is no shell.
+        const cached = await caches.match('/');
+        if (cached) return cached;
+        return network;
+    });
+}
 
 // Web Push: show OS notification when a push message arrives (even with tab closed)
 self.addEventListener('push', (event) => {

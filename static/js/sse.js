@@ -112,21 +112,91 @@ window.addEventListener('pernix:offline', () => {
     _updateHealthIndicator('disconnected');
 });
 window.addEventListener('pernix:online', () => {
-    if (_sessionId && _onEvent && !_source) {
-        const handler = _onEvent;
-        // The offline handler closed the socket without calling
-        // disconnectSSE(), so _lastSeq still names the last event we saw:
-        // hand it back as a replay cursor instead of silently starting a new
-        // stream from "now" and losing whatever arrived while we were away.
-        const cursor = _lastSeq > 0 ? _lastSeq : null;
-        const sid = _sessionId;
-        connectSSE(sid, handler, { cursor });
-        // connectSSE opens a brand-new source, so its own "first open" is
-        // not a reconnect from EventSource's point of view — but it is one
-        // for us: we were disconnected and may have missed a whole turn.
-        handler({ type: 'sse.reconnected' });
-    }
+    // A stream the hidden-tab scheme closed comes back when the tab does, not
+    // when the network does: reopening it here would hand a background tab
+    // its connection back the moment wifi returned.
+    if (_closedForHidden) return;
+    _resumeStream();
 });
+
+/**
+ * Reopen a stream that was closed without disconnectSSE() — by the offline
+ * handler or by the hidden-tab scheme — from the last event we saw.
+ */
+function _resumeStream() {
+    if (!(_sessionId && _onEvent && !_source)) return;
+    const handler = _onEvent;
+    // The socket was closed without calling disconnectSSE(), so _lastSeq
+    // still names the last event we saw: hand it back as a replay cursor
+    // instead of silently starting a new stream from "now" and losing
+    // whatever arrived while we were away.
+    const cursor = _lastSeq > 0 ? _lastSeq : null;
+    const sid = _sessionId;
+    connectSSE(sid, handler, { cursor });
+    // connectSSE opens a brand-new source, so its own "first open" is not a
+    // reconnect from EventSource's point of view — but it is one for us: we
+    // were disconnected and may have missed a whole turn.
+    handler({ type: 'sse.reconnected' });
+}
+
+// ---------------------------------------------------------------------------
+// Hidden tabs give the session stream back too (2026-11-04)
+// ---------------------------------------------------------------------------
+// notifications.js explains the budget: HTTP/1.1, six connections per host,
+// three EventSources per tab. Since 2026-09-14 a hidden tab closes the two
+// shared streams and keeps this one, so a background tab can still show a
+// finished turn. That still left one connection per hidden tab, and two
+// windows plus their keep-alive sockets were enough to fill the pool again: a
+// reload sat for exactly 60 s before its first byte (box trace, 2026-11-04).
+//
+// So this stream joins the scheme with one condition the shared ones do not
+// need: it closes only while the session is idle. Mid-turn it stays open —
+// that is the case the exemption was for — and the timer asks again later.
+// Coming back reopens from the last event seen and announces a reconnect, so
+// app.js reconciles anything that happened in between.
+export const SESSION_HIDDEN_GRACE_MS = 30000;
+let _hiddenTimer = null;
+let _closedForHidden = false;
+// Until app.js says otherwise, assume a turn is running: an unknown state
+// must never close the stream that would show its end.
+let _busyCheck = () => true;
+
+/** app.js registers how to tell whether the open session is mid-turn. */
+export function setStreamBusyCheck(fn) {
+    _busyCheck = typeof fn === 'function' ? fn : () => true;
+}
+
+function _armHiddenClose() {
+    _hiddenTimer = setTimeout(() => {
+        _hiddenTimer = null;
+        if (document.visibilityState !== 'hidden' || !_source) return;
+        let busy = true;
+        try { busy = !!_busyCheck(); } catch { busy = true; }
+        if (busy) { _armHiddenClose(); return; }
+        _source.close();
+        _source = null;
+        if (_healthTimer) { clearInterval(_healthTimer); _healthTimer = null; }
+        _closedForHidden = true;
+    }, SESSION_HIDDEN_GRACE_MS);
+}
+
+function _onSessionVisibility() {
+    if (document.visibilityState === 'hidden') {
+        if (_hiddenTimer || !_source) return;
+        _armHiddenClose();
+        return;
+    }
+    if (_hiddenTimer) { clearTimeout(_hiddenTimer); _hiddenTimer = null; }
+    if (_closedForHidden) {
+        _closedForHidden = false;
+        if (isOnline()) _resumeStream();
+        return;
+    }
+    // Browsers throttle timers in background tabs, so after a phone unlock
+    // the 15s health interval may not have run for minutes — check
+    // immediately on becoming visible instead of staring at stale state.
+    _checkStale();
+}
 
 // Connection states: 'connected' | 'reconnecting' | 'disconnected'
 let _connectionState = 'disconnected';
@@ -297,6 +367,10 @@ export function disconnectSSE() {
         try { _recoveryAbort.abort(); } catch { /* nothing in flight */ }
         _recoveryAbort = null;
     }
+    // A deliberate disconnect ends the hidden-tab bookkeeping too: there is
+    // no stream left for the tab to take back on its return.
+    if (_hiddenTimer) { clearTimeout(_hiddenTimer); _hiddenTimer = null; }
+    _closedForHidden = false;
     if (_source) {
         _source.close();
         _source = null;
@@ -315,12 +389,7 @@ export function getSSEState() {
     return _connectionState;
 }
 
-// Browsers throttle timers in background tabs, so after a phone unlock the
-// 15s health interval may not have run for minutes — check immediately on
-// becoming visible instead of staring at stale state for up to a minute.
-document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') _checkStale();
-});
+document.addEventListener('visibilitychange', _onSessionVisibility);
 
 function _startHealthCheck() {
     if (_healthTimer) clearInterval(_healthTimer);
