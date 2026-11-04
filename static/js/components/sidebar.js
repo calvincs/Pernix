@@ -893,14 +893,21 @@ function _renderArchivedGroup(list, activeSid, sidebarState) {
 
     const body = el('div', { class: 'session-group-body' + (collapsed ? ' collapsed' : '') });
 
+    // A folded archive builds no rows, so opening it has to repaint rather
+    // than just flip the classes.
     const toggleGroup = () => {
         const isCollapsed = header.classList.toggle('collapsed');
         body.classList.toggle('collapsed', isCollapsed);
         header.setAttribute('aria-expanded', String(!isCollapsed));
         _saveCollapsed(ARCHIVED_GROUP, isCollapsed);
+        if (!isCollapsed) _repaint();
     };
     header.addEventListener('click', toggleGroup);
     _activateOnKey(header, toggleGroup);
+
+    list.appendChild(header);
+    list.appendChild(body);
+    if (collapsed) return;
 
     if (_archivedFailed) {
         body.appendChild(el('div', { class: 'space-empty' }, [text('Could not load the archive — try again.')]));
@@ -909,12 +916,35 @@ function _renderArchivedGroup(list, activeSid, sidebarState) {
     } else if (!_archived.length) {
         body.appendChild(el('div', { class: 'space-empty' }, [text('Nothing archived yet.')]));
     }
-    for (const s of _archived) {
-        _renderSessionItem(s, body, activeSid, false);
+    // Capped like a time group. On 2026-11-04 one browser showed 408 archived
+    // rows — 70% of an 11k-element sidebar — and every rebuild of the list
+    // (each ten-second poll while any session was working) blocked the page
+    // for 160-185 ms, which is what typing into the composer waited behind.
+    const showAll = !!sidebarState.timeShowAll?.[ARCHIVED_GROUP];
+    _archived.forEach((s, i) => {
+        if (showAll || i < TIME_GROUP_ROW_CAP || s.id === activeSid) {
+            _renderSessionItem(s, body, activeSid, false);
+        }
+    });
+    if (_archived.length > TIME_GROUP_ROW_CAP) {
+        body.appendChild(el('button', {
+            class: 'space-show-all',
+            type: 'button',
+            'data-group': `time:${ARCHIVED_GROUP}:show-all`,
+            'aria-expanded': String(showAll),
+            title: showAll
+                ? `Fold ${ARCHIVED_GROUP} back to its first ${TIME_GROUP_ROW_CAP}`
+                : `Show all ${_archived.length} archived sessions`,
+            onClick: (e) => {
+                e.stopPropagation();
+                _saveTimeShowAll(ARCHIVED_GROUP, !showAll);
+                announce(showAll
+                    ? `${ARCHIVED_GROUP} folded back to its first ${TIME_GROUP_ROW_CAP} sessions`
+                    : `${ARCHIVED_GROUP} showing all ${_archived.length} sessions`);
+                _repaint();
+            },
+        }, [text(showAll ? 'Show fewer' : `Show all ${_archived.length}`)]));
     }
-
-    list.appendChild(header);
-    list.appendChild(body);
 }
 
 // ---------------------------------------------------------------------------
