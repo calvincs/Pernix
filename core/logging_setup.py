@@ -9,6 +9,8 @@ import shutil
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
+ACCESS_LOGGERS = ("uvicorn.access", "granian.access")
+
 
 def _compress(source: str, destination: str) -> None:
     # Keep the original if compression fails; never lose the only copy.
@@ -28,7 +30,8 @@ def daily_handler(path: Path, *, access: bool) -> TimedRotatingFileHandler:
     handler = TimedRotatingFileHandler(path, when="midnight", backupCount=35, utc=True, encoding="utf-8")
     handler.namer = lambda name: name + ".gz"
     handler.rotator = _compress
-    handler.addFilter(lambda record: (record.name == "uvicorn.access") == access)
+    # Access lines go to access.log whichever server wrote them.
+    handler.addFilter(lambda record: (record.name in ACCESS_LOGGERS) == access)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     return handler
 

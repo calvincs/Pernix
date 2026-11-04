@@ -506,12 +506,21 @@ places that state this preference cannot drift apart.
 
 Every open tab holds **three** `EventSource` connections: the session stream
 (`sse.js`), `/api/notifications/events` (`notifications.js`) and
-`/api/jobs/events` (`components/jobs-indicator.js`). Uvicorn speaks HTTP/1.1
-only, and Chrome allows six connections per host on HTTP/1.1 — so two windows
-(a second tab, or the installed app alongside a tab) spend the whole budget on
-streams, and every further `fetch` queues in the browser indefinitely: it
-never reaches uvicorn, so it appears in no access log and shows as "pending"
-in devtools. A dismiss, or a send, simply hangs.
+`/api/jobs/events` (`components/jobs-indicator.js`).
+
+**Over TLS (every network install) this budget no longer applies.** Since
+v3.4.0 `run.py` serves with Granian, which negotiates HTTP/2: every stream and
+request of every tab shares one connection. Check with devtools → Network →
+Protocol, which reads `h2`.
+
+**On plain HTTP it still does.** Browsers speak HTTP/2 only over TLS, so a
+local install without TLS runs the deprecated uvicorn fallback on HTTP/1.1,
+where Chrome allows six connections per host — two windows (a second tab, or
+the installed app alongside a tab) spend the whole budget on streams, and
+every further `fetch` queues in the browser indefinitely: it never reaches the
+server, so it appears in no access log and shows as "pending" in devtools. A
+dismiss, or a send, simply hangs. The hidden-tab scheme below exists for this
+case and stays on everywhere, since it also saves server work.
 
 So a hidden tab gives two of its three back. `document.hidden` starts a 5 s
 grace (`STREAM_HIDDEN_GRACE_MS`, exported from `notifications.js` and imported

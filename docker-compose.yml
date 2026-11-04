@@ -10,7 +10,7 @@ services:
     init: true
     user: "1000:1000"
     restart: unless-stopped
-    # Must outlast a full clean exit: uvicorn's 15 s connection wait (run.py)
+    # Must outlast a full clean exit: the server's 15 s connection wait (run.py)
     # plus the lifespan shutdown (turn drain 5 s, browser 3 s, MCP 8 s).
     # Docker's 10 s default killed the app before lifespan shutdown ran.
     stop_grace_period: 45s

@@ -3,7 +3,8 @@
 
 # Core
 fastapi==0.135.*
-uvicorn[standard]==0.42.*
+granian==2.8.*           # HTTP server: HTTP/2 over TLS (run.py)
+uvicorn[standard]==0.42.*  # DEPRECATED fallback for plain HTTP / --server uvicorn; to be removed
 httpx==0.28.*
 python-multipart==0.0.*
 apscheduler==3.11.*

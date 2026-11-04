@@ -301,6 +301,11 @@ async def job_events():
                     yield ": heartbeat\n\n"
                     continue
                 event_type = event.get("type", "message")
+                # end_all_streams() wakes every bus subscriber with this. It
+                # was forwarded as an ordinary event and the loop went on, so
+                # this one stream held every stop for the full grace.
+                if event_type == "_shutdown":
+                    return
                 clean = {k: v for k, v in event.items() if not k.startswith("_")}
                 yield sse_event(event_type, clean)
                 if queue_was_dropped(queue):

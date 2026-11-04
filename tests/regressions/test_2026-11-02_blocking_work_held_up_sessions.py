@@ -210,11 +210,14 @@ async def test_a_failed_distill_releases_the_session(monkeypatch):
 def test_docker_waits_longer_than_a_clean_shutdown_takes():
     root = Path(__file__).resolve().parents[2]
     service = yaml.safe_load((root / "docker-compose.yml").read_text())["services"]["pernix"]
-    uvicorn_wait = 15  # timeout_graceful_shutdown in run.py
+    server_wait = 15  # GRACEFUL_SHUTDOWN_S in run.py, both servers
     lifespan_budget = 16  # turn drain 5 + browser 3 + MCP 8, in api/app.py
 
-    assert "timeout_graceful_shutdown=15" in (root / "run.py").read_text()
-    assert int(service["stop_grace_period"].rstrip("s")) > uvicorn_wait + lifespan_budget
+    run_py = (root / "run.py").read_text()
+    assert "GRACEFUL_SHUTDOWN_S = 15" in run_py
+    assert "timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_S" in run_py  # uvicorn
+    assert "workers_kill_timeout = GRACEFUL_SHUTDOWN_S" in run_py  # granian
+    assert int(service["stop_grace_period"].rstrip("s")) > server_wait + lifespan_budget
 
 
 def test_session_list_is_gzipped_for_clients_that_take_it():

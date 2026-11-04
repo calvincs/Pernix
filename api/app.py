@@ -18,6 +18,46 @@ logger = logging.getLogger("pernix.api")
 _DEPLOY_SWEEP_DELAY_S = 900
 
 
+def end_all_streams() -> None:
+    """Tell every open SSE stream to finish, now.
+
+    The lifespan shutdown does this first. run.py also calls it the moment a
+    stop signal arrives: Granian waits for open requests before it runs the
+    lifespan shutdown and cancels whatever is still open after the grace, so
+    streams left open would hold every stop for the full grace and then skip
+    the shutdown below — no turn drain, no browser or MCP close. Idempotent.
+    """
+    # 1. Signal all SSE generators to exit cleanly
+    from api.streaming import signal_shutdown
+
+    signal_shutdown()
+
+    # 2. Wake up all SSE subscriber queues so they notice the shutdown flag
+    from sessions.manager import get_manager as _get_mgr
+
+    _mgr = _get_mgr()
+    for sid in _mgr.active_session_ids():
+        s = _mgr.get(sid)
+        if s:
+            for q in list(s.subscribers):
+                try:
+                    q.put_nowait({"type": "_shutdown"})
+                except Exception:
+                    pass
+    for q in list(_mgr._global_subscribers):
+        try:
+            q.put_nowait({"type": "_shutdown"})
+        except Exception:
+            pass
+    from core.events import get_event_bus as _get_bus
+
+    for q in list(_get_bus()._subscribers):
+        try:
+            q.put_nowait({"type": "_shutdown"})
+        except Exception:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
@@ -322,35 +362,12 @@ async def lifespan(app: FastAPI):
     # Shutdown — signal SSE streams first, then clean up
     logger.info("Pernix shutting down")
 
-    # 1. Signal all SSE generators to exit cleanly
-    from api.streaming import signal_shutdown
+    # 1-2. End every open SSE stream (see end_all_streams).
+    end_all_streams()
 
-    signal_shutdown()
-
-    # 2. Wake up all SSE subscriber queues so they notice the shutdown flag
     from sessions.manager import get_manager as _get_mgr
 
     _mgr = _get_mgr()
-    for sid in _mgr.active_session_ids():
-        s = _mgr.get(sid)
-        if s:
-            for q in list(s.subscribers):
-                try:
-                    q.put_nowait({"type": "_shutdown"})
-                except Exception:
-                    pass
-    for q in list(_mgr._global_subscribers):
-        try:
-            q.put_nowait({"type": "_shutdown"})
-        except Exception:
-            pass
-    from core.events import get_event_bus as _get_bus
-
-    for q in list(_get_bus()._subscribers):
-        try:
-            q.put_nowait({"type": "_shutdown"})
-        except Exception:
-            pass
 
     # 3. Close admission, stop the producers, then drain.
     #

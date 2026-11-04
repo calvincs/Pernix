@@ -102,7 +102,7 @@ The token comparison is constant-time, so a wrong token reveals nothing about th
 
 > **Onboarding links use the URL fragment, not the query string.** A browser never transmits the part after `#`, so `/#token=<token>` cannot reach an access log, a reverse-proxy log, or a `Referer` header. The query form used to, and wrote a working credential into `docker compose logs` on every scan.
 >
-> `?token=` is still accepted, because links handed out before this change are still in circulation and it is convenient for `curl`. Pernix redacts it from its own access log (`_TokenRedactFilter` in `run.py`, applied to `uvicorn.access` before anything else sees the record), but that is a backstop, not a guarantee: a reverse proxy in front of Pernix keeps its own logs, and browser history still records the full URL. Prefer the fragment, and treat a token you have shared as a query string as disclosed.
+> `?token=` is still accepted, because links handed out before this change are still in circulation and it is convenient for `curl`. Pernix redacts it from its own access log (`_TokenRedactFilter` in `run.py`, applied to the server's access logger — `granian.access`, or `uvicorn.access` on the deprecated fallback — before anything else sees the record; Granian's default access line also leaves the query string out entirely), but that is a backstop, not a guarantee: a reverse proxy in front of Pernix keeps its own logs, and browser history still records the full URL. Prefer the fragment, and treat a token you have shared as a query string as disclosed.
 
 ### Localhost Bypasses Auth (by default)
 
