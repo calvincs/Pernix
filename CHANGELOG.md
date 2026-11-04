@@ -1,5 +1,25 @@
 # Changelog
 
+## v3.3.4 — 2026-11-04
+
+Patch release on `main` as `v3.3.4`; application and API version: `3.3.4`.
+No migration, no setting. One API change: `GET /api/sessions` no longer
+includes each session's `system_prompt` (`GET /api/sessions/{id}` still does).
+
+- Drop `system_prompt` from the session list. The UI never read it, and on
+  one install it was 250 KB of a 425 KB page that every tab fetched every
+  ten seconds.
+- Stop scrolling once per message while a transcript loads. Each call read
+  `scrollHeight`, a full layout of the growing transcript: 244 ms of a
+  198-message open. The load scrolls once at the end.
+- Open a session without rebuilding the sidebar inside the click. The
+  highlight moves at once and the rebuild follows a frame later, while the
+  transcript is fetched.
+- Rebuild the sidebar off-document and swap it in whole, so it keeps its
+  scroll position without a forced layout (55 ms in one trace).
+- Reuse date formatters for message times and sidebar dates instead of
+  building one per call.
+
 ## v3.3.3 — 2026-11-04
 
 Patch release on `main` as `v3.3.3`; application and API version: `3.3.3`.

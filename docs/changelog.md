@@ -6,6 +6,19 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## v3.3.4 — 2026-11-04
+
+Version 3.3.4 is a patch release on `main`, tagged as `v3.3.4`. No migration,
+no new setting.
+
+- **Opening a long session is faster.** The transcript no longer re-measures
+  itself after every message while it loads, and the sidebar no longer
+  rebuilds itself inside the click.
+- **Less data every ten seconds.** The session list no longer carries each
+  session's system prompt, which the sidebar never showed. Scripts that read
+  `system_prompt` from `GET /api/sessions` should read it from
+  `GET /api/sessions/{id}` instead.
+
 ## v3.3.3 — 2026-11-04
 
 Version 3.3.3 is a patch release on `main`, tagged as `v3.3.3`. It changes

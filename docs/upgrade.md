@@ -6,6 +6,17 @@ For the full list of changes by date, see [changelog.md](changelog.md). For DB s
 
 ---
 
+## Upgrading to 3.3.4
+
+Patch release, tagged as `v3.3.4`. No migrations and no settings changes.
+Update `main` (or check out `v3.3.4`) and restart. For Docker, rebuild the
+image: `docker compose up -d --build pernix`.
+
+- `GET /api/sessions` no longer returns `system_prompt` on each item. Read it
+  from `GET /api/sessions/{id}` if a script of yours used it.
+
+---
+
 ## Upgrading to 3.3.3
 
 Patch release, tagged as `v3.3.3`. Web client only: no migrations and no
