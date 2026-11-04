@@ -49,6 +49,12 @@ If `network_enabled`, `ssl_mode`, `ssl_cert_path`, `ssl_key_path`, or `cors_orig
 
 ## TLS / SSL certificates
 
+With TLS on, Pernix serves with Granian and negotiates **HTTP/2**: every tab
+and every live stream shares one connection, so several open tabs no longer
+exhaust the browser's six HTTP/1.1 connections per host. Check it in devtools
+→ Network → Protocol, which reads `h2`. See `--server` in
+[installation.md](../installation.md#--server--http-server).
+
 Two options for the cert:
 
 ### Self-signed (default)
@@ -66,6 +72,11 @@ Steps:
 1. Install mkcert and generate certs — see [mkcert.md](mkcert.md).
 2. In Pernix Settings: set `ssl_mode = "custom"`, `ssl_cert_path = /path/to/cert.pem`, `ssl_key_path = /path/to/key.pem`.
 3. Restart.
+
+Granian reads **PKCS#8** keys (`BEGIN PRIVATE KEY`), which is what mkcert and
+current `openssl` write. A traditional `BEGIN RSA PRIVATE KEY` or
+`BEGIN EC PRIVATE KEY` file is converted on start to `<key>.pkcs8.pem` beside
+it, mode `0600`. Encrypted keys are refused.
 
 ---
 

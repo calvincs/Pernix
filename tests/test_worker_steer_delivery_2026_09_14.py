@@ -63,10 +63,20 @@ def _notes(session_id: str) -> list[str]:
 
 
 async def _settle() -> None:
-    """Let the detached reporter run to completion."""
-    for _ in range(200):
+    """Let the detached reporter run to completion.
+
+    This used to wait for a task NAMED "worker-steering", but _spawn_detached
+    uses its label only for logging and never names the task, so the wait
+    always ended after the first 10 ms tick — enough on an idle machine, not
+    under a parallel run (two of these tests failed that way on 2026-11-04).
+    The manager's own set of detached tasks is what actually has to drain.
+    """
+    from sessions.manager import get_manager
+
+    detached = get_manager()._detached_tasks
+    for _ in range(500):
         await asyncio.sleep(0.01)
-        if not [t for t in asyncio.all_tasks() if t.get_name() == "worker-steering"]:
+        if not detached:
             return
     raise AssertionError("the detached steer never settled")
 

@@ -178,7 +178,21 @@ python run.py --dangerous           Bypass dangerous-tool approval gate (see bel
 python run.py --qr                  Print LAN access URL + QR code (network mode)
 python run.py --port 9000           Override port (default: 8090)
 python run.py --host 0.0.0.0        Override bind address
+python run.py --server granian      Choose the HTTP server: auto (default) | granian | uvicorn
 ```
+
+### `--server` — HTTP Server
+
+`auto` (the default, also settable as `PERNIX_SERVER`) serves with **Granian**
+whenever TLS is on, which is every network-mode install. Granian negotiates
+HTTP/2, so all of a browser's tabs share one connection to Pernix. On plain
+HTTP (a local install without TLS) `auto` still uses **uvicorn**, because
+browsers only speak HTTP/2 over TLS.
+
+**The uvicorn path is deprecated** and logs a warning saying so. It will be
+removed in a future release, when Pernix serves every mode with Granian. Pass
+`--server granian` to use Granian on plain HTTP now, or `--server uvicorn` to
+keep uvicorn everywhere for the time being.
 
 ### `--rebuild` — Start Clean
 
