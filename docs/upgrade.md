@@ -6,6 +6,13 @@ For the full list of changes by date, see [changelog.md](changelog.md). For DB s
 
 ---
 
+## Upgrading to 3.4.1
+
+Documentation-only release, tagged as `v3.4.1`. Nothing to do beyond updating
+`main` (or checking out `v3.4.1`).
+
+---
+
 ## Upgrading to 3.4.0
 
 Minor release, tagged as `v3.4.0`. No migrations and no settings changes.

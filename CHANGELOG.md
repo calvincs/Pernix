@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.4.1 — 2026-11-04
+
+Patch release on `main` as `v3.4.1`; application and API version: `3.4.1`.
+Documentation and one test fix: no application code, migration, setting or
+API change.
+
+- Document `--server` (and `PERNIX_SERVER`) among the startup flags, with
+  the uvicorn deprecation, in docs/installation.md.
+- Document HTTP/2 and the PKCS#8 key requirement in
+  docs/deployment/network-mode.md.
+- Fix a flaky test: the worker-steer tests waited for a task name that
+  `_spawn_detached` never sets, so under a parallel run they checked before
+  the detached report had landed.
+
 ## v3.4.0 — 2026-11-04
 
 Minor release on `main` as `v3.4.0`; application and API version: `3.4.0`.

@@ -6,6 +6,14 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## v3.4.1 — 2026-11-04
+
+Version 3.4.1 is a documentation release on `main`, tagged as `v3.4.1`.
+
+- The installation guide now lists the `--server` startup flag and says the
+  uvicorn fallback is deprecated.
+- The network-mode guide now explains HTTP/2 and which TLS key formats work.
+
 ## v3.4.0 — 2026-11-04
 
 Version 3.4.0 is a minor release on `main`, tagged as `v3.4.0`. No migration,
