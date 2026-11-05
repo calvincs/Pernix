@@ -2031,7 +2031,22 @@ TRUST_PAYLOAD = {
     "grader": {
         "agreement": 0.72,
         "n": 25,
-        "holdout": {"accuracy": 0.9, "n": 10, "ran_at": "2026-09-04T00:00:00Z", "model": "qwen3-27b"},
+        # The report shape since the O4 fix (2026-10): accuracy covers graded
+        # cases only, so the panel also shows whole-suite success and completion.
+        "holdout": {
+            "accuracy": 0.9,
+            "n": 10,
+            "total": 11,
+            "attempted": 11,
+            "graded": 10,
+            "correct": 9,
+            "failed": 1,
+            "ungradable": 1,
+            "success_rate": 0.8182,
+            "completion_rate": 0.9091,
+            "ran_at": "2026-09-04T00:00:00Z",
+            "model": "qwen3-27b",
+        },
     },
     "outcomes": {
         "by_source": {"llm": 140, "next_turn": 31, "user": 9},
@@ -2484,7 +2499,9 @@ def trust_tab(browser):
     pg.screenshot(path=f"{shots}/{tag}-desktop-trust.png")
     want = [
         ("Reflect agrees with the user", "72%"),
-        ("Hold-out accuracy", "90%"),
+        ("Accuracy on graded cases", "90%"),
+        ("Whole-suite success", "82%"),
+        ("Grading completion", "91%"),
         ("You said so", "9"),
         ("Your next message", "31"),
         ("Reflect said so", "140"),
@@ -2494,14 +2511,18 @@ def trust_tab(browser):
         ("Contaminated", "0"),
     ]
     got = [(s["label"], s["value"]) for s in t.get("stats", [])]
+    notes = {s["label"]: s["note"] for s in t.get("stats", [])}
     check(
         "trust",
         "m2: every /api/trust number renders, with its sample size beside it",
         got == want
-        and "25 turns" in t["stats"][0]["note"]
-        and "10 fixtures" in t["stats"][1]["note"]
-        and "190 turns you sent" in t["stats"][5]["note"],
-        {"got": got, "notes": [s["note"] for s in t.get("stats", [])][:6]},
+        and "25 turns" in notes.get("Reflect agrees with the user", "")
+        and "10 fixtures" in notes.get("Accuracy on graded cases", "")
+        and "9/11 correct" in notes.get("Whole-suite success", "")
+        and "1 ungradable" in notes.get("Whole-suite success", "")
+        and "10/11 graded" in notes.get("Grading completion", "")
+        and "190 turns you sent" in notes.get("Turns graded (7d)", ""),
+        {"got": got, "notes": notes},
         "m2",
     )
     check(
