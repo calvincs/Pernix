@@ -287,6 +287,19 @@ def _emit_session_event(sid: str, event: dict) -> None:
         logger.debug("rlm: failed to emit %s event", event.get("type"), exc_info=True)
 
 
+def _touch_session(sid: str) -> None:
+    """Mark the calling session active. Best-effort, safe from any thread
+    (touch is one float write); a non-resident session is a no-op."""
+    try:
+        from sessions.manager import get_manager
+
+        session = get_manager().get(sid)
+        if session is not None:
+            session.touch()
+    except Exception:
+        logger.debug("rlm: failed to touch session %s", sid, exc_info=True)
+
+
 def _first_line(s: str, limit: int = 140) -> str:
     stripped = (s or "").strip()
     return stripped.splitlines()[0][:limit] if stripped else ""
@@ -333,6 +346,12 @@ def _make_progress_fn(run_id: str, ui_session_id: str | None, sid: str):
                 logger.debug("rlm: progress row update failed for %s", run_id, exc_info=True)
         if not sid:
             return
+        # A running RLM is activity. last_activity_time otherwise moves only on
+        # tool start/finish and stream chunks, so a 6-minute rlm_process read
+        # as 6 minutes idle and await_workers called the worker stalled while
+        # it was mid-run (session c8152c896a11: the parent abandoned the wait
+        # and polled for 4 minutes). The engine heartbeat fires every 10s.
+        _touch_session(sid)
         if etype == "heartbeat":
             _emit_session_event(
                 sid,
