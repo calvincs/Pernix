@@ -502,7 +502,7 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
             # A live subprocess is work in progress, not silence.
             parts.append("running subprocess" if _worker_has_live_process(worker_obj) else f"idle {idle}s")
 
-        lines.append(f"- {wid[:8]} \"{title}\": {' | '.join(parts)}")
+        lines.append(f"- {wid} \"{title}\": {' | '.join(parts)}")
 
     header = f"Workers: {done}/{len(wid_list)} done"
     if failed:
@@ -724,6 +724,43 @@ def _next_step(worker_id: str) -> str:
     return f"{note}\nOriginal task: {task[:_TASK_PREVIEW_CHARS]}" if task else note
 
 
+def _resolve_worker_id(worker_id: str, _context: dict | None = None) -> tuple[str, str]:
+    """(full_id, error) for a worker id the model may have shortened.
+
+    check_workers used to print 8-char ids and every lookup here is exact, so
+    get_worker_result("a10d83a0") matched nothing and answered "finished with
+    no output" about a worker that had written a passing report (session
+    c8152c896a11). An exact id — any session, worker or not — passes through
+    untouched. Otherwise a unique prefix of this parent's own workers resolves;
+    no match or several matches is an explicit error, never a guess.
+    """
+    wid = (worker_id or "").strip()
+    if not wid:
+        return wid, "Error: worker_id is required."
+    from sessions.manager import get_manager
+
+    manager = get_manager()
+    try:
+        if manager.get(wid) is not None or db.get_session(wid):
+            return wid, ""
+    except Exception:
+        return wid, ""
+    parent_id = (_context or {}).get("session_id", "")
+    if not parent_id:
+        return wid, ""
+    try:
+        parent = manager.get(parent_id)
+        inventory = manager.worker_inventory(parent) if parent is not None else db.worker_child_ids(parent_id)
+    except Exception:
+        return wid, ""
+    matches = [w for w in inventory if w.startswith(wid)] if len(wid) >= 6 else []
+    if len(matches) == 1:
+        return matches[0], ""
+    if len(matches) > 1:
+        return wid, f"Error: worker id '{wid}' matches {len(matches)} workers ({', '.join(matches)}). Use the full id."
+    return wid, f"Error: no worker of this session matches id '{wid}'. Call check_workers for the full ids."
+
+
 def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
     """Get the final output from a completed worker.
 
@@ -732,6 +769,9 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
     bytes that grade read. A verdict from an earlier run is reported as
     history, never applied as certification.
     """
+    worker_id, _id_err = _resolve_worker_id(worker_id, _context)
+    if _id_err:
+        return _id_err
     from core.extensions.orchestration import report as _report
 
     # Typed-kind deterministic gate (Feature 4): a cheap, unambiguous check of
@@ -893,6 +933,9 @@ def get_worker_transcript(
     message_id: return exactly that one message, in full and unclipped. This
         is what a `[clipped ...]` pointer tells the caller to call.
     """
+    worker_id, _id_err = _resolve_worker_id(worker_id, _context)
+    if _id_err:
+        return _id_err
     try:
         messages = db.get_messages(worker_id)
     except Exception as e:
@@ -1299,9 +1342,9 @@ def await_workers(
             for wid in worker_snapshot:
                 w = manager.get(wid)
                 if w and w.error:
-                    fail_ids.append(wid[:8])
+                    fail_ids.append(wid)
                 elif not _worker_has_output(wid):
-                    empty_ids.append(wid[:8])
+                    empty_ids.append(wid)
             result = check_workers(_context=_context, _filter_ids=worker_snapshot)
             if min_satisfied and not all_done:
                 result = f"[Partial: {done_count}/{len(worker_snapshot)} done]\n" + result
@@ -1393,6 +1436,9 @@ def message_worker(worker_id: str, message: str, _context: dict | None = None) -
       * CANCELLING → rejected with a clear error; the user must re-prompt
         after cancel completes.
     """
+    worker_id, _id_err = _resolve_worker_id(worker_id, _context)
+    if _id_err:
+        return _id_err
     from sessions import state_v2 as sv2
     from sessions.manager import get_manager
 
@@ -1537,6 +1583,9 @@ def _age_note(worker_id: str) -> str:
 
 def cancel_worker(worker_id: str, _context: dict | None = None) -> str:
     """Cancel a running worker."""
+    worker_id, _id_err = _resolve_worker_id(worker_id, _context)
+    if _id_err:
+        return _id_err
     from sessions.manager import get_manager
 
     # Cancellation is the parent explicitly giving up on this task, which is
@@ -1576,6 +1625,9 @@ def pause_worker(worker_id: str, _context: dict | None = None) -> str:
     before blocking on `await session.pause_event.wait()`. Pause does not
     interrupt a tool already in flight.
     """
+    worker_id, _id_err = _resolve_worker_id(worker_id, _context)
+    if _id_err:
+        return _id_err
     from core.events import call_on_loop
     from sessions.manager import get_manager
 
@@ -1612,6 +1664,9 @@ def resume_worker(
     /resume API endpoint routes through here, and reviving an idle NORMAL
     session would start an unrequested turn.
     """
+    worker_id, _id_err = _resolve_worker_id(worker_id, _context)
+    if _id_err:
+        return _id_err
     from sessions import state_v2 as sv2
     from sessions.manager import get_manager
 
