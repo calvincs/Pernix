@@ -219,12 +219,12 @@ def test_evidence_truncates_long_tool_results_with_marker():
     transcript budget. Per-tool char cap with a [+N chars truncated] marker."""
     sid = db.create_session(title="Long-result Trunc Test")
     db.add_message(sid, "user", "fetch the giant file")
-    big_body = "X" * 50_000  # well above _PER_TOOL_RESULT_CHAR_CAP (5000)
+    big_body = "X" * 50_000  # well above _PER_TOOL_RESULT_CHAR_CAP (40,000)
     db.add_message(sid, "tool", big_body)
     db.add_message(sid, "assistant", "Got it")
 
     _, evidence = _build_evidence(sid, attempt=1)
     assert "ATTEMPT TRANSCRIPT" in evidence
-    assert "[+" in evidence and "chars truncated]" in evidence
+    assert "[+" in evidence and "chars truncated:" in evidence
     # The full 50k body must not be inlined verbatim.
     assert big_body not in evidence

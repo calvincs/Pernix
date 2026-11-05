@@ -138,20 +138,54 @@ def internal_recall(
     return result
 
 
-def format_for_tool_output(recall: InternalRecall) -> str:
+def _fit_entries(text: str, budget: int, sep: str) -> tuple[str, int]:
+    """Whole entries of `text` (split on `sep`) that fit `budget` chars, and
+    how many were left out. The first entry is cut rather than dropped when it
+    alone is over budget, so a strong match never vanishes."""
+    entries = [e for e in text.split(sep) if e.strip()]
+    kept: list[str] = []
+    used = 0
+    for e in entries:
+        cost = len(e) + (len(sep) if kept else 0)
+        if used + cost > budget:
+            if not kept and budget > 80:
+                kept.append(e[: budget - 1] + "…")
+            break
+        kept.append(e)
+        used += cost
+    return sep.join(kept), len(entries) - len(kept)
+
+
+def format_for_tool_output(recall: InternalRecall, max_chars: int | None = None) -> str:
     """Format an InternalRecall as a model-facing text block.
 
     Returns "" when memory (including dedup footer) and sessions all came
     back empty so callers can skip prepending a useless header.
+
+    ``max_chars`` bounds the memory and session bodies, cutting at entry
+    boundaries; the header, the dedup footer and the "[!] Strong internal
+    match" line always survive. search_web prepends this block to the live
+    results, and uncapped it ran 7-9K chars (2026-11-04): it buried the web
+    results for the agent and pushed them past the grader's cut.
     """
     if not recall.memory_text and not recall.memory_seen_footer and not recall.session_text:
         return ""
 
+    memory_text, session_text = recall.memory_text, recall.session_text
+    omitted = 0
+    if max_chars is not None:
+        mem_budget = max(max_chars * 2 // 3 if session_text else max_chars, 0)
+        memory_text, n = _fit_entries(memory_text, mem_budget, "\n\n")
+        omitted += n
+        session_budget = max(max_chars - len(memory_text), 0)
+        session_text, n = _fit_entries(session_text, session_budget, "\n")
+        omitted += n
+
     parts = ["=== INTERNAL KNOWLEDGE (memory + prior sessions) ==="]
 
-    if recall.memory_text:
+    if memory_text:
         parts.append("MEMORY:")
-        parts.append(recall.memory_text)
+        parts.append(memory_text)
         if recall.memory_seen_footer:
             parts.append(recall.memory_seen_footer)
     elif recall.memory_seen_footer:
@@ -162,12 +196,15 @@ def format_for_tool_output(recall: InternalRecall) -> str:
     else:
         parts.append("MEMORY: no matching entries.")
 
-    if recall.session_text:
+    if session_text:
         parts.append("")
-        parts.append(recall.session_text)
-    else:
+        parts.append(session_text)
+    elif not recall.session_text:
         parts.append("")
         parts.append("PRIOR SESSIONS: no matching hits.")
+
+    if omitted:
+        parts.append(f"[{omitted} more internal entr{'y' if omitted == 1 else 'ies'} left out; recall() shows them]")
 
     if recall.memory_strong or recall.session_strong:
         parts.append("")

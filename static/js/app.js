@@ -6390,7 +6390,11 @@ function renderReflectCard(event) {
 
     const verdict = event.verdict || 'pass';
     const ms = event.latency_ms || 0;
-    const headerText = `reflect — ${verdict}${ms ? `, ${ms}ms` : ''}`;
+    // A deferred grade is observe-only: it lands after the turn (often under
+    // the next one) and never retries anything. Without saying so, a late
+    // "retry" card read as a retry step that had failed (2026-11-04).
+    const deferred = event.reflect_mode === 'deferred';
+    const headerText = `reflect — ${verdict}${deferred ? ' · graded after the turn, observe only' : ''}${ms ? `, ${ms}ms` : ''}`;
 
     const header = el('div', { class: 'reflect-header' }, [
         el('span', { class: 'scout-toggle' }, [icon('chevron-down', { size: 10 })]),
@@ -6418,6 +6422,15 @@ function renderReflectCard(event) {
         sections.push(el('div', { class: 'scout-section' }, [
             el('div', { class: 'scout-section-label' }, [text('missing')]),
             el('div', { class: 'scout-section-body' }, [text(event.missing)]),
+        ]));
+    }
+
+    if (deferred && verdict !== 'pass') {
+        sections.push(el('div', { class: 'scout-section' }, [
+            el('div', { class: 'scout-section-label' }, [text('what happened')]),
+            el('div', { class: 'scout-section-body' }, [text(
+                'This grade ran after the turn had finished, so nothing was retried. It is kept as a record only.'
+            )]),
         ]));
     }
 

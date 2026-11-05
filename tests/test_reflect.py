@@ -203,8 +203,13 @@ def test_format_message_assistant_with_tool_calls():
 def test_format_message_tool():
     msg = {"role": "tool", "content": "file contents here"}
     result = _format_message(msg)
-    assert "[TOOL RESULT]" in result
+    assert "[TOOL RESULT: 18 chars]" in result
     assert "file contents here" in result
+
+
+def test_format_message_tool_names_the_tool_and_call():
+    msg = {"role": "tool", "content": "x", "tool_call_id": "c1", "metadata": '{"tool": "search_web"}'}
+    assert _format_message(msg).startswith("[TOOL RESULT: search_web, call_id=c1, 1 chars]")
 
 
 # ---------------------------------------------------------------------------

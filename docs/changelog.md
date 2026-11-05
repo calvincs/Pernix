@@ -6,6 +6,21 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## v3.4.2 — 2026-11-04
+
+Version 3.4.2 is a patch release on `main`, tagged as `v3.4.2`. No migration
+and no new setting.
+
+- The turn grader now sees each tool result whole, unless the turn is too
+  long to fit. It used to see only the first 5,000 characters, which hid the
+  web results behind search_web's memory notes and led to a false "retry".
+- A grade that disputes text the grader was never shown is now turned into
+  a pass with lessons.
+- search_web's memory notes are shorter (1,800 characters), so the live
+  results come near the top.
+- A grade that ran after the turn says "graded after the turn, observe
+  only" and that nothing was retried.
+
 ## v3.4.1 — 2026-11-04
 
 Version 3.4.1 is a documentation release on `main`, tagged as `v3.4.1`.

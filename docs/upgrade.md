@@ -6,6 +6,21 @@ For the full list of changes by date, see [changelog.md](changelog.md). For DB s
 
 ---
 
+## Upgrading to 3.4.2
+
+Patch release, tagged as `v3.4.2`. No migrations, settings or dependency
+changes. Update `main` (or check out `v3.4.2`); for Docker, rebuild the image:
+`docker compose up -d --build pernix`.
+
+- **Reflect grading prompts are larger** on turns with long tool results: a
+  result up to 40,000 chars is now shown whole. Grading time on a local model
+  rises slightly on those turns; turns near the grading budget are cut as
+  before.
+- **search_web output is shorter**: its memory block is capped at 1,800
+  chars. Use `recall()` for more memory, or `consult_memory=false` to skip it.
+
+---
+
 ## Upgrading to 3.4.1
 
 Documentation-only release, tagged as `v3.4.1`. Nothing to do beyond updating

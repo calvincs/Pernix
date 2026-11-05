@@ -21,10 +21,14 @@ Reflect sees the **current attempt's transcript** with verbatim tool result bodi
 
 - The original user message that started the turn.
 - A preamble with workspace files, termination history, scout's plan/approach, and a tool execution summary (counts, failures, last few errors).
-- An `ATTEMPT TRANSCRIPT` section containing every assistant message, tool call, and tool result from this attempt — tool result bodies are kept verbatim up to a per-result cap (5000 chars), with longer results truncated and marked `[+N chars truncated]`.
+- An `ATTEMPT TRANSCRIPT` section containing every assistant message, tool call, and tool result from this attempt — each tool result is labeled with its tool name, call id and length, and kept verbatim up to 40,000 chars. Only when the transcript would not fit the grading budget do tighter caps apply (5,000, then 1,500, then 500). A cut keeps the head and the tail of the result around a `[+N chars truncated: …]` marker that gives the cut range and lists any section headers inside it. A late deferred grade of the previous turn is not part of the transcript.
 - The agent's final response (echoed at the end for grounding).
 
 This is what lets reflect verify factual claims against what the tools actually returned, instead of grading them against its own training-data priors.
+
+### Blindness guard
+
+A non-pass verdict can rest on text the grader was never shown. `phantom_evidence_reason` checks for that: when the verdict names two or more things the agent's answer cites (`machinelearningplus`, `LANGCHAIN_TRACING_V2`) that appear only in tool output cut from the evidence, it downgrades the verdict to pass-with-lessons (`verification=unknown`), like its two older checks. A grader that saw the text and still disagreed keeps its verdict. Field case: session 4c454e7ccb0c (2026-11-04), where a retry said search_web returned "only an INTERNAL KNOWLEDGE dump" while the six Tavily results sat past the old 5,000-char cut.
 
 ### Factual correction provenance
 

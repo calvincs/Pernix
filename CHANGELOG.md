@@ -1,5 +1,29 @@
 # Changelog
 
+## v3.4.2 — 2026-11-04
+
+Patch release on `main` as `v3.4.2`; application and API version: `3.4.2`.
+No migration, no setting, no API change.
+
+- Reflect sees whole tool results. The per-result cap starts at 40,000
+  chars (was 5,000) and tightens only when the transcript would not fit the
+  grading budget. A cut keeps the head and the tail, and its marker gives the
+  cut range and the section headers inside it. Field case: a deferred grade
+  failed a web-search turn for "fabricated" Tavily results that sat past the
+  old cut (session 4c454e7ccb0c).
+- Tool results in the grading transcript carry the tool name, call id and
+  length.
+- Blindness guard: a non-pass verdict that disputes two or more things the
+  answer cites, found only in tool output cut from the evidence, is
+  downgraded to pass-with-lessons.
+- A late deferred grade of the previous turn no longer appears inside the
+  next turn's grading transcript.
+- search_web caps its memory + prior-session block at 1,800 chars, cut at
+  entry boundaries; memory still comes first and the "[!] Strong internal
+  match" line is kept.
+- The reflect card says when a grade was deferred and observe-only, so a
+  late "retry" no longer reads as a retry that failed.
+
 ## v3.4.1 — 2026-11-04
 
 Patch release on `main` as `v3.4.1`; application and API version: `3.4.1`.

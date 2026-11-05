@@ -21,6 +21,12 @@ from core.tools.truncation import MAX_OUTPUT, acquisition_meta, acquisition_note
 
 logger = logging.getLogger("pernix.ext.web")
 
+# The memory + prior-session block search_web puts before the live results,
+# capped like lookup's (1,800). Uncapped it ran 7-9K chars on 2026-11-04,
+# so the web results the agent asked for came last and the grader's cut hid
+# them.
+SEARCH_WEB_MEMORY_CHARS = 1800
+
 # Backend health tracking — fire a single notification on first Tavily fault
 # rather than spamming the operator on every call.
 _tavily_alert_lock = threading.Lock()
@@ -237,7 +243,7 @@ def search_web(
 
             sid = (_context or {}).get("session_id") if _context else None
             recall = internal_recall(query, current_session_id=sid)
-            internal_block = format_for_tool_output(recall)
+            internal_block = format_for_tool_output(recall, max_chars=SEARCH_WEB_MEMORY_CHARS)
         except Exception as e:
             logger.debug("search_web internal recall skipped: %s", e)
 

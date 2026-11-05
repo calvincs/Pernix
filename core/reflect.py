@@ -77,7 +77,7 @@ RULES:
 - MATERIALITY BAR FOR NON-PASS VERDICTS: A retry is warranted only when a concrete user-facing deliverable is missing, incomplete, or factually false — or when a success claim (file written, job scheduled, memory saved, command executed) is unsupported by verifiable evidence. Plan-literalism (deviating from the scout plan when the outcome was delivered), tone/length mismatches, and defensible judgment calls are PASS — record them in the lessons fields and in `experience`, never as a retry. A non-pass verdict MUST name a concrete, checkable failure_cause; if you cannot name one, the verdict is "pass".
 - COMPLETED WORK IS NEVER RETRIED FOR PROCESS VIOLATIONS: when everything the user's request requires is verifiably done, violations of efficiency or procedure rules — call/budget caps exceeded, forbidden re-reads, redundant tool calls, a stray formatting artifact in otherwise-correct output — are a PASS with the violation recorded in what_failed and experience. A retry re-executes finished work, and the retry attempt has nothing left to do (field case: an attempt-2 with zero tool calls was then failed for "not verifying" prior work its charter forbade it from re-reading — an unwinnable trap the first verdict created).
 - ESCALATE GRADES THE TURN, NOT THE SITUATION: escalate means THIS turn's deliverable cannot exist without user input. If the turn's work is complete, the verdict is pass even when a question for the user remains (a stalled loop, a pending decision, a follow-up worth raising) — note the question in experience.note; the agent has its own channels for surfacing questions. Field case: a cron run the verdict itself described as "delivered cleanly" was escalated to flag a stale thread — a failure statistic for a turn that never failed.
-- YOUR OWN BLINDNESS IS NOT THE AGENT'S FAILURE: when you cannot verify a claim because the evidence is invisible TO YOU — a tool result body elided from the evidence blob, image bytes you cannot render, output truncation, a session that ran in a sandboxed or temporary workspace — grade what you CAN see and lower confidence below 0.5 with a note in reasoning. Never issue retry or escalate whose only nameable failure is that the verifier could not see the evidence.
+- YOUR OWN BLINDNESS IS NOT THE AGENT'S FAILURE: when you cannot verify a claim because the evidence is invisible TO YOU — a tool result body elided from the evidence blob, image bytes you cannot render, output truncation, a session that ran in a sandboxed or temporary workspace — grade what you CAN see and lower confidence below 0.5 with a note in reasoning. Never issue retry or escalate whose only nameable failure is that the verifier could not see the evidence. A "[+N chars truncated: …]" marker means the tool result CONTINUED past what you see (the marker lists section headers inside the cut): never write that a tool "returned only X", or that a source the agent cites was never fetched, about a result marked truncated.
 - Be strict: if the user asked for a file/deliverable and none was created, that's a retry.
 - Be strict: if the USER named a specific tool or approach and the agent used something else, that's a retry. This covers the user's own instruction only — scout's plan is the agent's planning artifact, not a contract with the user, so departing from SCOUT DELIVERABLES PLAN / PLANNED APPROACH while still delivering the outcome is a pass.
 - Be fair: if the agent produced a reasonable answer even without creating files, that can be a pass.
@@ -357,11 +357,57 @@ def _format_digest_for_scout(digest: dict) -> str:
     return "\n".join(lines) if lines else "  (digest empty)"
 
 
-def _format_message(msg: dict, tool_result_char_cap: int | None = None) -> str:
+_CUT_HEADER_RE = re.compile(r"^\s*(={3}[^\n]{1,80}?={3}|#{1,3} [^\n]{1,80})\s*$", re.M)
+
+
+def _tool_label(msg: dict) -> str:
+    """`search_web, call_id=…, 12350 chars` for a tool row, from what the row carries."""
+    meta = msg.get("metadata")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (ValueError, TypeError):
+            meta = None
+    name = meta.get("tool") if isinstance(meta, dict) else None
+    bits = [str(name)] if name else []
+    if msg.get("tool_call_id"):
+        bits.append(f"call_id={msg['tool_call_id']}")
+    bits.append(f"{len(msg.get('content') or '')} chars")
+    return ", ".join(bits)
+
+
+def _cut_tool_body(content: str, cap: int) -> tuple[str, str]:
+    """Keep the head and the tail of a long tool result; return (shown, elided).
+
+    A head-only cut hid every web result behind search_web's memory preamble
+    (session 4c454e7ccb0c, 2026-11-04), and the grader read the cut as "the
+    tool returned only memory". The marker now says where the cut is, that
+    the result continues, and which section headers sit inside it.
+    """
+    head_n = int(cap * 0.6)
+    tail_n = cap - head_n
+    head, cut, tail = content[:head_n], content[head_n : len(content) - tail_n], content[len(content) - tail_n :]
+    headers = [m.group(1).strip() for m in _CUT_HEADER_RE.finditer(cut)][:6]
+    marker = (
+        f"[+{len(cut)} chars truncated: chars {head_n}-{len(content) - tail_n} of {len(content)} were cut "
+        "from the middle and the result continues below"
+        + ("; section headers inside the cut: " + ", ".join(f'"{h}"' for h in headers) if headers else "")
+        + ". Text you cannot see here is not absent from the result.]"
+    )
+    return f"{head}\n{marker}\n{tail}", cut
+
+
+def _format_message(
+    msg: dict,
+    tool_result_char_cap: int | None = None,
+    tool_view: dict | None = None,
+) -> str:
     """Format a single message as a readable transcript line.
 
     When ``tool_result_char_cap`` is set, tool result bodies longer than the
-    cap are truncated with a ``[+N chars truncated]`` marker. Reflect's
+    cap keep their head and tail around a ``[+N chars truncated: …]`` marker.
+    ``tool_view``, when given, collects what of each tool body was shown
+    (``shown``) and what was cut (``elided``) for the blindness guard. Reflect's
     transcript-mode default uses a generous cap so result bodies are still
     legible (a 5000-char window typically covers the meaningful header of a
     fetched page or the relevant section of a long file), but a single
@@ -395,10 +441,16 @@ def _format_message(msg: dict, tool_result_char_cap: int | None = None) -> str:
                 pass
         return "\n".join(parts) if parts else "[ASSISTANT]\n(empty)"
     elif role == "tool":
+        label = f"[TOOL RESULT: {_tool_label(msg)}]"
         if tool_result_char_cap is not None and len(content) > tool_result_char_cap:
-            truncated = len(content) - tool_result_char_cap
-            return f"[TOOL RESULT]\n{content[:tool_result_char_cap]}\n[+{truncated} chars truncated]"
-        return f"[TOOL RESULT]\n{content}"
+            shown, elided = _cut_tool_body(content, tool_result_char_cap)
+            if tool_view is not None:
+                tool_view.setdefault("shown", []).append(shown)
+                tool_view.setdefault("elided", []).append(elided)
+            return f"{label}\n{shown}"
+        if tool_view is not None:
+            tool_view.setdefault("shown", []).append(content)
+        return f"{label}\n{content}"
     elif role == "system":
         return f"[SYSTEM]\n{content}"
     elif role == "scout":
@@ -413,11 +465,13 @@ def _format_message(msg: dict, tool_result_char_cap: int | None = None) -> str:
 # older messages are summarized to fit.
 _REFLECT_CONTEXT_BUDGET = 100_000
 
-# Per-tool-result body cap when formatting the attempt transcript. Bigger than
-# the legacy 300-char preview so reflect can actually verify claims against
-# what the tool returned (e.g., a fetched page body), but bounded so a single
-# 200kb result can't dominate the budget.
-_PER_TOOL_RESULT_CHAR_CAP = 5000
+# Per-tool-result body caps when formatting the attempt transcript, loosest
+# first. The first cap shows any ordinary result whole; the tighter ones apply
+# only when the transcript would not fit the budget. Until 2026-11-04 the
+# ladder started at 5,000, so a 12K search_web result was cut on a transcript
+# that used 5% of the budget, and the cut hid every web result.
+_PER_TOOL_RESULT_CHAR_CAP = 40_000
+_TOOL_RESULT_CAPS = (_PER_TOOL_RESULT_CHAR_CAP, 5000, 1500, 500)
 
 
 _GROUNDING_ID_PATTERNS = (
@@ -641,6 +695,7 @@ def _build_attempt_transcript_section(
     messages: list[dict],
     budget_tokens: int,
     turn_user_msg_id: int | None = None,
+    tool_view_out: dict | None = None,
 ) -> str:
     """Format the current attempt's transcript with verbatim tool results.
 
@@ -650,33 +705,54 @@ def _build_attempt_transcript_section(
 
     Budget handling: try at progressively tighter per-tool-result caps; if
     still over, drop oldest non-final messages with a one-line elision marker.
+
+    ``tool_view_out`` receives the tool text the grader was shown and the
+    text it was not (``shown`` / ``elided`` lists) for the version returned.
     """
     from core.context.tokens import get_estimator
 
     estimator = get_estimator()
     attempt_msgs = _messages_since_attempt_start(messages, turn_user_msg_id)
-    drop_roles = ("notice", "eval", "model_divider", "compaction")
+    # A `reflect` row inside the slice is an earlier turn's late deferred grade
+    # landing mid-turn; it is not part of this attempt's work.
+    drop_roles = ("notice", "eval", "model_divider", "compaction", "reflect")
     substantive = [m for m in attempt_msgs if m.get("role") not in drop_roles]
+
+    def _publish(view: dict) -> None:
+        if tool_view_out is not None:
+            tool_view_out.clear()
+            tool_view_out.update(view)
 
     if not substantive:
         return ""
 
-    for cap in (_PER_TOOL_RESULT_CHAR_CAP, 1500, 500):
-        formatted = [_format_message(m, tool_result_char_cap=cap) for m in substantive]
+    for cap in _TOOL_RESULT_CAPS:
+        view: dict = {}
+        formatted = [_format_message(m, tool_result_char_cap=cap, tool_view=view) for m in substantive]
         transcript = "\n\n---\n\n".join(formatted)
         if estimator.count(transcript) <= budget_tokens:
+            _publish(view)
             return transcript
 
     # Still over budget — keep most recent verbatim (cap=500), elide older.
     kept: list[str] = []
+    view = {}
     used = 0
-    for msg in reversed(substantive):
-        formatted_msg = _format_message(msg, tool_result_char_cap=500)
+    for idx in range(len(substantive) - 1, -1, -1):
+        msg = substantive[idx]
+        msg_view: dict = {}
+        formatted_msg = _format_message(msg, tool_result_char_cap=500, tool_view=msg_view)
         msg_tokens = estimator.count(formatted_msg)
         if used + msg_tokens > budget_tokens - 200:  # leave room for marker
+            for older in substantive[: idx + 1]:
+                if older.get("role") == "tool":
+                    view.setdefault("elided", []).append(older.get("content") or "")
             break
         kept.insert(0, formatted_msg)
+        for k, v in msg_view.items():
+            view.setdefault(k, []).extend(v)
         used += msg_tokens
+    _publish(view)
 
     dropped = len(substantive) - len(kept)
     if dropped > 0:
@@ -802,6 +878,7 @@ def _build_compact_evidence(
     turn_user_msg_id: int | None = None,
     grounding_out: dict | None = None,
     next_user_message: str = "",
+    tool_view_out: dict | None = None,
 ) -> str:
     """Build the evidence blob for reflect.
 
@@ -810,7 +887,8 @@ def _build_compact_evidence(
     scout's deliverables_plan and approach (if any), tool execution summary,
     and the user's request paired with the agent's final
     response. Tool result bodies are kept verbatim up to ``_PER_TOOL_RESULT_CHAR_CAP``
-    chars so reflect can verify claims against what tools actually returned.
+    chars (tighter only when the budget forces it) so reflect can verify
+    claims against what tools actually returned.
     """
     from pathlib import Path
 
@@ -974,6 +1052,7 @@ def _build_compact_evidence(
         messages,
         budget_tokens=transcript_budget,
         turn_user_msg_id=turn_user_msg_id,
+        tool_view_out=tool_view_out,
     )
     if transcript:
         parts.append("=" * 60)
@@ -991,6 +1070,8 @@ def _build_compact_evidence(
     )
     if grounding_out is not None:
         grounding_out.update(grounding)
+    if tool_view_out is not None:
+        tool_view_out["final"] = final_assistant or ""
     section = _format_grounding(grounding)
     if section:
         parts.append(section)
@@ -1021,6 +1102,7 @@ def _build_evidence(
     grounding_out: dict | None = None,
     turn_msg_id_range: tuple[int | None, int | None] | None = None,
     next_user_message: str = "",
+    tool_view_out: dict | None = None,
 ) -> tuple[str, str]:
     """Build evidence for reflect verification.
 
@@ -1045,6 +1127,10 @@ def _build_evidence(
     has been appended since.
 
     `next_user_message` is the user's reply to this turn, when there is one.
+
+    `tool_view_out` receives ``shown`` / ``elided`` strings: the tool-result
+    text the grader saw (transcript bodies and the provenance excerpts) and
+    the text it was not shown. The blindness guard reads them.
 
     Returns (user_request, evidence_summary).
     """
@@ -1080,6 +1166,7 @@ def _build_evidence(
     if not user_request:
         return "", ""
 
+    view: dict = {}
     evidence = _build_compact_evidence(
         session_id,
         user_request,
@@ -1093,10 +1180,16 @@ def _build_evidence(
         turn_user_msg_id=turn_user_msg_id,
         grounding_out=grounding_out,
         next_user_message=next_user_message,
+        tool_view_out=view,
     )
     scoped = _messages_since_attempt_start(messages, turn_user_msg_id)
+    provenance = tool_provenance(scoped)
     evidence += "\n\nTOOL PROVENANCE (paired requests/results; later records supersede failed earlier fetches):\n"
-    evidence += tool_provenance(scoped)
+    evidence += provenance
+    if tool_view_out is not None:
+        tool_view_out["shown"] = "\n".join(view.get("shown", []) + [provenance])
+        tool_view_out["elided"] = "\n".join(view.get("elided", []))
+        tool_view_out["final"] = view.get("final", "")
     return user_request, evidence
 
 
@@ -1628,8 +1721,42 @@ _PHANTOM_NEXT_MSG_RE = re.compile(
 _NO_FINAL_MARKER = "(no final assistant message)"
 _NEXT_MSG_SECTION = "USER'S NEXT MESSAGE"
 
+# Blindness check (2026-11-04, session 4c454e7ccb0c): a retry said search_web
+# "returned only an INTERNAL KNOWLEDGE dump" and that the agent "fabricated"
+# Tavily results and "never retrieved" machinelearningplus / the LangChain
+# forum. All of it sat in the same tool result, past the cut the grader saw.
+_BLIND_TOKEN_RE = re.compile(r"[A-Za-z][\w./-]{3,}\w")
+_BLIND_MIN_TOKENS = 2
 
-def phantom_evidence_reason(result: "ReflectResult", evidence: str, termination_reason: str | None) -> str | None:
+
+def _distinctive(tok: str) -> bool:
+    """A name-like token: mixed case, a digit, a separator, or a long word."""
+    return bool(re.search(r"[A-Z0-9._/-]", tok[1:])) or tok[0].isupper() or len(tok) >= 10
+
+
+def _blind_dispute_tokens(text: str, tool_view: dict) -> list[str]:
+    """Tokens the verdict cites that the agent's answer uses and that only the
+    elided tool text contains — the grader disputing support it never saw."""
+    elided = tool_view.get("elided") or ""
+    if not elided:
+        return []
+    shown = tool_view.get("shown") or ""
+    final = tool_view.get("final") or ""
+    hits: list[str] = []
+    for tok in dict.fromkeys(_BLIND_TOKEN_RE.findall(text)):
+        if len(tok) < 5 or not _distinctive(tok):
+            continue
+        if tok in final and tok in elided and tok not in shown:
+            hits.append(tok)
+    return hits
+
+
+def phantom_evidence_reason(
+    result: "ReflectResult",
+    evidence: str,
+    termination_reason: str | None,
+    tool_view: dict | None = None,
+) -> str | None:
     """Return why a non-pass verdict rests on evidence the grader was never shown, or None.
 
     Two claims are checked, both against the exact ``evidence`` string the
@@ -1641,6 +1768,11 @@ def phantom_evidence_reason(result: "ReflectResult", evidence: str, termination_
       tokens the verdict names occur anywhere in the evidence;
     * a "user's next message" the verdict quotes or relies on, when the
       evidence carries no USER'S NEXT MESSAGE section (sync grades never do).
+
+    A third check needs ``tool_view`` (from ``_build_evidence``): the verdict
+    names at least two things the agent's answer cites that appear in tool
+    output cut from the evidence and nowhere in the tool output shown. That
+    is the grader failing the agent for what the grader could not see.
 
     A verdict that fails either check is not a judgment about the turn — it
     is a hallucination — so the caller downgrades it to pass-with-lessons
@@ -1669,6 +1801,14 @@ def phantom_evidence_reason(result: "ReflectResult", evidence: str, termination_
         if no_output and result.failure_cause == "env":
             return (
                 "the verdict says the agent produced no output, but the turn terminated complete with a final response"
+            )
+
+    if tool_view:
+        blind = _blind_dispute_tokens(text, tool_view)
+        if len(blind) >= _BLIND_MIN_TOKENS:
+            return (
+                "the verdict disputes " + ", ".join(blind[:6]) + ", which appear in tool output that was cut "
+                "from the evidence the grader saw"
             )
     return None
 
@@ -1980,6 +2120,7 @@ async def reflect_on_session(
     correction = next_msg_correction(next_user_message) if next_user_message else None
     # Off-loop: evidence assembly loads the full transcript from the DB.
     grounding: dict = {}
+    tool_view: dict = {}
     user_request, evidence = await asyncio.to_thread(
         _build_evidence,
         session_id,
@@ -1993,6 +2134,7 @@ async def reflect_on_session(
         grounding_out=grounding,
         turn_msg_id_range=turn_msg_id_range,
         next_user_message=next_user_message,
+        tool_view_out=tool_view,
     )
     if not user_request or not evidence:
         r = ReflectResult(verdict="pass", reasoning="No user request found to verify")
@@ -2193,7 +2335,7 @@ async def reflect_on_session(
             # grader was never shown is a hallucination, not a grade. Downgrade
             # to pass-with-lessons (same shape as the confidence floor) so it
             # neither retries the turn nor pages the user.
-            _phantom = phantom_evidence_reason(result, evidence, termination_reason)
+            _phantom = phantom_evidence_reason(result, evidence, termination_reason, tool_view)
             if _phantom:
                 logger.warning(
                     "Reflect phantom-evidence guard: %s -> pass for session %s (%s): %s",
