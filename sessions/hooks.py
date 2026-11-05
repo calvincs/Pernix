@@ -9,6 +9,7 @@ session's SSE for the duration if done inline.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import re
 import time
@@ -662,13 +663,82 @@ async def _await_deferred_grade(session_obj, snap: _DeferredGrade) -> str:
     if not settings.reflect_next_turn_grading:
         await asyncio.sleep(delay)
         return ""
-    deadline = time.monotonic() + delay
+    started = time.monotonic()
+    deadline = started + delay
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0 or _real_turn_started(session_obj, snap):
             break
         await asyncio.sleep(min(_GRADE_POLL_S, remaining))
+    # The quiet period ran out, but the harness is still finishing this task
+    # by itself. Hold the grade until that work settles: grading now judges a
+    # half-built answer, and the observe-only "retry" it produces becomes a
+    # false bell notification and a false lesson (session c8152c896a11: the
+    # partial turn was graded "retry" at 300s while the resume turn was four
+    # minutes into the work that finished it). Bounded, so a worker that never
+    # ends cannot hold the grade forever.
+    while not _real_turn_started(session_obj, snap):
+        if time.monotonic() - started >= _RESUME_CHAIN_MAX_WAIT_S:
+            break
+        if not await asyncio.to_thread(_resume_chain_live, session_obj):
+            break
+        await asyncio.sleep(_RESUME_CHAIN_POLL_S)
     return await asyncio.to_thread(_next_user_message, snap)
+
+
+# How long a pending grade waits on a live resume chain before grading anyway,
+# and how often it looks. A resume chain is workers plus the turns they wake.
+_RESUME_CHAIN_MAX_WAIT_S = 3600
+_RESUME_CHAIN_POLL_S = 10.0
+
+
+def _resume_chain_live(session_obj) -> bool:
+    """True while the harness itself will carry this task further: a
+    worker-resume turn is running, or this session has workers still working
+    (a worker that finishes while the parent is idle wakes it — the Gap-1
+    resume in sessions/manager.py). Runs in a thread (DB read)."""
+    from sessions import state_v2 as sv2
+
+    try:
+        synthetic = getattr(session_obj, "_synthetic_turn_ids", None) or set()
+        state = sv2._current_state(session_obj)
+        if getattr(session_obj, "_turn_id", 0) in synthetic and state is not sv2.SessionStateV2.IDLE_READY:
+            return True
+        if getattr(session_obj, "_watched_worker_ids", None):
+            return True
+        from core.extensions.orchestration import _worker_is_mid_turn
+        from sessions.manager import get_manager
+
+        manager = get_manager()
+        return any(_worker_is_mid_turn(manager.get(wid)) for wid in manager.worker_inventory(session_obj))
+    except Exception as e:
+        logger.debug("resume-chain check failed for %s: %s", getattr(session_obj, "session_id", "?"), e)
+        return False
+
+
+def _extend_to_resume_chain(session_obj, snap: _DeferredGrade) -> _DeferredGrade:
+    """The snapshot with its window stretched over the resume turns that
+    finished its work, when only harness resume turns ran since it was taken.
+
+    The resume turn is skipped as a grade of its own (it would cancel this
+    one), so this grade is the only one that can see the reply the user
+    actually got. The user request stays the turn's real one — a resume turn's
+    own "user" row is the harness talking to itself."""
+    live_turn = getattr(session_obj, "_turn_id", 0)
+    if live_turn == snap.turn_id or _real_turn_started(session_obj, snap):
+        return snap
+    try:
+        last_id = db.last_message_id(snap.session_id)
+    except Exception as e:
+        logger.debug("resume-chain window read failed for %s: %s", snap.session_id, e)
+        return snap
+    if last_id is None or (snap.turn_last_msg_id is not None and last_id <= snap.turn_last_msg_id):
+        return snap
+    return dataclasses.replace(
+        snap,
+        turn_last_msg_id=last_id,
+        termination_reason=getattr(session_obj, "termination_reason", None) or snap.termination_reason,
+    )
 
 
 async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj, gate_results, emit=None) -> None:
@@ -757,6 +827,7 @@ async def _deferred_reflect_task(session_obj, snap: _DeferredGrade) -> None:
                 " with the user's next message as evidence" if next_user_message else "",
             )
 
+        snap = await asyncio.to_thread(_extend_to_resume_chain, session_obj, snap)
         await _run_deferred_reflect(session_obj, snap, next_user_message=next_user_message)
 
 
