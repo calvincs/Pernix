@@ -734,10 +734,20 @@ def _extend_to_resume_chain(session_obj, snap: _DeferredGrade) -> _DeferredGrade
         return snap
     if last_id is None or (snap.turn_last_msg_id is not None and last_id <= snap.turn_last_msg_id):
         return snap
+    # The transcript reflect shows is the resume turn's (it slices from the
+    # latest scout marker), so the tool record must be that turn's too. Keeping
+    # the first turn's summary (3x spawn_worker) beside a transcript of 3x
+    # get_worker_result read to the grader as the user re-sending the request:
+    # a false "escalate" and a false bell (session 4b432ce67064).
+    turn = getattr(session_obj, "turn", None)
     return dataclasses.replace(
         snap,
         turn_last_msg_id=last_id,
         termination_reason=getattr(session_obj, "termination_reason", None) or snap.termination_reason,
+        tool_summary=dict(getattr(turn, "tool_summary", None) or {}) or snap.tool_summary,
+        tool_summary_attempts=[dict(a) for a in (getattr(turn, "tool_summary_attempts", None) or [])]
+        or snap.tool_summary_attempts,
+        scout_report=getattr(session_obj, "last_scout_report", None) or snap.scout_report,
     )
 
 

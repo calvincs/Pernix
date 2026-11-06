@@ -246,3 +246,33 @@ async def test_the_pending_marker_clears_when_the_grade_finishes(mgr, monkeypatc
         if not s._deferred_grade_pending:
             break
     assert s._deferred_grade_pending == 0
+
+
+# --- 4. the stretched window carries the resume turn's tool record ----------
+
+
+def test_the_stretched_grade_uses_the_resume_turns_tool_record(mgr):
+    """Session 4b432ce67064: a 3x spawn_worker summary beside a transcript of
+    3x get_worker_result read as the user re-sending the request."""
+    from sessions.hooks import _DeferredGrade, _extend_to_resume_chain
+
+    sid = mgr.create_session(title="P")
+    s = mgr.get(sid)
+    db.add_message(sid, "user", "summarize these pages")
+    last = db.add_message(sid, "assistant", "3 workers started.")
+    snap = _DeferredGrade(
+        session_id=sid,
+        ticket=1,
+        turn_id=2,
+        turn_user_msg_id=None,
+        attempt=1,
+        turn_last_msg_id=last,
+        tool_summary={"spawn_worker": {"calls": 3, "failures": 0, "total_latency_ms": 60}},
+    )
+    s._turn_id = 3
+    s._synthetic_turn_ids.add(3)
+    s.turn.tool_summary = {"get_worker_result": {"calls": 3, "failures": 0, "total_latency_ms": 9}}
+    db.add_message(sid, "assistant", "Here is the digest.")
+
+    out = _extend_to_resume_chain(s, snap)
+    assert list(out.tool_summary) == ["get_worker_result"]
