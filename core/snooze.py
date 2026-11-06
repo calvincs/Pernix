@@ -772,7 +772,7 @@ class SnoozeRunner:
     # preferences show up (audit P2).
     _TRANSCRIPT_VIEW_CHARS = 40000
 
-    _USER_INSIGHTS_PROMPT = """You are a user profiling agent. Analyze this conversation and extract facts about the USER — not about the technical work itself (that's handled separately).
+    _USER_INSIGHTS_PROMPT = """You are a user profiling agent. Analyze this conversation and extract facts about the USER as a person — not about the technical work itself (that's handled separately), not the content of instructions, job prompts or specs the user wrote, and not the state of any system, key, quota or job. Each fact must name the user as its subject.
 
 Extract ONLY information that would help a future AI assistant understand and serve this user better. Output a JSON array of entries, each:
 {
@@ -818,7 +818,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                      AND {db.SQL_SESSION_IS_IDLE}
                      AND s.updated_at < ?
                      AND s.archived_at IS NULL
-                     AND s.session_type NOT IN ('worker', 'canary')
+                     AND COALESCE(s.session_type, 'normal') = 'normal'  -- only the person's own sessions
                      AND (
                          SELECT COUNT(*) FROM messages m
                          WHERE m.session_id = s.id

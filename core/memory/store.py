@@ -1036,6 +1036,39 @@ class MemoryStore:
         logger.info("Updated memory entry epoch=%d in '%s'", epoch, file_name)
         return f"Updated entry epoch={epoch} in '{file_name}'"
 
+    def retype_entry(self, file_name: str, epoch: int, new_type: str) -> bool:
+        """Change one entry's @type in markdown and the index. True on change."""
+        file_name = self._validate_name(file_name)
+        if not re.fullmatch(r"[a-z_]{2,20}", new_type or ""):
+            raise ValueError(f"Invalid entry type: {new_type}")
+        marker = f"<!-- @epoch: {epoch} -->"
+        changed = {"n": 0}
+
+        def transform(raw: str) -> str | None:
+            sections = raw.split("\n---\n")
+            out = []
+            for sec in sections:
+                if marker in sec and "<!-- @archived: true -->" not in sec:
+                    new = re.sub(r"<!-- @type:\s*\w+\s*-->", f"<!-- @type: {new_type} -->", sec, count=1)
+                    if new != sec:
+                        changed["n"] += 1
+                        sec = new
+                out.append(sec)
+            return "\n---\n".join(out) if changed["n"] == 1 else None
+
+        if not self.rewrite_file(file_name, transform):
+            return False
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE memory_fts SET entry_type = ? WHERE file_name = ? AND epoch = ?",
+                (new_type, file_name, str(epoch)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+
     def delete_entry(self, file_name: str, epoch: int) -> str:
         """Remove an entry (identified by epoch) from its file and FTS5 index.
 

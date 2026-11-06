@@ -152,3 +152,53 @@ async def test_a_merge_that_does_not_reduce_is_rejected_and_not_retried(store, m
 def test_health_survey_counts_profile_entries(store):
     _fact(store, "A profile fact long enough to keep", 1000)
     assert store._survey()["profile_entries"] == 1
+
+
+# ── labeling: only facts about the person (follow-up 2026-11-06) ────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Findings worth persisting go to the findings memory file tagged by run.",
+        "The user's charter enforces a strict 15 tool-call budget per run with an allow-list.",
+        "User's API key is at its daily limit, so delegated workers fail with 403.",
+    ],
+)
+def test_system_and_job_content_is_not_a_profile_fact(text):
+    assert profile.observation_rejection(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The user prefers the conclusion first, then the reasoning.",
+        "User corrects unit mistakes quickly and expects metric units.",
+    ],
+)
+def test_person_facts_pass(text):
+    assert profile.observation_rejection(text) == ""
+
+
+async def test_reflect_writes_no_observations_from_automated_sessions(monkeypatch, store):
+    from core import reflect
+    from db import models as db
+
+    monkeypatch.setattr("config.settings.embedding_model", "")
+    monkeypatch.setattr("core.memory.store.get_memory_store", lambda: store)
+    result = reflect.ReflectResult(verdict="pass", reasoning="")
+    result.experience = {"user_observations": ["The user prefers short replies in every chat."]}
+    for stype, expected in (("cron", 0), ("worker", 0), ("normal", 1)):
+        sid = db.create_session(title=f"t-{stype}", session_type=stype)
+        await reflect._save_user_observations(sid, result)
+        assert len(_live_profile(store)) == expected, stype
+
+
+def test_retype_entry_changes_markdown_and_index(store):
+    _fact(store, "Findings go to the findings file each run.", 1000)
+    assert store.retype_entry("user.profile", 1000, "note")
+    assert _live_profile(store) == []
+    from core.memory.format import parse_entries_from_markdown
+
+    entries = parse_entries_from_markdown("user.profile", store.read_file("user.profile"))
+    assert entries[0].entry_type == "note"

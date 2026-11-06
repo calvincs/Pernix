@@ -68,7 +68,7 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
   - clarification_loop: true if the user had to rephrase, repeat themselves, or correct the agent's understanding of what they wanted.
   - first_response_sufficient: true if the first substantive response would have satisfied the request without further prodding from the user.
   - friction: what degraded the experience, as reusable labels — e.g. "misread_intent", "over_delivered", "under_delivered", "tone_mismatch", "slow_progress", "tool_noise", "excessive_questions", "ignored_constraint". Empty array when the interaction was smooth. Coin a new label when none fits.
-  - user_observations: max 3 durable facts about the user this turn actually revealed — a stated preference, an expertise signal, a communication-style pattern, a correction they made. Each must be self-contained (readable without the transcript). Empty array when the turn revealed nothing new about them.
+  - user_observations: max 3 durable facts about the user as a person that they revealed in conversation this turn — a stated preference, an expertise signal, a communication-style pattern, a correction they made. Each must be self-contained and name the user as its subject. Not a user fact: the content of task instructions, job or cron prompts, charters or specs the user wrote for the agent; the state of a system, key, quota, job, file or tool; anything about the task's subject. Empty array when the turn revealed nothing new about them.
   - note: why the interaction went well or poorly FOR THE USER and what would have made it better. This is about the interaction, not task completion — do not restate the verdict or diagnostic.
   Ground every field in transcript evidence: the user's actual words and reactions, not your judgment of the work's quality.
 
@@ -132,7 +132,7 @@ Output ONE JSON object with exactly these keys:
     NOT a lesson: that something worked as expected ("http_get fetched the page fine"); restating the task; praise; generic advice ("verify claims", "be thorough", "follow the format"); advice about how the harness grades or presents results; anything already listed under LESSONS ON FILE (unless this turn contradicts it — then say so).
     A lesson must hold in general, not only in this transcript. If the transcript shows it both ways, write nothing.
     An empty list is the normal answer for a routine turn.
-- user_observations: 0-2 durable, self-contained facts about the USER this turn revealed (a preference, a correction, expertise). Never infer from task success. Empty for most turns.
+- user_observations: 0-2 durable, self-contained facts about the USER as a person, revealed in conversation this turn (a preference, a correction, expertise), each naming the user as its subject. Not a user fact: the content of task instructions, job or cron prompts, charters or specs the user wrote for the agent; the state of a system, key, quota, job, file or tool; anything about the task's subject. Never infer from task success. Empty for most turns.
 - what_worked: one short phrase, or "".
 - what_failed: one short phrase, or "".
 - unverified_claims: claims in the final reply that NO tool result in the transcript supports (ids, numbers, names, API names). Empty when every claim is grounded. Quote them exactly.
@@ -2183,9 +2183,14 @@ async def _save_user_observations(session_id: str, result: ReflectResult) -> Non
     if not observations or not (settings.reflect_experience and settings.memory_recall):
         return
     try:
-        # Canary sessions never write memory (plan §5) — same rule as distill.
+        # Only interactive sessions describe the user. In worker, cron, canary,
+        # RLM and snooze sessions the "user" turn is a job's instructions or a
+        # parent agent, and reflect filed those instructions as facts about the
+        # person (2026-11-06: ~20% of profile entries).
         session = db.get_session(session_id) or {}
-        if session.get("session_type") == "canary":
+        from core.memory.profile import PROFILE_SESSION_TYPES
+
+        if (session.get("session_type") or "normal") not in PROFILE_SESSION_TYPES:
             return
         from core.memory.store import get_memory_store
 

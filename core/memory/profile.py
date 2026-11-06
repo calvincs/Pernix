@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 
 from config import settings
@@ -31,6 +32,39 @@ from config import settings
 logger = logging.getLogger("pernix.memory.profile")
 
 _DAY = 86400
+
+# Sessions whose user turns come from the person. Everything else (worker,
+# cron, canary, rlm, snooze) speaks for a job or a parent agent.
+PROFILE_SESSION_TYPES = frozenset({"normal"})
+
+_PERSON_RE = re.compile(r"\b(?:the user|user's|users?|they|their|them|he|she|his|her)\b", re.IGNORECASE)
+# Subjectless or named-subject facts: "Prefers …", "Uses …", "<Name> prefers …".
+_LEADING_VERB_RE = re.compile(
+    r"^(?:[A-Z][a-z]+\s+)?(?:prefers|uses|wants|expects|likes|dislikes|values|communicates|writes|asks|works|"
+    r"reads|runs|tends|avoids|favors|favours|is|has|cares|trusts|distrusts|acts|finds|enjoys|believes|thinks|"
+    r"integrates|speaks|learns|plans|builds)\b",
+    re.IGNORECASE,
+)
+# System state and job content — not facts about the person.
+_SYSTEM_RE = re.compile(
+    r"\b(?:cron|charter|quota|rate limit|daily limit|api key|key is|403|429|tool[- ]calls?|budget|allow-list|"
+    r"memory file|state file|this run|each run|per run|the run's|the drive|rung|pipeline)\b",
+    re.IGNORECASE,
+)
+
+
+def observation_rejection(text: str) -> str:
+    """Why an automatic profile fact is not about the person ("" = keep).
+
+    A user fact names the user as its subject; text about jobs, charters,
+    keys, quotas or runs is system state or task content."""
+    t = (text or "").strip()
+    named = re.match(r"^(?!(?:Pernix|The|This|That|Each|It|Findings)\b)[A-Z][a-z]+\s+[a-z]+s\b", t)
+    if not (_PERSON_RE.search(t[:200]) or _LEADING_VERB_RE.match(t) or named):
+        return "no person as subject"
+    if len(_SYSTEM_RE.findall(t)) >= 2:
+        return "describes a system or job, not the person"
+    return ""
 
 
 def _profile_vectors(conn):
@@ -101,6 +135,9 @@ def save_fact(store, content: str, *, source: str, tags: str, weight: str = "nor
     content = (content or "").strip()
     if len(content) < 20:
         return "Skipped: too short"
+    why = observation_rejection(content)
+    if why:
+        return f"Skipped: {why}"
     try:
         if _written_today(store) >= max(0, int(settings.profile_daily_cap)):
             return "Skipped: daily profile cap reached"

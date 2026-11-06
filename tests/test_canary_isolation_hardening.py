@@ -78,7 +78,9 @@ def test_user_insight_sweep_sql_excludes_canary_sessions():
     import core.snooze
 
     src = Path(core.snooze.__file__).read_text(encoding="utf-8")
-    assert "AND s.session_type NOT IN ('worker', 'canary')" in src
+    # Since 2026-11-06 only normal sessions are profiled, which excludes
+    # canary (and worker, cron, rlm, snooze) sessions.
+    assert "AND COALESCE(s.session_type, 'normal') = 'normal'" in src
     assert "AND s.session_type != 'worker'" not in src
 
 
