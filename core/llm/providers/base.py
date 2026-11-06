@@ -29,6 +29,7 @@ class ProviderProtocol(Protocol):
         model: str = "",
         max_tokens: int = 4096,
         temperature: float | None = None,
+        response_format: dict | None = None,
     ) -> ChatResponse: ...
 
     async def chat_stream(

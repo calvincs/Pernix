@@ -178,9 +178,15 @@ class OpenAIProvider:
         max_tokens: int = 4096,
         temperature: float | None = None,
         _retried: bool = False,
+        response_format: dict | None = None,
     ) -> ChatResponse:
         model = self._model(model)
         payload = self._build_payload(messages, model, max_tokens, tools, temperature, stream=False)
+        # JSON mode: the server constrains decoding to valid JSON from the
+        # first token. Reflect's plain-text replies failed to parse on 7 of 12
+        # parallel probes (prose, `{}`, empty); with this set, 11 of 12 parsed.
+        if response_format:
+            payload["response_format"] = response_format
 
         client = self._get_client()
         resp = await client.post(
@@ -192,7 +198,13 @@ class OpenAIProvider:
             logger.info("Model %s requires max_completion_tokens; retrying", model)
             self._needs_max_completion_tokens.add(model)
             return await self.chat(
-                messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, _retried=True
+                messages,
+                tools=tools,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                _retried=True,
+                response_format=response_format,
             )
         resp.raise_for_status()
         data = resp.json()
