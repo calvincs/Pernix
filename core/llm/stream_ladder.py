@@ -215,8 +215,15 @@ async def stream_with_failover(
     failure_reason: str | None = None,
     surface_context_overflow: bool = False,
     label: str = "LLM stream",
+    on_activity=None,
 ) -> StreamOutcome:
     """Stream one response, retrying and failing over as needed.
+
+    on_activity    — called on every provider event. A long generation is
+                     work: a worker streaming a 130 s file_write call emitted
+                     no event at all (tool-call deltas are not forwarded), so
+                     await_workers read it as idle > 120 s and gave up on it
+                     (field case, session 0e6c653fae70).
 
     messages       — what to send now (already normalized for the provider).
     base_messages  — the compiled, un-normalized messages. Re-normalized for
@@ -270,6 +277,8 @@ async def stream_with_failover(
                 session_created_at=sched_created_at,
                 session_priority=sched_priority,
             ):
+                if on_activity is not None:
+                    on_activity()
                 if event.type == StreamEventType.TOKEN and event.content:
                     content += event.content
                     emit({"type": "stream.token", "content": event.content})
