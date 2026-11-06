@@ -97,6 +97,13 @@ def _remove_from_index(store, file_name: str, epochs: set[int]) -> None:
                 "DELETE FROM memory_hits WHERE file_name = ? AND epoch = ?",
                 (file_name, str(epoch)),
             )
+            # And its embedding: orphan vectors were 12k of 25.5k rows (105 MB
+            # of a 166 MB index) on the box by 2026-11-06 — every archive and
+            # move left one, and only a full reindex pruned them.
+            conn.execute(
+                "DELETE FROM vectors WHERE file_name = ? AND epoch = ?",
+                (file_name, str(epoch)),
+            )
         # Recount from FTS5 as the authoritative source
         remaining = conn.execute(
             "SELECT COUNT(*) as cnt FROM memory_fts WHERE file_name = ?",
@@ -1077,9 +1084,21 @@ async def compact_memory_files(store, db, is_cancelled: Callable[[], bool]) -> i
         rows.sort(reverse=True)
         return [n for _, n in rows[: max(1, int(settings.memory_compact_files_per_cycle))]]
 
+    # Lessons nobody needed for 90 days (no-op until 90 days after the
+    # lessons ledger started on this box).
+    from core import lessons as _lessons
+
+    retired_lessons = await asyncio.to_thread(_lessons.retire_unused, store, db)
+    if retired_lessons:
+        logger.info("Snooze: retired %d unused lessons", retired_lessons)
+    # Live twins first (bounded): the archived copies they leave are exactly
+    # what the compaction below drops.
+    twins = await asyncio.to_thread(compact.dedup_live_twins, store, max_groups=200, is_cancelled=is_cancelled)
+    if twins["retired"]:
+        logger.info("Snooze: retired %d live duplicate copies (%d bodies)", twins["retired"], twins["groups"])
     names = await asyncio.to_thread(pick)
     if not names or is_cancelled():
-        return 0
+        return twins["retired"]
     totals = await asyncio.to_thread(compact.compact_files, store, names, is_cancelled=is_cancelled)
     for name in names:
         try:
@@ -1087,7 +1106,7 @@ async def compact_memory_files(store, db, is_cancelled: Callable[[], bool]) -> i
         except OSError:
             seen.pop(name, None)
     db.set_snooze_state("compact_mtimes", json.dumps(seen))
-    dropped = totals["dropped_live_twin"] + totals["dropped_extra_copy"]
+    dropped = totals["dropped_live_twin"] + totals["dropped_extra_copy"] + twins["retired"]
     if dropped:
         logger.info(
             "Snooze: compacted %d file(s): dropped %d tombstones, %.1f MB -> %.1f MB",
@@ -1097,6 +1116,34 @@ async def compact_memory_files(store, db, is_cancelled: Callable[[], bool]) -> i
             totals["bytes_after"] / 1e6,
         )
     return dropped
+
+
+def _tidy_index(store, db) -> None:
+    """Weekly: prune orphan vectors and merge the FTS5 segments.
+
+    FTS5 keeps deleted rows inside its b-tree segments until a merge; on the
+    box the keyword index was 45 MB over 10 MB of live text. 'optimize'
+    rewrites it as one segment. Neither touches markdown or live rows.
+    """
+    last = db.get_snooze_state("last_index_tidy")
+    if last:
+        try:
+            if (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() < 7 * 86400:
+                return
+        except ValueError:
+            pass
+    conn = store._connect()
+    try:
+        pruned = store._prune_orphan_vectors(conn)
+        conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('optimize')")
+        conn.commit()
+    except Exception as e:
+        logger.warning("Snooze: index tidy failed: %s", e)
+        return
+    finally:
+        conn.close()
+    db.set_snooze_state("last_index_tidy", datetime.now(timezone.utc).isoformat())
+    logger.info("Snooze: index tidied (%d orphan vectors pruned, FTS optimized)", pruned)
 
 
 def _notify_churn(health: dict) -> None:
@@ -1155,6 +1202,7 @@ async def reconcile_index(store, db, is_cancelled: Callable[[], bool]) -> None:
     db.set_snooze_state("last_index_reconcile", datetime.now(timezone.utc).isoformat())
 
     _notify_churn(health)
+    await asyncio.to_thread(_tidy_index, store, db)
 
     if health.get("action") == "reindexed":
         logger.info("Snooze: index reconciliation triggered reindex (%s)", health)

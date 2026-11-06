@@ -152,3 +152,91 @@ def files_by_tombstones(store, limit: int) -> list[str]:
         rows.append((size, md_path.stem))
     rows.sort(reverse=True)
     return [name for _, name in rows[:limit]]
+
+
+# ── live twins: the same body live more than once ───────────────────────
+
+_TYPE_RANK = {"lesson": 0, "decision": 1, "skill": 2, "profile": 3, "finding": 4, "note": 5}
+
+
+def live_twin_groups(store) -> list[list[dict]]:
+    """Groups of live index rows with the same body (whitespace-collapsed)
+    and type. Different types are left alone: a lesson and a note with the
+    same words are read by different readers."""
+    from collections import defaultdict
+
+    conn = store._connect()
+    try:
+        rows = conn.execute("SELECT file_name, epoch, content, entry_type FROM memory_fts").fetchall()
+        hits = {
+            (r[0], str(r[1])): int(r[2] or 0)
+            for r in conn.execute("SELECT file_name, epoch, hit_count FROM memory_hits")
+        }
+    finally:
+        conn.close()
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for fn, ep, content, et in rows:
+        groups[(body_key(content), et or "note")].append(
+            {"file": fn, "epoch": int(ep), "type": et or "note", "hits": hits.get((fn, str(ep)), 0)}
+        )
+    return [g for g in groups.values() if len(g) > 1]
+
+
+def _keeper(group: list[dict]) -> dict:
+    """The copy to keep: in the type's home when it has one, then the most
+    used, then the oldest, then by file name (deterministic)."""
+    from core.memory.routing import home_for, home_ok
+
+    def rank(r):
+        homed = home_for(r["type"], r["file"]) is not None or r["type"] in ("profile",)
+        in_home = home_ok(r["type"], r["file"]) if homed else True
+        return (0 if in_home else 1, -r["hits"], r["epoch"], r["file"])
+
+    return min(group, key=rank)
+
+
+def dedup_live_twins(store, *, max_groups: int | None = None, is_cancelled=lambda: False) -> dict:
+    """Keep one live copy of each duplicated body; archive the others.
+
+    Hits of the retired copies are summed into the keeper. Archived copies
+    are then tombstones whose body is live, which the compaction rung drops.
+    """
+    from core.memory.sweeps import archive_entries
+
+    groups = live_twin_groups(store)
+    if max_groups is not None:
+        groups = groups[:max_groups]
+    retire: dict[str, set[int]] = {}
+    hit_moves: list[tuple[str, int, int]] = []
+    for g in groups:
+        keep = _keeper(g)
+        for r in g:
+            if r is keep:
+                continue
+            retire.setdefault(r["file"], set()).add(r["epoch"])
+            if r["hits"]:
+                hit_moves.append((keep["file"], keep["epoch"], r["hits"]))
+    # Same-file twins can share an epoch with the keeper: never archive it.
+    keepers = {(_keeper(g)["file"], _keeper(g)["epoch"]) for g in groups}
+    retired = 0
+    for fn, epochs in retire.items():
+        if is_cancelled():
+            break
+        epochs = {e for e in epochs if (fn, e) not in keepers}
+        if not epochs:
+            continue
+        archive_entries(store, fn, epochs)
+        retired += len(epochs)
+    if hit_moves:
+        conn = store._connect()
+        try:
+            for fn, ep, n in hit_moves:
+                conn.execute(
+                    "INSERT INTO memory_hits (file_name, epoch, hit_count, last_hit_at) VALUES (?, ?, ?, 0) "
+                    "ON CONFLICT(file_name, epoch) DO UPDATE SET hit_count = hit_count + ?",
+                    (fn, str(ep), n, n),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    return {"groups": len(groups), "retired": retired}

@@ -478,6 +478,98 @@ def pitfalls_block(message: str, tools: list[str] | None = None, *, session_id: 
     return header + "\n" + "\n".join(lines)
 
 
+def activity(keys: list[tuple[str, int]]) -> dict[tuple[str, int], dict]:
+    """Per lesson: times shown, times it helped, times the error recurred,
+    and when it last helped. "Helped" = shown in a session where that lesson
+    has no later 'recurred' event. Empty on any failure."""
+    if not keys:
+        return {}
+    out: dict[tuple[str, int], dict] = {}
+    try:
+        conn = _conn()
+        try:
+            for fn, ep in set(keys):
+                rows = conn.execute(
+                    "SELECT session_id, at, event FROM lesson_events WHERE file_name = ? AND epoch = ? ORDER BY at",
+                    (fn, str(ep)),
+                ).fetchall()
+                if not rows:
+                    continue
+                recurred_sessions = {sid for sid, _, ev in rows if ev == "recurred"}
+                helped = [at for sid, at, ev in rows if ev == "shown" and sid not in recurred_sessions]
+                out[(fn, int(ep))] = {
+                    "shown": sum(1 for *_, ev in rows if ev == "shown"),
+                    "recurred": sum(1 for *_, ev in rows if ev == "recurred"),
+                    "helped": len(helped),
+                    "last_helped": max(helped, default=0),
+                    "last_shown": max((at for _, at, ev in rows if ev == "shown"), default=0),
+                }
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("lesson activity failed: %s", e)
+    return out
+
+
+RETIRE_AFTER_DAYS = 90
+
+
+def retire_unused(store, db, *, limit: int = 50, now: int | None = None) -> int:
+    """Archive lessons nobody has needed for 90 days. Returns lessons retired.
+
+    Nothing retires before 90 days after the lessons ledger started (the
+    first run records the start): before 2026-11-06 no channel showed a
+    lesson to the agent, so "never shown" said nothing about value. After
+    that, a lesson is retired only when ALL hold:
+      * written more than 90 days ago;
+      * not shown (hint or pitfalls) in the last 90 days;
+      * no agent recall hit in the last 90 days.
+    A lesson in use is shown, so it stays. Archived, not deleted: the copy
+    stays in its file as the record and can be reopened.
+    """
+    now = now or int(time.time())
+    start = db.get_snooze_state("lessons_ledger_start")
+    if not start:
+        db.set_snooze_state("lessons_ledger_start", str(now))
+        return 0
+    cutoff = now - RETIRE_AFTER_DAYS * _DAY
+    if int(start) > cutoff:
+        return 0
+    conn = store._connect()
+    try:
+        rows = conn.execute(
+            "SELECT f.file_name, f.epoch FROM memory_fts f WHERE f.entry_type = 'lesson' AND CAST(f.epoch AS INTEGER) < ? "
+            "AND NOT EXISTS (SELECT 1 FROM memory_hits h WHERE h.file_name = f.file_name AND h.epoch = f.epoch "
+            "AND h.last_hit_at >= ?)",
+            (cutoff, cutoff),
+        ).fetchall()
+    finally:
+        conn.close()
+    lconn = _conn()
+    try:
+        shown = {
+            (r[0], str(r[1]))
+            for r in lconn.execute("SELECT DISTINCT file_name, epoch FROM lesson_events WHERE at >= ?", (cutoff,))
+        }
+    finally:
+        lconn.close()
+    from core.memory.sweeps import archive_entries
+
+    by_file: dict[str, set[int]] = {}
+    for fn, ep in rows:
+        if (fn, str(ep)) in shown:
+            continue
+        by_file.setdefault(fn, set()).add(int(ep))
+        if sum(len(v) for v in by_file.values()) >= limit:
+            break
+    for fn, eps in by_file.items():
+        archive_entries(store, fn, eps)
+    n = sum(len(v) for v in by_file.values())
+    if n:
+        logger.info("Lessons: retired %d unused for %d days", n, RETIRE_AFTER_DAYS)
+    return n
+
+
 def usage_stats(days: int = 7) -> dict:
     """Shown / recurred counts per channel over the window."""
     try:

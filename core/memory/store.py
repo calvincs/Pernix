@@ -353,10 +353,15 @@ class MemoryStore:
             revived = False
             raw = md_path.read_text(encoding="utf-8")
             if is_file_archived(raw):
-                raw = raw.replace("\n<!-- @archived: true -->", "", 1)
+                # Reopen with every old entry archived. Stripping only the
+                # header marker brought back every entry a merge had already
+                # moved out — a live copy in two files for each of them.
+                from core.memory.format import reopen_archived_file
+
+                raw = reopen_archived_file(raw)
                 md_path.write_text(raw, encoding="utf-8")
                 revived = True
-                logger.info("Revived archived memory file on append: %s", file_name)
+                logger.info("Revived archived memory file on append (old entries stay archived): %s", file_name)
 
             # File lock + DB commit must be atomic to prevent index/markdown drift.
             # Keep fcntl lock held until DB commit completes.
@@ -1551,9 +1556,17 @@ class MemoryStore:
             return []
 
         now_ts = int(time.time())
+        # Use refreshes a lesson (2026-11-06): age runs from the later of when
+        # it was written and when it last helped (shown, error did not come
+        # back). A lesson shown >= 3 times that never helped sinks by half.
+        from core.lessons import activity
+
+        act = activity([(r.entry.file_name, r.entry.epoch) for r in lessons])
         decayed: list[SearchResult] = []
         for r in lessons:
-            age_days = max(0, (now_ts - int(r.entry.epoch or now_ts)) / 86400.0)
+            a = act.get((r.entry.file_name, int(r.entry.epoch)), {})
+            since = max(int(r.entry.epoch or now_ts), int(a.get("last_helped", 0)))
+            age_days = max(0, (now_ts - since) / 86400.0)
             if age_days < 14:
                 factor = 1.0
             elif age_days < 60:
@@ -1562,6 +1575,8 @@ class MemoryStore:
                 factor = 0.25
             else:
                 factor = 0.05
+            if a.get("recurred", 0) >= 3 and not a.get("helped", 0):
+                factor *= 0.5
             # SearchResult is a dataclass — replace the score field.
             from dataclasses import replace as _replace
 

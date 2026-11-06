@@ -198,9 +198,11 @@ def test_add_entry_revives_archived_file(store):
 
     raw = store.read_file("pernix.casting")
     assert not is_file_archived(raw)
-    # Both the prior entry and the new one are live and indexed again.
+    # Only the new entry is live. archive_file's one caller (consolidation)
+    # moves every entry out first, so reviving the old ones made a second
+    # live copy of each (2026-11-06: 4,088 live duplicates on the box).
     counts = {f.name: f.entry_count for f in store.list_files()}
-    assert counts["pernix.casting"] == 2
+    assert counts["pernix.casting"] == 1
     assert store.health_check()["in_sync"] is True
 
 

@@ -222,3 +222,62 @@ def test_pitfalls_skip_a_second_lesson_on_the_same_command(store):
     _lesson(store, "This image has no `dig`; prefer dns.google resolve via http_get for MX lookups")
     block = lessons.pitfalls_block("MX records lookup with dig", ["bash"])
     assert block.count("dns.google") == 1
+
+
+# ── lifecycle: use keeps a lesson, disuse retires it ────────────────────
+
+
+def _epoch_of(store, text):
+    return next(e.epoch for e in store.search_lessons(text, limit=5, _track_hits=False, lexical_only=True))
+
+
+def test_a_lesson_that_helped_is_fresh_again(store, monkeypatch):
+    old = 1_000_000_000  # written long ago: age decay 0.05
+    store.add_entry(DIG, file_name="pernix.lessons", entry_type="lesson", epoch=old, skip_dedup=True)
+    for i in range(30):
+        store.add_entry(f"Unrelated note {i} about weather", file_name="pernix.notes", skip_dedup=True)
+    before = store.search_lessons("dig not installed dns.google", limit=1, _track_hits=False)[0].score
+    lessons._log_event("s1", "pernix.lessons", old, "error_hint", "shown")  # shown, no recurrence = helped
+    after = store.search_lessons("dig not installed dns.google", limit=1, _track_hits=False)[0].score
+    assert after == pytest.approx(before * 20)  # 0.05 -> 1.0
+
+
+def test_a_lesson_that_never_helps_sinks(store):
+    ep = 2_000_000_000 - 100
+    store.add_entry(DIG, file_name="pernix.lessons", entry_type="lesson", epoch=ep, skip_dedup=True)
+    a0 = lessons.activity([("pernix.lessons", ep)])
+    for sid in ("a", "b", "c"):
+        lessons._log_event(sid, "pernix.lessons", ep, "pitfalls", "shown")
+        lessons._log_event(sid, "pernix.lessons", ep, "error_hint", "recurred")
+    a = lessons.activity([("pernix.lessons", ep)])[("pernix.lessons", ep)]
+    assert a0 == {} and a["recurred"] == 3 and a["helped"] == 0
+
+
+def test_retirement_waits_90_days_from_ledger_start_and_spares_used_lessons(store):
+    from db import models as db
+
+    day = 86400
+    t0 = 1_900_000_000
+    for name, ep in (("unused", t0 - 200 * day), ("used", t0 - 200 * day + 1)):
+        store.add_entry(
+            f"{name} lesson about `tool{name}` failures",
+            file_name="pernix.lessons",
+            entry_type="lesson",
+            epoch=ep,
+            skip_dedup=True,
+        )
+    db.set_snooze_state("lessons_ledger_start", "")
+    assert lessons.retire_unused(store, db, now=t0) == 0  # first run records the start
+    assert lessons.retire_unused(store, db, now=t0 + 30 * day) == 0  # too soon
+    conn = lessons._conn()
+    conn.execute(
+        "INSERT INTO lesson_events (at, session_id, file_name, epoch, channel, event) VALUES (?,?,?,?,?,?)",
+        (t0 + 80 * day, "s", "pernix.lessons", str(t0 - 200 * day + 1), "error_hint", "shown"),
+    )
+    conn.commit()
+    conn.close()
+    assert lessons.retire_unused(store, db, now=t0 + 91 * day) == 1
+    conn = store._connect()
+    live = [r[0] for r in conn.execute("SELECT content FROM memory_fts WHERE entry_type = 'lesson'")]
+    conn.close()
+    assert any(c.startswith("used") for c in live) and not any(c.startswith("unused") for c in live)

@@ -327,3 +327,52 @@ def test_health_survey_reports_churn_signals(store):
     _add(store, "Something", "pernix.alpha_notes", 1)
     survey = store._survey()
     assert {"store_mb", "archived_sections", "bloated_files", "moves_24h", "bodies_at_breaker"} <= set(survey)
+
+
+# ── live twins, vectors, revive (follow-up 2026-11-06) ──────────────────
+
+
+def test_live_twins_keep_one_copy_and_sum_hits(store):
+    _add(store, "The same finding written twice", "pernix.alpha_notes", 1000)
+    _add(store, "The same finding written twice", "pernix.beta_notes", 1001)
+    _add(store, "The same words but a lesson", "pernix.beta_notes", 1002, entry_type="lesson")
+    _add(store, "The same words but a lesson", "pernix.alpha_notes", 1003, entry_type="note")
+    conn = store._connect()
+    conn.execute(
+        "INSERT INTO memory_hits (file_name, epoch, hit_count, last_hit_at) VALUES ('pernix.beta_notes','1001',4,1)"
+    )
+    conn.commit()
+    conn.close()
+
+    res = compact.dedup_live_twins(store)
+
+    assert res["retired"] == 1
+    assert _live_count_everywhere(store, "The same finding written twice") == 1
+    assert _live_count_everywhere(store, "The same words but a lesson") == 2  # different types stay
+    kept = [e for e in _live(store, "pernix.beta_notes") if e.content.startswith("The same finding")]
+    assert kept  # the more-used copy is the keeper
+
+
+def test_archiving_an_entry_drops_its_vector(store):
+    from core.memory.sweeps import archive_entries
+
+    _add(store, "An embedded entry", "pernix.alpha_notes", 1000)
+    conn = store._connect()
+    conn.execute(
+        "INSERT INTO vectors (file_name, epoch, model, dim, content_hash, vec) VALUES ('pernix.alpha_notes','1000','m',1,'h',x'00')"
+    )
+    conn.commit()
+    conn.close()
+    archive_entries(store, "pernix.alpha_notes", {1000})
+    conn = store._connect()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_appending_to_an_archived_file_keeps_its_old_entries_archived(store):
+    _add(store, "Old entry already merged elsewhere", "pernix.alpha_notes", 1000)
+    store.archive_file("pernix.alpha_notes")
+    _add(store, "A brand new entry for the file", "pernix.alpha_notes", 2000)
+    assert [e.content for e in _live(store, "pernix.alpha_notes")] == ["A brand new entry for the file"]
