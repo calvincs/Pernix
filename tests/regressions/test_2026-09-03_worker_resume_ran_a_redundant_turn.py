@@ -185,7 +185,8 @@ def test_a_real_turn_after_a_synthetic_one_supersedes(mgr, legacy_supersession):
 
 async def test_a_synthetic_turn_schedules_no_grade_of_its_own(monkeypatch):
     """Scheduling one would bump _deferred_reflect_seq and cancel the pending
-    grade of the turn that did the work."""
+    grade of the turn that did the work. (With no grade pending the resume
+    turn does grade the task — see test_2026-11-05_live_test_gaps_….)"""
     from sessions.hooks import _maybe_reflect
     from sessions.state import AgentSession
 
@@ -203,6 +204,7 @@ async def test_a_synthetic_turn_schedules_no_grade_of_its_own(monkeypatch):
     session_obj.current_turn_user_msg_id = uid
     session_obj._turn_id = 7
     session_obj._synthetic_turn_ids.add(7)
+    session_obj._deferred_grade_pending = 1  # the real turn's grade is waiting
     events: list = []
 
     await _maybe_reflect(sid, db.get_session(sid), emit=events.append, session_obj=session_obj)
