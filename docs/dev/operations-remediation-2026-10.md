@@ -52,7 +52,7 @@ switch or speculative increase in the global maintenance timeout is planned.
 ## Deployment record
 
 Pre-deployment backup: `data/backups/pre-operations-remediation-20261004T201513Z`
-on `box.example.internal`. SQLite integrity check returned `ok`; no processing or
+on the deployment host. SQLite integrity check returned `ok`; no processing or
 queued sessions were present. Eleven jobs still had legacy running states.
 Final validation and live deployment results are recorded below when complete.
 
@@ -77,7 +77,7 @@ SHA-256 checksums. Session listing returned in 46 ms after deployment.
 ### Final verification — 2026-10-04 20:27 UTC
 
 Runtime commits `57eb5f8` and `5faa480` are pushed on `next-3.2-testing`
-and rebuilt on `box.example.internal`. The final runtime SHA-256 verification
+and rebuilt on the deployment host. The final runtime SHA-256 verification
 passed and the launch override remains intact. Two verification cycles yielded
 to normal session activity, then the next completed normally at
 `2026-10-04T20:27:33.883746+00:00`: **outcome=ran, degraded=false, no activity

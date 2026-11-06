@@ -146,7 +146,7 @@ def test_base_prompt_states_memory_beats_empty_config():
 def test_scout_prompt_forbids_reporting_absence_as_memory():
     """Scout authored the actual refusal: it wrote 'no location is configured
     for this session — SESSIONS.md shows timezone: not set' INTO memory_context,
-    in the same paragraph where it had just quoted Springfield."""
+    in the same paragraph where it had just quoted the stored city."""
     from core.scout.runner import SCOUT_SYSTEM_PROMPT
 
     p = SCOUT_SYSTEM_PROMPT.lower()

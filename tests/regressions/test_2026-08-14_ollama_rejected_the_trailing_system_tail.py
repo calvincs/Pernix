@@ -1,6 +1,6 @@
 """Regression: Ollama 500'd on the volatile system tail, wedging every turn.
 
-Shipped defect (box.example.internal, 2026-08-14): on `qwen3.8:27b-mtp-q8_0` —
+Shipped defect (the deployment host, 2026-08-14): on `qwen3.8:27b-mtp-q8_0` —
 and any model on Ollama's newer chat-renderer path — /api/chat answers
 
     500  chat prompt error: "system message must be at the beginning"

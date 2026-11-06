@@ -1,6 +1,6 @@
 """Regression: agent tool calls starved every API request, freezing the UI.
 
-Shipped defect (2026-08-11 production incident on box.example.internal): tool
+Shipped defect (2026-08-11 production incident on the deployment host): tool
 dispatch in `core/tools/executor.py` sent every non-`long_poll` tool through
 `asyncio.to_thread`, which runs on the event loop's DEFAULT ThreadPoolExecutor
 — sized `min(32, cpu_count + 4)`, i.e. 20 threads on the box. Every API route

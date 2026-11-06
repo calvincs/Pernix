@@ -101,7 +101,7 @@ composition note added (3d).
 | — File impact | §11 | — |
 
 Source material: structural comparison against
-`/Users/user/Projects/prime-agent` (v0.7.0) on 2026-08-05. Prime-agent is
+a local `prime-agent` checkout (v0.7.0) on 2026-08-05. Prime-agent is
 a CLI coding agent; Pernix is a self-hosted personal agent server — we take
 *patterns*, filtered through Pernix invariants. File:line references were
 re-verified against the working tree on 2026-08-05 (pass 3).

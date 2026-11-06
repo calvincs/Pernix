@@ -70,7 +70,7 @@ def test_content_adding_nothing_is_never_superseded():
 
 def test_neighbouring_fact_is_not_superseded():
     """Two structured facts differing in several values must never overwrite."""
-    prod = "Deployment uses prod key AAAA on host box.example at port 8090 with TLS enabled always."
+    prod = "Deployment uses prod key AAAA on host prod.example at port 8090 with TLS enabled always."
     dev = "Deployment uses dev key BBBB on host lab.example at port 8091 with TLS disabled always."
     assert _supersede_reason(dev, prod) == ""
 

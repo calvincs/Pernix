@@ -1,6 +1,6 @@
 """Regression: a model pulled after startup wedged every session.
 
-Shipped defect (box.example.internal, 2026-08-14): `qwen3.8:27b` was pulled onto
+Shipped defect (the deployment host, 2026-08-14): `qwen3.8:27b` was pulled onto
 the Ollama host after the container booted, so the model registry — populated
 once at startup — never learned it. derive_model_budget() is a catalog lookup
 with no network, so it returned None, and the agent fell back to the manual

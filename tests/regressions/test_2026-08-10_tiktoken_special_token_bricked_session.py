@@ -1,6 +1,6 @@
 """A tool result that merely *quotes* a special token must not brick the session.
 
-Field incident (box.example, 2026-08-10): a HuggingFace model listing came
+Field incident (deployment host, 2026-08-10): a HuggingFace model listing came
 back as a 7.8 KB tool result whose JSON contained the literal string
 "<|endoftext|>" in tokenizer metadata. tiktoken's encode() defaults to
 disallowed_special="all", so counting that message raised

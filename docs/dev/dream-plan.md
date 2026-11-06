@@ -122,7 +122,7 @@ Non-goals (explicitly out of scope):
    the event loop (`bridge.py:143`).
 
 6. **Candor already has the hypothesis primitives.** Verified in
-   `/home/user/Desktop/Candor/src/candor/system.py`:
+   `candor/system.py` (Candor repo):
    `conjecture(goal, sim_budget, commit=False)` — `commit=False` is documented as
    "the read-only path … nothing is appended, nothing moves" (`system.py:1071+`);
    `commit=True` files a CLAIM under a separately-calibrated `conjecture/v1`

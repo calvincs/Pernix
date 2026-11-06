@@ -1,6 +1,6 @@
 # Pernix box operations audit — 2026-10-04
 
-Reviewed deployment: `box.example.internal`, branch `next-3.2-testing`, current
+Reviewed deployment: the deployment host, branch `next-3.2-testing`, current
 commit `85824d6e`. This records the read-only findings at that baseline.
 Follow-up implementation and deployment: [operations remediation](operations-remediation-2026-10.md).
 

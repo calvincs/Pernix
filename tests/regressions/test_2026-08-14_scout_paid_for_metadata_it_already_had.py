@@ -1,6 +1,6 @@
 """Regression: per-turn latency spent on model metadata already in memory.
 
-Measured on box.example.internal, 2026-08-14, on a warm process: 20.4s from
+Measured on the deployment host, 2026-08-14, on a warm process: 20.4s from
 message to reply, 18.3s of it scout, and 4.7s of *that* was scout's model
 listing — `/api/tags` plus an `/api/show` per uncached model — rendered into
 an AVAILABLE MODELS text block whose every field (id, provider,
