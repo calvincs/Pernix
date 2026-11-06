@@ -16,6 +16,9 @@ from core.reflect import (
     reflect_on_session,
 )
 
+# Pre-2026-11-05 grade-and-retry mode (reflect_llm_retry=True) — see conftest.legacy_reflect.
+pytestmark = pytest.mark.usefixtures("legacy_reflect")
+
 # ---------------------------------------------------------------------------
 # ReflectResult defaults
 # ---------------------------------------------------------------------------

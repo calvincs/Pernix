@@ -109,6 +109,118 @@ EVIDENCE QUALITY (outcome vs. execution):
 - Output valid JSON only. No markdown fences, no explanation outside the JSON. /no_think"""
 
 
+# Debrief mode (settings.reflect_llm_retry off — the default since the
+# 2026-11-05 review). Reflect stops judging and starts recording: what a future
+# turn should know. Tested against eight real turns beside REFLECT_PROMPT: the
+# grade prompt extracted nothing on passed turns (what_worked/what_failed are
+# retry-only fields), while this one surfaced concrete, evidenced lessons
+# memory did not hold (http_get rejects application/rdap+json; a public API ignores
+# one of its documented filters; the grep tool ignores \\d).
+DEBRIEF_PROMPT = """You are the Debrief step of an agent harness. A turn has finished. You do NOT grade it and nothing you say re-runs it. Your job is to record what is worth knowing NEXT time — so a future turn on a similar task goes better.
+
+You get: the user's request, the turn's transcript (tool calls with their results, the agent's messages, its final reply), a tool execution summary, and sometimes the user's next message and lessons already on file.
+
+Output ONE JSON object with exactly these keys:
+- outcome: "done" | "partial" | "failed" | "blocked" | "unclear" — what the transcript shows happened to the user's request. An observation, not a verdict.
+- summary: one sentence: what was asked and what the user actually got.
+- failure_cause: "none" | "scout" | "agent" | "skill" | "task" | "env" (use "none" when outcome is done).
+- confidence: 0.0-1.0 for outcome.
+- lessons: 0-3 items, each {"kind": "tool" | "process" | "environment" | "domain", "lesson": "...", "evidence": "..."}.
+    A lesson is a reusable, specific instruction for a FUTURE turn: which tool or argument works for which kind of source, a failure mode and its fix, a constraint of this environment, a step that saved or wasted time. Write it so it stands alone without this transcript ("http_get truncates docs.vllm.ai pages at 100KB; use browse_web for them").
+    evidence: the tool call / result / quote from THIS transcript that shows it. No evidence → no lesson.
+    NOT a lesson: restating the task, praise ("the agent did well"), generic advice ("verify claims", "be thorough"), anything already listed under LESSONS ON FILE (unless this turn contradicts it — then say so).
+    An empty list is the normal answer for a routine turn.
+- user_observations: 0-2 durable, self-contained facts about the USER this turn revealed (a preference, a correction, expertise). Never infer from task success. Empty for most turns.
+- what_worked: one short phrase, or "".
+- what_failed: one short phrase, or "".
+- unverified_claims: claims in the final reply that NO tool result in the transcript supports (ids, numbers, names, API names). Empty when every claim is grounded. Quote them exactly.
+
+Ground everything in the transcript. Do not speculate about what you cannot see; a truncated tool result continued past what you see."""
+
+# A debrief outcome is an observation. It still maps onto the verdict column
+# so post-mortem counters keep one vocabulary — nothing acts on it.
+_OUTCOME_VERDICT = {"done": "pass", "partial": "retry", "failed": "retry", "blocked": "escalate", "unclear": "pass"}
+_LESSON_KINDS = ("tool", "process", "environment", "domain")
+
+
+def _debrief_to_data(d: dict) -> dict:
+    """Map a debrief object onto the grade-shaped dict _result_from_data reads."""
+    outcome = str(d.get("outcome") or "unclear").lower()
+    if outcome not in _OUTCOME_VERDICT:
+        outcome = "unclear"
+    obs = [str(o) for o in (d.get("user_observations") or []) if isinstance(o, str)][:2]
+    return {
+        "verdict": _OUTCOME_VERDICT[outcome],
+        "reasoning": str(d.get("summary") or ""),
+        "failure_cause": str(d.get("failure_cause") or ("none" if outcome == "done" else "agent")),
+        "confidence": d.get("confidence", 0.5),
+        "what_worked": str(d.get("what_worked") or ""),
+        "what_failed": str(d.get("what_failed") or ""),
+        "experience": {"user_observations": obs} if obs else {},
+        "_outcome": outcome,
+        "_lessons": d.get("lessons") or [],
+        "_unverified_claims": d.get("unverified_claims") or [],
+    }
+
+
+def _clean_lessons(raw) -> list[dict]:
+    """Keep well-formed, evidenced lessons, capped at settings.reflect_max_lessons."""
+    out: list[dict] = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        lesson = " ".join(str(item.get("lesson") or "").split())
+        evidence = " ".join(str(item.get("evidence") or "").split())
+        kind = str(item.get("kind") or "process").lower()
+        if len(lesson) < 40 or not evidence:
+            continue  # too thin to stand alone, or unevidenced
+        out.append(
+            {"kind": kind if kind in _LESSON_KINDS else "process", "lesson": lesson[:600], "evidence": evidence[:300]}
+        )
+    return out[: max(0, int(settings.reflect_max_lessons))]
+
+
+async def _save_debrief_lessons(session_id: str, lessons: list[dict]) -> int:
+    """Write debrief lessons to memory as entry_type="lesson" — the type
+    search_lessons and scout recall read. add_entry's duplicate gate absorbs
+    a lesson already on file. Never raises. Returns entries written."""
+    if not lessons or not settings.memory_recall:
+        return 0
+    try:
+        session = db.get_session(session_id) or {}
+        if session.get("session_type") == "canary":
+            return 0  # canaries never write memory (same rule as distill)
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if not store:
+            return 0
+        written = 0
+        for item in lessons:
+            # Duplicate test on the lesson alone: the evidence quote differs
+            # every session and would let a repeat lesson through the gate.
+            dup = await asyncio.to_thread(store.find_duplicate, item["lesson"])
+            if dup is not None:
+                logger.info("Debrief lesson already on file (%s@%s) — skipped", dup.entry.file_name, dup.entry.epoch)
+                continue
+            res = await asyncio.to_thread(
+                store.add_entry,
+                content=f"{item['lesson']} (evidence: {item['evidence']})",
+                file_name=f"pernix.lessons_{item['kind']}",
+                entry_type="lesson",
+                tags=f"lesson,debrief,{item['kind']},{time.strftime('%Y-%m-%d')}",
+                weight="normal",
+                source="reflect",
+                skip_dedup=True,
+            )
+            if isinstance(res, str) and not res.startswith("Error") and "already contains" not in res:
+                written += 1
+        return written
+    except Exception as e:
+        logger.debug("Debrief lesson save failed for %s: %s", session_id, e)
+        return 0
+
+
 @dataclass
 class Deliverable:
     """One item from the session's deliverables list.
@@ -215,6 +327,10 @@ class ReflectResult:
     # case dce9a6de7f81: a 5-row id→policy table with every cell real and
     # every pairing invented passed at 0.95 because nothing checked pairings.
     grounding: dict = field(default_factory=dict)
+
+    # Debrief mode only: the observed outcome and the lessons extracted.
+    outcome: str = ""
+    lessons: list = field(default_factory=list)
 
 
 # Tools whose successful execution has one-shot, externally visible effects —
@@ -2184,6 +2300,14 @@ async def reflect_on_session(
     INNER_REPROMPT_LIMIT = 2
     raw = ""
     last_parse_err: Exception | None = None
+    # Debrief mode: record, don't judge (settings.reflect_llm_retry off).
+    debrief = not settings.reflect_llm_retry
+    system_prompt = DEBRIEF_PROMPT if debrief else REFLECT_PROMPT
+    required_keys = (
+        "outcome, summary, lessons" if debrief else "verdict, reasoning, failure_cause, confidence, deliverables"
+    )
+    response_format = {"type": "json_object"} if settings.reflect_json_mode else None
+    unverified_claims: list = []
 
     try:
         from core.llm.client import get_llm_client
@@ -2192,7 +2316,7 @@ async def reflect_on_session(
 
         for inner_attempt in range(INNER_REPROMPT_LIMIT + 1):
             messages = [
-                {"role": "system", "content": REFLECT_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": evidence},
             ]
             if inner_attempt > 0:
@@ -2206,8 +2330,7 @@ async def reflect_on_session(
                             "Your previous response could not be parsed as JSON. "
                             "Respond with ONE valid JSON object that matches the schema "
                             "exactly. No markdown fences, no <think> tags, no prose "
-                            "outside the JSON. Required keys: verdict, reasoning, "
-                            "failure_cause, confidence, deliverables. /no_think"
+                            f"outside the JSON. Required keys: {required_keys}. /no_think"
                         ),
                     }
                 )
@@ -2235,10 +2358,11 @@ async def reflect_on_session(
                 client,
                 messages=messages,
                 model=model,
-                max_tokens=8192,
+                max_tokens=4096 if debrief else 8192,
                 session_id=session_id,
                 session_created_at=_created_at,
                 session_priority=_priority,
+                response_format=response_format,
             )
 
             latency_ms = int((time.monotonic() - start) * 1000)
@@ -2269,7 +2393,16 @@ async def reflect_on_session(
                     # Out of inner retries — fall through to soft-pass below.
                     raise
 
+            debrief_lessons: list = []
+            outcome = ""
+            if debrief and isinstance(data, dict):
+                data = _debrief_to_data(data)
+                debrief_lessons = _clean_lessons(data.pop("_lessons", []))
+                outcome = data.pop("_outcome", "")
+                unverified_claims = [str(c)[:200] for c in (data.pop("_unverified_claims", []) or [])][:8]
             result = _result_from_data(data, model, latency_ms)
+            result.outcome = outcome
+            result.lessons = debrief_lessons
 
             # Contentless-pass guard (ARC-3 sweep): a "pass" with zero
             # analysis on a turn with real tool work is a lazy grade, not a
@@ -2422,6 +2555,12 @@ async def reflect_on_session(
             extra_payload = extra_payload or {}
             if gate_results:
                 extra_payload["gates"] = [g.to_payload() for g in gate_results]
+            if debrief:
+                extra_payload["debrief"] = {
+                    "outcome": result.outcome,
+                    "lessons": result.lessons,
+                    "unverified_claims": unverified_claims,
+                }
             await asyncio.to_thread(
                 _write_post_mortem,
                 session_id,
@@ -2437,6 +2576,9 @@ async def reflect_on_session(
                 next_msg_correction=correction,
             )
             await _save_user_observations(session_id, result)
+            if debrief and result.lessons:
+                n = await _save_debrief_lessons(session_id, result.lessons)
+                logger.info("Debrief for %s: %d lesson(s) extracted, %d new", session_id, len(result.lessons), n)
             return result
 
         # Loop fell through without returning — defensive only; should be unreachable.

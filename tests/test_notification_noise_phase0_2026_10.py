@@ -19,6 +19,9 @@ import pytest
 from db import models as db
 from tests.test_canary_isolation_hardening import _auto_applied, _skill_env
 
+# Pre-2026-11-05 grade-and-retry mode (reflect_llm_retry=True) — see conftest.legacy_reflect.
+pytestmark = pytest.mark.usefixtures("legacy_reflect")
+
 
 class _Recorder:
     def __init__(self):

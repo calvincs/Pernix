@@ -87,6 +87,7 @@ class FakeLLMClient:
         session_id="",
         session_created_at=float("inf"),
         session_priority=2,
+        response_format=None,
     ):
         self.calls.append(
             {
@@ -96,6 +97,7 @@ class FakeLLMClient:
                 "session_id": session_id,
                 "session_created_at": session_created_at,
                 "session_priority": session_priority,
+                "response_format": response_format,
             }
         )
         if self.responses:
@@ -256,3 +258,14 @@ def mock_scout(monkeypatch):
 
     monkeypatch.setattr("core.scout.runner.run_scout", _fake_run_scout)
     return default_report
+
+
+@pytest.fixture
+def legacy_reflect(monkeypatch):
+    """Pin reflect's pre-2026-11-05 grade-and-retry mode: an LLM verdict can
+    re-run the turn, bells fire, plain-text decoding. Tests of that machinery
+    (still reachable via reflect_llm_retry=True) use this."""
+    monkeypatch.setattr("config.settings.reflect_llm_retry", True)
+    monkeypatch.setattr("config.settings.reflect_notify", True)
+    monkeypatch.setattr("config.settings.reflect_json_mode", False)
+    monkeypatch.setattr("config.settings.worker_checks_enabled", False)

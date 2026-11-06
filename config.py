@@ -611,6 +611,33 @@ class Settings:
     # interaction cost. Deterministic gates still run (and still clamp)
     # in-line — they're cheap and material by construction.
     reflect_deferred_normal: bool = True
+    # 2026-11-05 review (three reviewers, live data): an LLM verdict no longer
+    # re-runs a turn. 52 hand-classified retries: 42% fixed something real,
+    # 58% were cosmetic, wasted or wrong; canaries 0 wins; the FP8 grader
+    # contradicts itself on identical evidence. Off = reflect is a "debrief"
+    # everywhere: observe-only, off the critical path, extracting lessons and
+    # user observations. Deterministic gates (and the worker deliverable
+    # check) remain the only automatic retry trigger. On restores the old
+    # synchronous grade-and-retry for cron/worker/canary.
+    reflect_llm_retry: bool = False
+    # Bell notifications driven by reflect (non-pass verdicts, retries
+    # exhausted, budget/circuit breaker). 45 ever sent, 41 bulk-dismissed, 0
+    # acted on, 22 were parse-failure noise. Off by default.
+    reflect_notify: bool = False
+    # Ask the provider for JSON-constrained decoding on reflect calls. Plain
+    # replies parsed 5/12 under load in the 2026-11-05 probe; JSON mode 11/12.
+    reflect_json_mode: bool = True
+    # Debrief lessons (tool/process/environment/domain) written to memory as
+    # entry_type="lesson", through the store's duplicate gate. 0 disables.
+    reflect_max_lessons: int = 3
+    # Deterministic worker checks (core/worker_checks.py): named deliverable
+    # files exist, deterministic gates, grounding of cited ids. They fill the
+    # worker result header the parent reads, in place of the LLM verdict.
+    worker_checks_enabled: bool = True
+    # A worker whose task names an output file it never wrote gets ONE
+    # automatic retry (through the gate-retry path). The class of worker retry
+    # that actually paid in the review: "named deliverable never written".
+    worker_deliverable_retry: bool = True
     # A deferred grade used to be DROPPED the moment the user replied inside
     # the quiet window — the "only the latest turn gets graded" rule. On the
     # box that silently ungraded roughly a quarter of all turns, and it threw

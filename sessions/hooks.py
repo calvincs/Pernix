@@ -14,6 +14,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from config import settings
@@ -79,6 +80,11 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
     if settings.gates_enabled and session_obj:
         gate_results = await _run_turn_gates(session_id, session, session_obj, emit=emit)
 
+    # Deterministic worker checks: they fill the result header the parent
+    # reads, and a missing named deliverable joins the gates as a failure.
+    if session_obj and settings.worker_checks_enabled and session.get("session_type") == "worker":
+        gate_results = await _run_worker_checks(session_id, session_obj, gate_results)
+
     # Reflect: post-execution verification. For interactive sessions this may
     # only schedule the grade (see _reflect_is_deferred) — the gates above are
     # then the sole synchronous verification this turn gets.
@@ -86,6 +92,99 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
         await _maybe_reflect(session_id, session, emit=emit, session_obj=session_obj, gate_results=gate_results)
     elif gate_results and session_obj:
         _apply_gate_retry_fallback(session_id, session, session_obj, gate_results, emit=emit)
+
+
+def _worker_task_text(session_id: str, tail: list[dict], turn_msg_id: int | None) -> str:
+    """The spawn task (the worker's first user row) plus this turn's own user
+    row when it differs (a resume_worker follow-up). Blocking DB read."""
+    parts: list[str] = []
+    try:
+        with db.connect_sessions() as conn:
+            row = conn.execute(
+                "SELECT content FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        if row and row[0]:
+            parts.append(row[0])
+    except Exception as e:
+        logger.debug("worker task lookup failed for %s: %s", session_id, e)
+    cur = next((m for m in tail if m.get("id") == turn_msg_id and m.get("role") == "user"), None)
+    if cur and cur.get("content") and cur["content"] not in parts:
+        parts.append(cur["content"])
+    return "\n\n".join(parts)
+
+
+async def _run_worker_checks(session_id: str, session_obj, gate_results: list) -> list:
+    """Run core.worker_checks for this turn, record the result, and return the
+    gate list — plus a synthetic failing gate when a named deliverable is
+    missing on the first attempt (one automatic retry, never more)."""
+    from core import worker_checks as wc
+    from core.reflect import _effective_workspace, _messages_since_attempt_start
+
+    try:
+        messages = await asyncio.to_thread(db.get_messages, session_id, last=REFLECT_TAIL_MESSAGES)
+        turn_msg_id = getattr(session_obj, "current_turn_user_msg_id", None)
+        task = await asyncio.to_thread(_worker_task_text, session_id, messages, turn_msg_id)
+        final_reply = next(
+            (m["content"] for m in reversed(messages) if m["role"] == "assistant" and m.get("content")), ""
+        )
+        attempt_msgs = _messages_since_attempt_start(messages, turn_msg_id)
+        ws, _ = _effective_workspace(session_id)
+        checks = await asyncio.to_thread(
+            wc.run_checks,
+            session_id,
+            task=task,
+            final_reply=final_reply,
+            attempt_msgs=attempt_msgs,
+            workspace=Path(ws),
+            gate_results=gate_results,
+        )
+    except Exception as e:
+        logger.warning("Worker checks failed for %s: %s", session_id, e)
+        return gate_results
+    gates = list(gate_results or [])
+    if checks["deliverables_missing"] and settings.worker_deliverable_retry and session_obj.turn.reflect_count == 0:
+        gates.append(wc.missing_deliverable_gate(checks["deliverables_missing"]))
+    row = wc.checks_row(checks)
+    try:
+        await asyncio.to_thread(db.add_message, session_id, "reflect", wc.dumps(row))
+    except Exception as e:
+        logger.debug("Worker checks row insert failed for %s: %s", session_id, e)
+    logger.info("Worker checks for %s: %s (%s)", session_id, row["verdict"], row["reasoning"][:200])
+    return gates
+
+
+async def _run_detached_debrief(session_id: str, session_obj, snap: dict) -> None:
+    """Observe-only debrief for a non-interactive turn, off the critical path.
+
+    Nothing waits on it and nothing reads its verdict for control flow: the
+    worker header comes from deterministic checks, retries from gates. What it
+    produces is the record — post-mortem, lessons, user observations."""
+    import json as _json
+
+    from core.reflect import reflect_on_session
+
+    session_obj.add_background_ref()
+    try:
+        result = await reflect_on_session(session_id, reflect_mode="debrief", **snap)
+        row = {
+            "verdict": result.verdict,
+            "outcome": getattr(result, "outcome", ""),
+            "reasoning": result.reasoning,
+            "what_worked": result.what_worked,
+            "what_failed": result.what_failed,
+            "failure_cause": result.failure_cause,
+            "confidence": result.confidence,
+            "lessons": getattr(result, "lessons", []),
+            "latency_ms": result.reflect_latency_ms,
+            "reflect_model": result.reflect_model,
+            "reflect_mode": "debrief",
+        }
+        await asyncio.to_thread(db.add_message, session_id, "reflect", _json.dumps(row))
+    except Exception as e:
+        logger.warning("Detached debrief failed for %s: %s", session_id, e)
+    finally:
+        session_obj.remove_background_ref()
 
 
 async def _cleanup_stale_questions(session_id: str, session_obj=None) -> None:
@@ -290,6 +389,9 @@ def _broadcast_reflect_notification(
     Canary/worker sessions record nothing: the registry drops them (the Canary
     tab records each outcome; a worker reports to its orchestrator).
     """
+    if not settings.reflect_notify:
+        logger.info("Reflect notice suppressed (reflect_notify off) for %s: %s", session_id, title)
+        return
     from core import notices
 
     session_title = session.get("title", "")
@@ -1025,8 +1127,9 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
         settings.reflect_max_retries_worker if session.get("session_type") == "worker" else settings.reflect_max_retries
     )
 
-    # Skip if already at max retries
-    if session_obj.turn.reflect_count >= max_retries:
+    # Skip if already at max retries. In debrief mode the debrief still runs:
+    # it re-runs nothing, and the last attempt is the one worth recording.
+    if settings.reflect_llm_retry and session_obj.turn.reflect_count >= max_retries:
         if emit:
             # Notify user that reflect retries are exhausted
             last_reflect = None
@@ -1161,6 +1264,41 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
     # Pre-reflect enrichment: lessons recall. extra_evidence is appended to
     # reflect's prompt context, never written into SKILL.md.
     extra_evidence = await _recall_lesson_evidence(session_id, messages) or ""
+
+    # Debrief mode (reflect_llm_retry off): gates are the only retry trigger,
+    # and the debrief runs detached — the turn finalizes without waiting on it.
+    if not settings.reflect_llm_retry:
+        if gate_results:
+            _apply_gate_retry_fallback(session_id, session, session_obj, gate_results, emit=emit)
+        termination_history: list[str] = []
+        try:
+            termination_history = await asyncio.to_thread(db.recent_termination_reasons, session_id, limit=3)
+        except Exception as e:
+            logger.debug("Failed to fetch termination history for %s: %s", session_id, e)
+        snap = {
+            "attempt": session_obj.turn.reflect_count + 1,
+            "tool_summary": dict(session_obj.turn.tool_summary or {}) or None,
+            "scout_report": session_obj.last_scout_report,
+            "extra_evidence": extra_evidence,
+            "turn_user_msg_id": session_obj.current_turn_user_msg_id,
+            "termination_reason": getattr(session_obj, "termination_reason", None),
+            "prior_termination_reasons": termination_history[1:] if termination_history else [],
+            "gate_results": list(gate_results or []),
+            "tool_summary_attempts": [dict(a) for a in (session_obj.turn.tool_summary_attempts or [])] or None,
+        }
+        try:
+            last_id = await asyncio.to_thread(db.last_message_id, session_id)
+        except Exception:
+            last_id = None
+        snap["turn_msg_id_range"] = (snap["turn_user_msg_id"], last_id)
+        from sessions.manager import get_manager
+
+        get_manager()._spawn_detached(
+            _run_detached_debrief(session_id, session_obj, snap),
+            f"debrief:{session_id[:12]}",
+        )
+        logger.info("Reflect debrief scheduled for %s (detached, observe-only)", session_id)
+        return
 
     try:
         from core.reflect import build_retry_context, reflect_on_session

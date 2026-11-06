@@ -563,6 +563,9 @@ class TrustState:
     stale_seq: int = 0
     modified: bool = False
     retired: list = field(default_factory=list)
+    # "checks" when the grade is core/worker_checks' deterministic record;
+    # the legacy LLM grade's reflect_mode ("sync"/"deferred") otherwise.
+    source: str = ""
 
     _CAPS = ("round_ceiling", "stuck_loop", "budget_exhausted")
 
@@ -597,6 +600,18 @@ class TrustState:
     def verification_note(self) -> str:
         """What the grader said about THIS run's output. Empty only for a
         clean, current, verified pass."""
+        # Deterministic checks (core/worker_checks.py) — no LLM involved.
+        if self.verdict == "flagged":
+            return (
+                f"# CHECKS FLAGGED (deterministic checks, not a model's opinion)\n"
+                f"# {self.reasoning or '(no detail recorded)'}\n"
+                f"# Use get_worker_transcript({self.worker_id[:12]!r}) to see what happened before "
+                f"relying on this output.\n"
+            )
+        if self.verdict == "unchecked":
+            # Nothing applied (no named output file, no gate). That is not a
+            # problem with the work, so it is not reported as one.
+            return ""
         if self.verdict == "escalate":
             return (
                 f"# ESCALATED (worker reflect: verdict=escalate)\n"
@@ -684,6 +699,7 @@ def worker_trust(
         stale_seq=stale_seq,
         modified=include_history and _report.graded_artifact_changed(worker_id, ref),
         retired=_report.retired_reports(worker_id) if include_history else [],
+        source=grade.get("reflect_mode", "") or "",
     )
 
 
@@ -1901,7 +1917,7 @@ def cross_pollinate(_context: dict | None = None) -> str:
         # run of a resumed worker is not a licence to broadcast this run's
         # findings to its siblings.
         reflect, _stale, _seq = _report.run_scoped_reflect(cwid)
-        if not reflect or reflect.get("verdict") != "pass":
+        if not reflect or reflect.get("verdict") not in ("pass", "unchecked"):
             logger.info(
                 "Skipping cross-pollination from worker %s — reflect verdict=%s " "(only 'pass' is propagated)",
                 cwid[:8],

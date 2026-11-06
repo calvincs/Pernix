@@ -13,10 +13,15 @@ with exactly the exclusions its own verdict asked for.
 
 import json
 
+import pytest
+
 from core.llm.types import ChatResponse, TokenUsage
 from db import models as db
 from sessions.hooks import _maybe_reflect
 from sessions.state import AgentSession
+
+# Pre-2026-11-05 grade-and-retry mode (reflect_llm_retry=True) — see conftest.legacy_reflect.
+pytestmark = pytest.mark.usefixtures("legacy_reflect")
 
 
 def _verdict(**overrides) -> ChatResponse:

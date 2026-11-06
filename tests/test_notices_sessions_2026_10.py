@@ -21,6 +21,9 @@ import pytest
 
 from db import models as db
 
+# Pre-2026-11-05 grade-and-retry mode (reflect_llm_retry=True) — see conftest.legacy_reflect.
+pytestmark = pytest.mark.usefixtures("legacy_reflect")
+
 
 class _Recorder:
     def __init__(self):

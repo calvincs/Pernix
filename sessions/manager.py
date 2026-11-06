@@ -2948,8 +2948,13 @@ class SessionManager:
                 "actual deliverable. Use get_worker_transcript for the full stream.\n"
             )
         if not header:
-            # A clean, current, verified pass. This file is ours and says so.
-            header = "# AUTO-STAMPED (reflect=pass; worker did not write an explicit summary)\n"
+            # A clean result. This file is ours and says so — and says which
+            # record it rests on: deterministic checks, or (legacy) a grade.
+            if trust.source == "checks":
+                basis = "checks passed" if trust.verdict == "pass" else "no automated checks applied"
+            else:
+                basis = f"reflect={trust.verdict}" if trust.verdict else "no grade"
+            header = f"# AUTO-STAMPED ({basis}; worker did not write an explicit summary)\n"
 
         truncated = len(last_text) > self._STAMP_MAX_CHARS
         body = last_text[: self._STAMP_MAX_CHARS] if last_text else "(no assistant output)"
@@ -3381,6 +3386,12 @@ class SessionManager:
             elif tr == "interrupted":
                 lines.append(f"  - {wid}{suffix}: INTERRUPTED (the server restarted mid-turn)")
                 problem_workers.append(wid)
+            elif verdict == "flagged":
+                _why = ((_current or {}).get("reasoning") or "")[:160]
+                lines.append(f"  - {wid}{suffix}: CHECKS FLAGGED — {_why}")
+                problem_workers.append(wid)
+            elif verdict == "unchecked" and tr == "complete":
+                lines.append(f"  - {wid}{suffix}: complete (no automated checks applied)")
             elif verdict == "escalate":
                 lines.append(f"  - {wid}{suffix}: ESCALATED — needs review")
                 problem_workers.append(wid)

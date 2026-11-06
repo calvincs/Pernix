@@ -33,6 +33,9 @@ from httpx import ASGITransport, AsyncClient
 from core.llm.types import ChatResponse, TokenUsage
 from db import models as db
 
+# Pre-2026-11-05 grade-and-retry mode (reflect_llm_retry=True) — see conftest.legacy_reflect.
+pytestmark = pytest.mark.usefixtures("legacy_reflect")
+
 # ---------------------------------------------------------------------------
 # Fixtures and factories
 # ---------------------------------------------------------------------------

@@ -272,10 +272,16 @@ def run_scoped_reflect(worker_id: str) -> tuple[dict | None, dict | None, int]:
     for m in reversed(messages):
         if m.get("role") == "reflect":
             try:
-                newest = json.loads(m.get("content") or "{}")
+                row = json.loads(m.get("content") or "{}")
             except (ValueError, TypeError) as e:
                 logger.warning("run_scoped_reflect: malformed reflect row for %s: %s", worker_id, e)
                 return None, None, 0
+            # A debrief is a record, not a grade: it lands after the turn,
+            # detached, and must never become the worker's trust statement.
+            # The deterministic checks row (reflect_mode="checks") is.
+            if row.get("reflect_mode") == "debrief":
+                continue
+            newest = row
             newest_id = int(m.get("id") or 0)
             break
     if newest is None:

@@ -11,8 +11,13 @@ trigger the finish with one reply.
 
 from types import SimpleNamespace
 
+import pytest
+
 from db import models as db
 from sessions.hooks import _deferred_verdict_notification
+
+# Pre-2026-11-05 grade-and-retry mode (reflect_llm_retry=True) — see conftest.legacy_reflect.
+pytestmark = pytest.mark.usefixtures("legacy_reflect")
 
 
 class _StubManager:

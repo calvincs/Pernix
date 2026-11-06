@@ -15,6 +15,9 @@ from sessions.hooks import (
     run_post_task_hooks,
 )
 
+# Pre-2026-11-05 grade-and-retry mode (reflect_llm_retry=True) — see conftest.legacy_reflect.
+pytestmark = pytest.mark.usefixtures("legacy_reflect")
+
 # ---------------------------------------------------------------------------
 # _strip_thinking
 # ---------------------------------------------------------------------------
