@@ -188,10 +188,20 @@ _TASK_LOCAL_RE = re.compile(
 )
 
 
+_NEGATED_RE = re.compile(
+    r"\b(?:no|not|without|never|avoid|don't|do not|cannot|can't)\s+(?:\w+\s+){0,2}$", re.IGNORECASE
+)
+
+
 def rejection(content: str) -> str:
-    """Why a lesson must not be stored ("" = fine). Applies to every writer."""
-    if _UNSAFE_RE.search(content or ""):
-        return "unsafe workaround (privilege or security bypass)"
+    """Why a lesson must not be stored ("" = fine). Applies to every writer.
+
+    "no sudo" / "without root" describes the environment, not a workaround,
+    so a negated mention is fine."""
+    text = content or ""
+    for m in _UNSAFE_RE.finditer(text):
+        if not _NEGATED_RE.search(text[max(0, m.start() - 30) : m.start()]):
+            return "unsafe workaround (privilege or security bypass)"
     if _TASK_LOCAL_RE.search(content or ""):
         return "task-local, not reusable"
     return ""

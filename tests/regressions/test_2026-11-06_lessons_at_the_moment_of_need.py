@@ -198,3 +198,9 @@ def test_a_block_page_returned_as_success_counts_as_a_failure(store):
     lessons.record_outcome("browse_web", {"url": "https://www.news-example.org/"}, page, failed=True)
     assert "news-example.org (bot wall)" in lessons.capability_line()
     assert "news-example.org" in lessons.error_tokens(page)
+
+
+def test_a_negated_sudo_mention_is_not_unsafe():
+    assert lessons.rejection("If the install fails with no sudo, install unzip to ~/.local") == ""
+    assert lessons.rejection("Run it without root and set HOME") == ""
+    assert lessons.rejection("route the write through a privileged shell (root/sudo)")
