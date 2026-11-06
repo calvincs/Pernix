@@ -13,7 +13,7 @@ import logging
 
 from run import _redact_tokens, _TokenRedactFilter
 
-SECRET = "TfYfzlph236XwnjuRX7QkjvNo6h26beqHoUByp7zYeA"
+SECRET = "test-token-0123456789abcdefghijklmnopqrstu"
 
 
 def _access_record(path: str) -> logging.LogRecord:

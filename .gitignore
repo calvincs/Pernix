@@ -65,7 +65,7 @@ data/certs/
 data/cert.pem
 data/key.pem
 
-# Outbound SSH identity for the container (e.g. box -> aibox); never commit private keys.
+# Outbound SSH identity for the container (e.g. box -> llm-host); never commit private keys.
 data/ssh/
 
 # =============================================================================

@@ -34,7 +34,7 @@ def test_available_without_key_when_base_url_is_self_hosted():
 
 def test_model_info_prefers_server_advertised_context():
     """A self-hosted server's /v1/models entry carries the real window
-    (vLLM: max_model_len). Ignoring it cost half the window on the aibox
+    (vLLM: max_model_len). Ignoring it cost half the window on the llm-host
     deploy — an unrecognized id silently defaulted to 128K while the server
     advertised 262,144."""
     p = _provider(key="", base_url="http://llm.example.internal:8000/v1")
@@ -56,7 +56,7 @@ def test_model_info_falls_back_to_hints_then_default():
 
 
 def test_model_info_vision_override_covers_self_hosted_models():
-    """vision_model_overrides must apply on the openai path too — the aibox
+    """vision_model_overrides must apply on the openai path too — the llm-host
     vLLM serves Qwen3.8-27B (natively multimodal) under an id no OpenAI
     prefix matches, so without the override images were silently dropped
     from the compiled context (ollama honored it; openai did not)."""

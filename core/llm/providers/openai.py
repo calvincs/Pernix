@@ -456,7 +456,7 @@ class OpenAIProvider:
 
     def _model_info(self, model_id: str, entry: dict | None = None) -> ModelInfo:
         # Server-advertised window first: it is the serving truth, not a
-        # guess. Ignoring it cost half the real window on the aibox vLLM
+        # guess. Ignoring it cost half the real window on the llm-host vLLM
         # deploy — the adapter fetched max_model_len=262,144 and defaulted
         # the unrecognized id to 128K anyway (2026-08-19).
         ctx = 0

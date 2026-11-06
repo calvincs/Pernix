@@ -47,7 +47,7 @@ def clock(monkeypatch):
     c = _Clock()
     monkeypatch.setattr(emb.time, "monotonic", c)
     monkeypatch.setattr("config.settings.embedding_model", "nomic-embed-text-v2-moe:latest")
-    monkeypatch.setattr("config.settings.llm_base_url", "http://aibox:11434")
+    monkeypatch.setattr("config.settings.llm_base_url", "http://llm-host:11434")
     monkeypatch.setattr("config.settings.embedding_fallback_model", "BAAI/bge-small-en-v1.5")
     monkeypatch.setattr("config.settings.embedding_fallback_after_minutes", 30)
     monkeypatch.setattr("config.settings.embedding_fallback_recover_minutes", 60)

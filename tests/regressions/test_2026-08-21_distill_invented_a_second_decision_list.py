@@ -125,7 +125,8 @@ def test_restates_and_grounding_heuristics_directly():
         saved,
     )
     assert (
-        _restates("Unrelated: the aibox GPU has 24GB of VRAM per card", "pernix.decisions", "decision", saved) is None
+        _restates("Unrelated: the llm-host GPU has 24GB of VRAM per card", "pernix.decisions", "decision", saved)
+        is None
     )
     # Another file needs a strong overlap: a near-copy is still a restatement, a passing mention is not.
     assert _restates(

@@ -1,6 +1,6 @@
 """Regression — 2026-08-21, box.
 
-Every embedding call to the aibox embed server failed for a day (Vulkan
+Every embedding call to the llm-host embed server failed for a day (Vulkan
 out-of-device-memory on 512-token inputs) and the only trace was a WARNING
 per search saying "lexical-only for 60s" — recall, dedup and the semantic
 channels of dream/candor ran on keyword matching with nobody told. A second
@@ -35,7 +35,7 @@ def clock(monkeypatch):
     c = _Clock()
     monkeypatch.setattr(emb.time, "monotonic", c)
     monkeypatch.setattr("config.settings.embedding_model", "nomic-embed-text-v2-moe:latest")
-    monkeypatch.setattr("config.settings.llm_base_url", "http://aibox:11434")
+    monkeypatch.setattr("config.settings.llm_base_url", "http://llm-host:11434")
     monkeypatch.setattr(emb, "_last_failure_at", 0.0)
     monkeypatch.setattr(emb, "_failing_since", 0.0)
     monkeypatch.setattr(emb, "_last_notified_at", 0.0)
@@ -83,7 +83,7 @@ def test_sustained_failure_notifies_once_a_day_and_a_success_clears_it(clock, mo
     notes = db.get_notifications()
     assert len(notes) == 1
     assert notes[0]["title"] == "Embeddings unavailable — memory recall is lexical-only"
-    assert "http://aibox:11434/api/embed" in notes[0]["body"]
+    assert "http://llm-host:11434/api/embed" in notes[0]["body"]
     assert "nomic-embed-text-v2-moe:latest" in notes[0]["body"]
     assert "allocateMemory" in notes[0]["body"]
 

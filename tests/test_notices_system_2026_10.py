@@ -69,7 +69,7 @@ def emb_env(monkeypatch):
     c = _Clock()
     monkeypatch.setattr(emb.time, "monotonic", c)
     monkeypatch.setattr("config.settings.embedding_model", "nomic-embed-text-v2-moe:latest")
-    monkeypatch.setattr("config.settings.llm_base_url", "http://aibox:11434")
+    monkeypatch.setattr("config.settings.llm_base_url", "http://llm-host:11434")
     monkeypatch.setattr("config.settings.embedding_fallback_model", "")  # the lexical-only path
     for name in ("_last_failure_at", "_failing_since", "_last_notified_at", "_last_warm_at", "_degraded_since"):
         monkeypatch.setattr(emb, name, 0.0)

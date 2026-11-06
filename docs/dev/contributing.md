@@ -127,15 +127,80 @@ For larger design questions ("should we add X?"), an issue with the design write
 
 ---
 
+## Keep personal data and secrets out of git
+
+The repository is public, and git history is permanent: removing something
+later means rewriting history and force-pushing every branch and tag. So it is
+blocked before it is committed.
+
+**Enable the hooks once per clone:**
+
+```bash
+git config core.hooksPath .githooks
+git config user.useConfigOnly true     # git never guesses your identity
+```
+
+`.githooks/` runs `scripts/privacy_scan.py` at three points:
+
+| Hook | Scans |
+|---|---|
+| `pre-commit` | added lines and file names of the staged change |
+| `commit-msg` | the commit message, plus the co-author rule below |
+| `pre-push` | every commit being pushed: diff, message, author email |
+
+`./check.sh` also scans every tracked file (`python3 scripts/privacy_scan.py tree`).
+
+It blocks on:
+
+- **Your private terms.** List them one per line in
+  `~/.config/pernix/private-terms.txt`, outside the repository, so the list is
+  never committed: surname, town, street, employer, family names, your own
+  domains and hostnames. A line starting with `re:` is a regular expression.
+  Matches are reported by their first two letters only.
+- **Personal-data patterns:** email addresses (except `example.*`, `*.invalid`,
+  GitHub noreply and vendor noreply addresses), private IP addresses, home
+  directory paths, phone numbers, GPS coordinates, and images that still
+  carry EXIF/XMP metadata.
+- **Secrets:** private keys, cloud, GitHub, Slack and model-provider tokens,
+  bearer headers, and hard-coded passwords. When `gitleaks` is installed it runs
+  as well.
+- **Runtime data:** `data/memories/`, `data/settings.json`, databases,
+  `.env` files and key files.
+
+Generic, known-benign matches (documentation example addresses, Docker's
+default bridge) go in `.privacy-allow`. That file is committed, so it must hold
+generic values only.
+
+**Writing commits, tests and docs:**
+
+- Describe the defect and the fix, not the evidence. Session IDs and
+  `file:line` are fine; what a live session or memory entry said is not.
+- Test fixtures use invented data: `example.com`, `/home/user/`, `192.0.2.x`,
+  made-up names. Never copy values from a running deployment, its memory, its
+  settings or its logs.
+- Use your GitHub noreply address as your commit email
+  (GitHub → Settings → Emails → "Keep my email addresses private" and
+  "Block command line pushes that expose my email").
+- On GitHub, keep **secret scanning** and **push protection** on
+  (Settings → Code security). They are the server-side backstop for a
+  skipped hook.
+- `git commit --no-verify` skips the hooks. Use it only with the repository
+  owner's approval.
+- If something does leak: rotate any credential first, then remove it from
+  history with `git filter-repo` and force-push.
+
 ## AI-assisted commits
 
-If you used Claude Code (or any AI coding assistant) to help write the change, include the appropriate trailer:
+Pernix is built by several collaborators. A commit either credits none of the
+AI collaborators, or credits all three:
 
 ```
 Co-Authored-By: Claude <noreply@anthropic.com>
+Co-Authored-By: Codex <noreply@openai.com>
+Co-Authored-By: Pernix <noreply@pernix.cc>
 ```
 
-This is a normal git commit trailer — `git commit` accepts it via `-m` or via heredoc. Don't strip it for vanity reasons; it's useful provenance.
+The `commit-msg` hook enforces this.
 
 ---
 

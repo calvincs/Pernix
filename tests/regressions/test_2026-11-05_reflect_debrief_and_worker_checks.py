@@ -210,7 +210,7 @@ async def test_openai_provider_sends_response_format(monkeypatch):
             sent.update(json)
             return _Resp()
 
-    p = OpenAIProvider(ProviderConfig(name="openai", base_url="http://aibox:8000/v1", api_key="k"))
+    p = OpenAIProvider(ProviderConfig(name="openai", base_url="http://llm-host:8000/v1", api_key="k"))
     monkeypatch.setattr(p, "_get_client", lambda: _Client())
     await p.chat([{"role": "user", "content": "hi"}], model="m", response_format={"type": "json_object"})
     assert sent["response_format"] == {"type": "json_object"}

@@ -21,7 +21,7 @@ def reconcile(ledger: dict[str, list[Entry]], *, tolerance: float = 0.005) -> Re
 TABLE = """| Provider | Model | Context | Input $/M | Output $/M | Notes |
 |---|---|---|---|---|---|
 | OpenRouter | qwen/qwen3-27b | 128k | 0.20 | 0.60 | default |
-| Ollama (aibox) | qwen3.8-27b-fp16 | 192k | 0 | 0 | local, 3 concurrent |
+| Ollama (llm-host) | qwen3.8-27b-fp16 | 192k | 0 | 0 | local, 3 concurrent |
 | Anthropic | claude-sonnet-5 | 200k | 3.00 | 15.00 | fallback only |"""
 LONG = (
     "Here is what I found after reading the deploy script and the compose file. The container pulls a baked image, so a `git pull` alone deploys nothing; "

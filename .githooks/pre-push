@@ -1,0 +1,3 @@
+#!/bin/sh
+# Re-check every commit being pushed: diff, message, author email.
+exec python3 "$(git rev-parse --show-toplevel)/scripts/privacy_scan.py" push

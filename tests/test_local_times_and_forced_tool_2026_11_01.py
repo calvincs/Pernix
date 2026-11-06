@@ -23,7 +23,7 @@ def _tool(name):
 
 
 def _payload(tools, stream):
-    provider = OpenAIProvider(ProviderConfig(name="openai", base_url="http://aibox:8000/v1", api_key="k"))
+    provider = OpenAIProvider(ProviderConfig(name="openai", base_url="http://llm-host:8000/v1", api_key="k"))
     return provider._build_payload([], "m", 100, tools, None, stream=stream)
 
 

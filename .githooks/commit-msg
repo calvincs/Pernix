@@ -1,0 +1,3 @@
+#!/bin/sh
+# Block personal data in the commit message; enforce the co-author rule.
+exec python3 "$(git rev-parse --show-toplevel)/scripts/privacy_scan.py" message "$1"

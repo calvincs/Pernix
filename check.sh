@@ -70,6 +70,14 @@ else
     fail "flake8"
 fi
 
+# ── 3b. privacy scan ─────────────────────────────────────────────────────────
+step "privacy — personal data and secrets in tracked files"
+if python3 scripts/privacy_scan.py tree 2>&1; then
+    ok "privacy"
+else
+    fail "privacy"
+fi
+
 # ── 4. pytest + coverage ─────────────────────────────────────────────────────
 step "pytest — unit tests + coverage (≥63%)"
 if "$VENV_PYTHON" -m pytest \
