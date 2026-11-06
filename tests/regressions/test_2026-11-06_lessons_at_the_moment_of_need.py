@@ -204,3 +204,21 @@ def test_a_negated_sudo_mention_is_not_unsafe():
     assert lessons.rejection("If the install fails with no sudo, install unzip to ~/.local") == ""
     assert lessons.rejection("Run it without root and set HOME") == ""
     assert lessons.rejection("route the write through a privileged shell (root/sudo)")
+
+
+def test_capability_line_never_cuts_an_item(store):
+    for i in range(12):
+        lessons.record_outcome(
+            "http_get", {"url": f"https://site{i}-example.com/x"}, "Error: HTTP 403 Forbidden", failed=True
+        )
+    line = lessons.capability_line(max_chars=120)
+    assert len(line) <= 120 and line.endswith(")")
+
+
+def test_pitfalls_skip_a_second_lesson_on_the_same_command(store):
+    for i in range(30):
+        store.add_entry(f"Unrelated note {i} about calendars and weather", file_name="pernix.notes", skip_dedup=True)
+    _lesson(store, DIG)
+    _lesson(store, "This image has no `dig`; prefer dns.google resolve via http_get for MX lookups")
+    block = lessons.pitfalls_block("MX records lookup with dig", ["bash"])
+    assert block.count("dns.google") == 1

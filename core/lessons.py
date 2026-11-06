@@ -413,17 +413,20 @@ def capability_line(max_chars: int = 220) -> str:
     if not rows:
         return ""
     missing = [k for kind, k, _ in rows if kind == "missing_command"][:8]
-    blocked = [f"{k} ({d})" for kind, k, d in rows if kind == "blocked_host"][:5]
+    blocked = [f"{k} ({d})" for kind, k, d in rows if kind == "blocked_host"][:6]
     limits = [d for kind, _, d in rows if kind == "tool_limit"][:3]
-    parts = []
-    if missing:
-        parts.append("not installed: " + ", ".join(missing))
-    if blocked:
-        parts.append("blocked: " + ", ".join(blocked))
-    if limits:
-        parts.append("; ".join(limits))
-    line = "Environment (from recent tool results): " + "; ".join(parts)
-    return line[:max_chars]
+    # Whole items only: a cut mid-name reads as a different host.
+    line = "Environment (from recent tool results):"
+    for label, items in (("not installed", missing), ("tool limits", limits), ("blocked", blocked)):
+        taken: list[str] = []
+        for item in items:
+            trial = f"{line} {label}: {', '.join([*taken, item])};"
+            if len(trial) > max_chars:
+                break
+            taken.append(item)
+        if taken:
+            line = f"{line} {label}: {', '.join(taken)};"
+    return "" if line.endswith(":") else line.rstrip(";")
 
 
 # ── known-pitfalls block ────────────────────────────────────────────────
@@ -437,6 +440,9 @@ def pitfalls_block(message: str, tools: list[str] | None = None, *, session_id: 
     text: the rdap miss was on task text, while the plan named http_get."""
     if not settings.lesson_pitfalls_enabled:
         return ""
+    header = "[KNOWN PITFALLS — from past tool failures; check before you act]"
+    cap = capability_line()
+    budget = max_chars - len(header) - (len(cap) + 3 if cap else 0)
     lines: list[str] = []
     try:
         from core.memory.store import get_memory_store
@@ -444,20 +450,28 @@ def pitfalls_block(message: str, tools: list[str] | None = None, *, session_id: 
         store = get_memory_store()
         if store and (message or "").strip():
             query = (message or "")[:600] + " " + " ".join((tools or [])[:10])
-            for r in store.search_lessons(query, limit=3, _track_hits=False):
-                if r.score < 1.0:  # the documented weak floor; task text is a long query
+            covered: set[str] = set()
+            for r in store.search_lessons(query, limit=5, _track_hits=False):
+                if r.score < 1.0 or len(lines) >= 3:  # the documented weak floor; task text is a long query
                     continue
-                lines.append("- " + re.sub(r"\s+", " ", r.entry.content).strip()[:220])
+                toks = lesson_tokens(r.entry.content)
+                if toks and toks & covered:
+                    continue  # a second lesson on the same command/host adds nothing
+                text = "- " + re.sub(r"\s+", " ", r.entry.content).strip()[:220]
+                if len(text) + 1 > budget:
+                    break
+                budget -= len(text) + 1
+                covered |= toks
+                lines.append(text)
                 _log_event(session_id, r.entry.file_name, r.entry.epoch, "pitfalls", "shown")
     except Exception as e:
         logger.debug("pitfalls lessons failed: %s", e)
-    cap = capability_line()
     if cap:
         lines.append("- " + cap)
+        _log_event(session_id, "capability_map", 0, "pitfalls", "shown")
     if not lines:
         return ""
-    block = "[KNOWN PITFALLS — from past tool failures; check before you act]\n" + "\n".join(lines)
-    return block[:max_chars]
+    return header + "\n" + "\n".join(lines)
 
 
 def usage_stats(days: int = 7) -> dict:
