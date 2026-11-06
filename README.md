@@ -1,6 +1,6 @@
 # Pernix
 
-**A self-hosted AI agent server with persistent memory, tool execution, and a built-in web UI — runs locally with Ollama or in the cloud via OpenRouter.**
+**A self-hosted AI agent that learns while it's idle. Persistent memory, skills and scheduled work, on your own hardware with local or cloud models.**
 
 > ⚠️ **Use at your own risk. This is NOT production software.** Pernix executes shell commands and writes files on the host machine. Run it in an environment you are comfortable having an AI agent modify — a dedicated VM or container is strongly recommended. See [docs/security.md](docs/security.md) for the full security model.
 
