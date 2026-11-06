@@ -69,13 +69,14 @@ def _archive_entries_in_file(store, file_name: str, epochs: set[int]) -> None:
 
     def _tag_archived(content: str) -> str:
         for epoch in epochs:
-            # Find the epoch comment and add archived tag after it
+            # Find the epoch comment and add archived tag after it — once. The
+            # unconditional replace stacked a fresh tag on every pass over an
+            # already-archived entry: user.profile.md reached 777,100 archived
+            # tags over 67,898 entries (45 MB) on the box by 2026-11-05.
             pattern = f"<!-- @epoch: {epoch} -->"
+            tagged = f"{pattern}\n<!-- @archived: true -->"
             if pattern in content:
-                content = content.replace(
-                    pattern,
-                    f"{pattern}\n<!-- @archived: true -->",
-                )
+                content = re.sub(re.escape(pattern) + r"(?:\n<!-- @archived: true -->)*", lambda _m: tagged, content)
         return content
 
     store.rewrite_file(file_name, _tag_archived)
