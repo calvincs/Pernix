@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import time
 
 from config import settings
@@ -93,6 +94,37 @@ def active_model() -> str:
 
 def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+# What gets embedded (2026-11-06). nomic-embed models are trained with task
+# prefixes — "search_query: " on the question, "search_document: " on the
+# stored text — and the Ollama modelfile adds none (TEMPLATE {{ .Prompt }}).
+# Both sides go through these two functions, so a query and the corpus can
+# never disagree about the prefix. The local bge fallback takes none.
+# Document text drops distill's [Provenance: session …] line: session ids
+# are noise to a semantic model. It is hashed as embedded, so a format
+# change marks every vector stale and snooze re-embeds the corpus once.
+_PROVENANCE_RE = re.compile(r"\n?\[Provenance:[^\]]*\]")
+_DOC_TOPIC_HEADER = False  # set from the 2026-11-06 format A/B
+
+
+def _task_prefixes(model: str) -> tuple[str, str]:
+    m = (model or "").lower()
+    if "nomic" in m and not m.startswith("local:"):
+        return "search_query: ", "search_document: "
+    return "", ""
+
+
+def query_text(text: str) -> str:
+    return _task_prefixes(active_model())[0] + text
+
+
+def document_text(content: str, file_name: str = "", entry_type: str = "") -> str:
+    body = _PROVENANCE_RE.sub("", content or "").strip()
+    if _DOC_TOPIC_HEADER and file_name:
+        topic = file_name.replace(".", " ").replace("_", " ")
+        body = f"{topic} ({entry_type})\n{body}" if entry_type else f"{topic}\n{body}"
+    return _task_prefixes(active_model())[1] + body
 
 
 def _native_base() -> str:
@@ -269,11 +301,23 @@ def _warm_model_detached() -> None:
 
 
 def embed_query_sync(text: str) -> list[float] | None:
-    """Embed one query string synchronously. None on any failure (caller
+    """Embed one search query synchronously. None on any failure (caller
     degrades to lexical)."""
-    global _last_failure_at
     if not enabled():
         return None
+    return _embed_one_sync(query_text(text))
+
+
+def embed_document_sync(content: str, file_name: str = "", entry_type: str = "") -> list[float] | None:
+    """Embed text the way the corpus is embedded, for comparing a candidate
+    entry against stored ones (profile gate) rather than searching."""
+    if not enabled():
+        return None
+    return _embed_one_sync(document_text(content, file_name, entry_type))
+
+
+def _embed_one_sync(text: str) -> list[float] | None:
+    global _last_failure_at
     if degraded():
         from core.llm import local_embed
 
@@ -371,7 +415,7 @@ async def embed_pending(store, max_entries: int = 256) -> int:
     batch_size = max(1, int(settings.embedding_batch_size))
     for i in range(0, len(pending), batch_size):
         batch = pending[i : i + batch_size]
-        vectors = await embed_texts([p["content"] for p in batch])
+        vectors = await embed_texts([p.get("text", p["content"]) for p in batch])
         if vectors is None:
             # One refused batch (an entry the model cannot take, a transient
             # 500) must not park the rest of the backlog behind it — it did:

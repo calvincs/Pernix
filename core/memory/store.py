@@ -1695,9 +1695,10 @@ class MemoryStore:
         """Entries whose vector is missing, model-mismatched, or content-stale.
 
         Staleness is judged in Python against the stored content_hash — the
-        markdown is truth and the vector must describe the current text.
+        markdown is truth and the vector must describe the current text, in
+        the current embed format (embeddings.document_text).
         """
-        from core.llm.embeddings import active_model
+        from core.llm.embeddings import active_model, document_text
         from core.llm.embeddings import content_hash as _hash
 
         model = active_model()
@@ -1711,9 +1712,12 @@ class MemoryStore:
                     for r in conn.execute("SELECT file_name, epoch, model, content_hash FROM vectors")
                 }
                 pending: list[dict] = []
-                for row in conn.execute("SELECT file_name, epoch, content FROM memory_fts"):
+                for row in conn.execute("SELECT file_name, epoch, entry_type, content FROM memory_fts"):
                     key = (row["file_name"], str(row["epoch"]))
-                    h = _hash(row["content"])
+                    # Hash the text as embedded, not the bare content: a
+                    # format change (prefix, header) re-embeds the corpus.
+                    text = document_text(row["content"], row["file_name"], row["entry_type"] or "")
+                    h = _hash(text)
                     have = existing.get(key)
                     if have is not None and have[0] == model and have[1] == h:
                         continue
@@ -1722,6 +1726,7 @@ class MemoryStore:
                             "file_name": row["file_name"],
                             "epoch": str(row["epoch"]),
                             "content": row["content"],
+                            "text": text,
                             "content_hash": h,
                         }
                     )

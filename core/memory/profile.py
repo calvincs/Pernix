@@ -93,11 +93,13 @@ def _nearest_profile(store, content: str) -> float:
     try:
         import numpy as np
 
-        from core.llm.embeddings import embed_query_sync, enabled
+        from core.llm.embeddings import embed_document_sync, enabled
 
         if not enabled():
             return 0.0
-        q = embed_query_sync(content)
+        # Document-side embed: stored facts are embedded as documents, and
+        # the gate compares like with like (a query prefix shifts cosines).
+        q = embed_document_sync(content, "user.profile", "profile")
         if not q:
             return 0.0
         q = np.asarray(q, dtype=np.float32)

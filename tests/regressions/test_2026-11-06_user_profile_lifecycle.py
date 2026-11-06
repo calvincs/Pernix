@@ -61,7 +61,7 @@ def _live_profile(store):
 def test_same_meaning_fact_is_skipped(store, monkeypatch):
     monkeypatch.setattr("config.settings.embedding_model", "test-embed")
     _fact(store, "The user likes answers that lead with the conclusion.", 1000, [1, 0, 0])
-    monkeypatch.setattr("core.llm.embeddings.embed_query_sync", lambda t: [0.99, 0.05, 0])
+    monkeypatch.setattr("core.llm.embeddings.embed_document_sync", lambda t, *a: [0.99, 0.05, 0])
 
     res = profile.save_fact(store, "User prefers the bottom line first in every reply.", source="reflect", tags="user")
 

@@ -324,17 +324,33 @@ _RRF_K = 60  # standard reciprocal-rank-fusion constant
 # search_lessons, internal_recall's strong-match nudge): > 3.0 strong ·
 # 1.0–3.0 weak · < 1.0 noise. Raw RRF scores cap at ~2/(60+1) ≈ 0.033, which
 # reads as noise everywhere — so fusion decides *order* only and the exposed
-# score stays on the BM25 scale. A linear cosine × 4.0 is the simplest map
-# that preserves the documented bands: a strong paraphrase (cos ≥ 0.75)
-# crosses 3.0, near-orthogonal noise (cos ≤ 0.25) stays under 1.0.
-_VECTOR_SCORE_SCALE = 4.0
+# score stays on the BM25 scale.
+#
+# The map is affine between two measured anchors (2026-11-06, live box,
+# nomic-embed-text-v2-moe with task prefixes, 40 paraphrased queries with a
+# known answer): the right entry's cosine had p25/p50/p75 = 0.48/0.53/0.59
+# and an off-topic query's best hit 0.26–0.38. 0.50 maps to 3.0 (strong),
+# 0.30 to 1.0 (noise floor). The old linear cosine × 4.0 put the median
+# right answer at 2.1 — "weak" — so the model was told to distrust exactly
+# the hits the semantic channel exists for. A model or embed-format change
+# moves both anchors: re-measure them.
+_VECTOR_NOISE_COS = 0.30
+_VECTOR_STRONG_COS = 0.50
+_VECTOR_SCORE_MAX = 6.0
+
+
+def vector_to_scale(cos: float) -> float:
+    """Map a cosine onto the shared BM25 score scale (see anchors above)."""
+    span = _VECTOR_STRONG_COS - _VECTOR_NOISE_COS
+    score = 1.0 + (cos - _VECTOR_NOISE_COS) * (2.0 / span)
+    return max(0.0, min(_VECTOR_SCORE_MAX, score))
 
 
 def _rrf_fuse(lexical: list[SearchResult], semantic: list[SearchResult], limit: int) -> list[SearchResult]:
     """Fuse the lexical and semantic channels, deduped by (file, epoch).
 
     Ordering is reciprocal-rank fusion over both channels. The reported
-    `score` is NOT the RRF sum (see _VECTOR_SCORE_SCALE): a result BM25 saw
+    `score` is NOT the RRF sum (see the anchors above): a result BM25 saw
     keeps its BM25 score untouched, a vector-only result gets its cosine
     mapped onto the same scale. `source` names the channel that contributed
     the most rank weight, so a result that owes its position to the vector
@@ -352,7 +368,7 @@ def _rrf_fuse(lexical: list[SearchResult], semantic: list[SearchResult], limit: 
                     "rrf": contribution,
                     "best": contribution,
                     "source": channel,
-                    "score": (r.score if channel == "bm25" else max(0.0, r.score) * _VECTOR_SCORE_SCALE),
+                    "score": (r.score if channel == "bm25" else vector_to_scale(r.score)),
                 }
                 continue
             slot["rrf"] += contribution
@@ -363,6 +379,39 @@ def _rrf_fuse(lexical: list[SearchResult], semantic: list[SearchResult], limit: 
                 slot["source"] = channel
     ordered = sorted(fused.values(), key=lambda s: s["rrf"], reverse=True)[:limit]
     return [SearchResult(entry=s["entry"], score=s["score"], source=s["source"]) for s in ordered]
+
+
+# Per-type share of one result set (2026-11-06). Profile (≈2k) and skill
+# (≈1.3k) entries outnumber findings and decisions, and their broad wording
+# matches almost any query, so they filled whole top-k lists — the lesson
+# starvation fixed in search_lessons was one instance of this. No type may
+# take more than half the slots while other types have candidates; when
+# nothing else matched, the deferred ones backfill, so a profile-only query
+# still gets a full list.
+_TYPE_CAP_OVERFETCH = 3
+
+
+def cap_per_type(results: list[SearchResult], limit: int) -> list[SearchResult]:
+    """Top `limit` of `results` (already in rank order) with no entry_type
+    holding more than ceil(limit/2) slots unless nothing else is left.
+    Order within the kept set is preserved."""
+    cap = max(1, -(-limit // 2))
+    counts: dict[str, int] = {}
+    kept: list[SearchResult] = []
+    deferred: list[SearchResult] = []
+    for r in results:
+        t = r.entry.entry_type or ""
+        if counts.get(t, 0) < cap:
+            counts[t] = counts.get(t, 0) + 1
+            kept.append(r)
+            if len(kept) >= limit:
+                return kept
+        else:
+            deferred.append(r)
+    if len(kept) < limit and deferred:
+        rank = {id(r): i for i, r in enumerate(results)}
+        kept = sorted(kept + deferred[: limit - len(kept)], key=lambda r: rank[id(r)])
+    return kept
 
 
 def search_hybrid(
@@ -380,13 +429,17 @@ def search_hybrid(
     (space-scoped supplemental queries, v33); the vector and recent
     channels are post-filtered to match.
     """
+    # Each channel over-fetches so the per-type cap below has candidates of
+    # other types to promote.
+    fetch = limit * _TYPE_CAP_OVERFETCH
+
     # Signal 1: BM25 keyword search — dedupe keeping highest score
     seen: dict[tuple, SearchResult] = {}
-    for r in search_bm25(conn, query, limit=limit, after_epoch=after_epoch, file_prefix=file_prefix):
+    for r in search_bm25(conn, query, limit=fetch, after_epoch=after_epoch, file_prefix=file_prefix):
         key = (r.entry.file_name, r.entry.epoch)
         if key not in seen or r.score > seen[key].score:
             seen[key] = r
-    bm25_ranked = sorted(seen.values(), key=lambda r: r.score, reverse=True)[:limit]
+    bm25_ranked = sorted(seen.values(), key=lambda r: r.score, reverse=True)[:fetch]
 
     # Signal 1b: semantic channel (1f). Degrades to lexical-only on any
     # failure — unset model, Ollama down, no vectors yet.
@@ -396,11 +449,13 @@ def search_hybrid(
     if _emb.enabled():
         query_vec = _emb.embed_query_sync(query)
         if query_vec:
-            vector_ranked = search_vector(conn, query_vec, limit=limit)
+            vector_ranked = search_vector(conn, query_vec, limit=fetch)
             if file_prefix:
                 vector_ranked = [r for r in vector_ranked if r.entry.file_name.startswith(file_prefix)]
             if vector_ranked:
-                final = _rrf_fuse(bm25_ranked, vector_ranked, limit)
+                final = _rrf_fuse(bm25_ranked, vector_ranked, fetch)
+
+    final = cap_per_type(final, limit)
 
     # Signal 2: Recent entries (last 24h) fill remaining slots only — their
     # flat score is relevance-blind, so they must not displace a weak-but-
