@@ -10,7 +10,8 @@ were two shapes a program can see on its own:
   * the task named an output file and the worker never wrote it
     (d228d7d85697, 51a6e9e1afe6, 8aed50b072e6);
   * the reply cited identifiers or table rows no tool result contains
-    (614eee2726a3, 64b7ff916658) — the mechanical `_grounding_check`.
+    (614eee2726a3, 64b7ff916658) — the mechanical `_grounding_check`. Its
+    findings are recorded, not flagged: too imprecise (see run_checks).
 
 Plus the deterministic gates that already ran for the turn. Nothing here calls
 a model. The result is written as a `reflect` row with reflect_mode="checks",
@@ -38,10 +39,6 @@ _WRITE_RE = re.compile(
     re.IGNORECASE,
 )
 _URLISH = re.compile(r"^(?:https?:|www\.)", re.IGNORECASE)
-
-# A handful of ungrounded tokens is normal (coined names, examples). Flag only
-# above this, or on any unverified id→value table row.
-UNGROUNDED_FLAG_MIN = 3
 
 _WALK_CAP = 4000  # files visited when looking for a deliverable by basename
 
@@ -123,15 +120,16 @@ def run_checks(
     gates_failed = [g.name for g in failing(gates)]
     gates_passed = sum(1 for g in gates if getattr(g, "passed", False))
 
+    # Only checks with high precision flag the result. The grounding check is
+    # recorded but does not flag: run over the box's last 150 workers it
+    # flagged 9, most of them false — `typing.TypeVar` on a page that has it,
+    # and every file:line citation (line numbers never appear verbatim in a
+    # tool result). A noisy flag is the false-ESCALATED problem again.
     flags: list[str] = []
     if missing:
         flags.append("missing deliverable: " + ", ".join(missing))
     if gates_failed:
         flags.append("gate failed: " + ", ".join(gates_failed))
-    if unverified_rows:
-        flags.append(f"{len(unverified_rows)} table row(s) pair values no single tool result shows together")
-    if len(ungrounded) >= UNGROUNDED_FLAG_MIN:
-        flags.append("cites ids found in no tool result: " + ", ".join(ungrounded[:6]))
 
     checked = bool(found or missing or gates)
     return {

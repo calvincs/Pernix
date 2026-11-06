@@ -312,3 +312,22 @@ def test_archiving_twice_does_not_stack_tags():
     for _ in range(3):
         _archive_entries_in_file(_Store(), "f", {5})
     assert store_text["f"].count("@archived: true") == 1
+
+
+def test_grounding_findings_are_recorded_but_do_not_flag(tmp_path, monkeypatch):
+    """Over the box's last 150 workers the grounding check flagged 9, mostly
+    false (file:line citations, an id the page did contain)."""
+    from core.worker_checks import checks_row, run_checks
+
+    monkeypatch.setattr(
+        "core.reflect._grounding_check",
+        lambda final, msgs, req: {
+            "checked": 3,
+            "ungrounded": ["a.h:1-9", "b.h:2", "c.h:3"],
+            "unverified_rows": ["x ↔ y"],
+        },
+    )
+    checks = run_checks("w", task="Explain it", final_reply="see a.h:1-9", attempt_msgs=[], workspace=tmp_path)
+    assert checks["ungrounded"] and checks["unverified_rows"]
+    assert checks["flags"] == []
+    assert checks_row(checks)["verdict"] == "unchecked"
