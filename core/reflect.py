@@ -128,7 +128,9 @@ Output ONE JSON object with exactly these keys:
 - lessons: 0-3 items, each {"kind": "tool" | "process" | "environment" | "domain", "lesson": "...", "evidence": "..."}.
     A lesson is a reusable, specific instruction for a FUTURE turn: which tool or argument works for which kind of source, a failure mode and its fix, a constraint of this environment, a step that saved or wasted time. Write it so it stands alone without this transcript ("http_get truncates docs.vllm.ai pages at 100KB; use browse_web for them").
     evidence: the tool call / result / quote from THIS transcript that shows it. No evidence → no lesson.
-    NOT a lesson: restating the task, praise ("the agent did well"), generic advice ("verify claims", "be thorough"), anything already listed under LESSONS ON FILE (unless this turn contradicts it — then say so).
+    Record a lesson ONLY when this turn hit friction a future turn can avoid (an error, a refusal, a fallback, a retry, a workaround, a wrong first attempt) or uncovered a non-obvious fact about a tool, a source or this environment.
+    NOT a lesson: that something worked as expected ("http_get fetched the page fine"); restating the task; praise; generic advice ("verify claims", "be thorough", "follow the format"); advice about how the harness grades or presents results; anything already listed under LESSONS ON FILE (unless this turn contradicts it — then say so).
+    A lesson must hold in general, not only in this transcript. If the transcript shows it both ways, write nothing.
     An empty list is the normal answer for a routine turn.
 - user_observations: 0-2 durable, self-contained facts about the USER this turn revealed (a preference, a correction, expertise). Never infer from task success. Empty for most turns.
 - what_worked: one short phrase, or "".
@@ -141,6 +143,16 @@ Ground everything in the transcript. Do not speculate about what you cannot see;
 # so post-mortem counters keep one vocabulary — nothing acts on it.
 _OUTCOME_VERDICT = {"done": "pass", "partial": "retry", "failed": "retry", "blocked": "escalate", "unclear": "pass"}
 _LESSON_KINDS = ("tool", "process", "environment", "domain")
+# A lesson's evidence must show friction: an error, refusal, cap, wrong or
+# empty result, a fallback. Matched on the evidence quote, not the lesson.
+_FRICTION_RE = re.compile(
+    r"(error|denied|refus|reject|fail|not (?:found|allowed|permitted|installed|text|within)|no matches|cannot|can't|"
+    r"unable|truncat|cap(?:ped)?\b|source_complete=false|exit(?: code)? ?[1-9]|\b[45]\d\d\b|nameerror|exception|"
+    r"traceback|blocked|forbidden|timed? ?out|timeout|method not allowed|returns? (?:none|nothing|unrelated|empty)|"
+    r"none\b|missing|wrong|invalid|mismatch|degenerate|contradict|instead|fallback|retry|workaround|ignores?|"
+    r"false\b|bad\b)",
+    re.IGNORECASE,
+)
 
 
 def _debrief_to_data(d: dict) -> dict:
@@ -174,6 +186,12 @@ def _clean_lessons(raw) -> list[dict]:
         kind = str(item.get("kind") or "process").lower()
         if len(lesson) < 40 or not evidence:
             continue  # too thin to stand alone, or unevidenced
+        if not _FRICTION_RE.search(evidence):
+            # "X worked as expected" is not a lesson. On 13 real turns this
+            # dropped exactly the weak ones ("http_get fetches sqlite.org
+            # pages cleanly", "await can already report done") and kept the
+            # 20 that quote an error, refusal, cap or wrong result.
+            continue
         out.append(
             {"kind": kind if kind in _LESSON_KINDS else "process", "lesson": lesson[:600], "evidence": evidence[:300]}
         )

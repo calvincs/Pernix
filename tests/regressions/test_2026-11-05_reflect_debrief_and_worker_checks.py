@@ -331,3 +331,21 @@ def test_grounding_findings_are_recorded_but_do_not_flag(tmp_path, monkeypatch):
     assert checks["ungrounded"] and checks["unverified_rows"]
     assert checks["flags"] == []
     assert checks_row(checks)["verdict"] == "unchecked"
+
+
+def test_a_lesson_must_quote_friction():
+    from core.reflect import _clean_lessons
+
+    good = {"kind": "tool", "lesson": "x" * 50, "evidence": "content-type application/rdap+json is not text"}
+    fine = {"kind": "tool", "lesson": "y" * 50, "evidence": "http_get returned 17364 chars of full page HTML"}
+    assert _clean_lessons([good, fine]) == [good]
+
+
+def test_deliverable_under_an_output_heading_is_found():
+    """Field case afa58208c13a: the path sat on its own line under a heading."""
+    from core.worker_checks import deliverable_paths
+
+    task = "Then write EXACTLY 5 bullets.\n\nOutput file requirements (strict):\n- Path: /app/docs/isolation_summary.md (exact)"
+    assert deliverable_paths(task) == ["/app/docs/isolation_summary.md"]
+    assert deliverable_paths("Audit core/memory/store.py and report what you find.") == []
+    assert deliverable_paths("Read from data/in.csv and write the result to out/result.csv") == ["out/result.csv"]

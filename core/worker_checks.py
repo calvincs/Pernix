@@ -29,28 +29,49 @@ from pathlib import Path
 
 logger = logging.getLogger("pernix.worker_checks")
 
-# A file the task asks to be written: a write-verb, then (within the same
-# clause) a path with a known output extension.
+# A file the task asks to be written. Every path-like token with an output
+# extension is a candidate; it counts as a deliverable when the nearest cue
+# before it (within the same short window) is a write cue, not a read cue.
+# Field case afa58208c13a: the task put the path under an "Output file
+# requirements" heading as "- Path: /app/docs/x.md" — no verb in that clause.
 _EXT = r"(?:md|markdown|txt|json|jsonl|csv|tsv|yaml|yml|html|xml|py|sh|sql|log|toml|ini|png|svg)"
-_PATH = rf"(?P<path>(?:~|\.{{1,2}})?/?[\w.\-]+(?:/[\w.\-]+)*\.{_EXT})"
-_WRITE_RE = re.compile(
-    rf"\b(?:write|writes|writing|save|saves|saving|create|creates|creating|produce|output|"
-    rf"generate|export|store|persist|dump|put)\b[^\n.;]{{0,80}}?(?<![\w/]){_PATH}(?![\w/])",
+_PATH_RE = re.compile(
+    rf"(?<![\w/:.])(?P<path>(?:~|\.{{1,2}})?/?[\w.\-]+(?:/[\w.\-]+)*\.{_EXT})(?![\w/])", re.IGNORECASE
+)
+_WRITE_CUE = re.compile(
+    r"\b(?:write|writes|writing|written|save|saves|saving|saved|create|creates|creating|produce|output|"
+    r"outputs|deliverable|deliverables|destination|generate|export|store|persist|dump)\b",
     re.IGNORECASE,
 )
+_READ_CUE = re.compile(
+    r"\b(?:read|reads|reading|fetch|fetches|open|load|loads|from|source|input|inputs|parse|analy[sz]e|"
+    r"review|inspect|scan|audit|see|under|in)\b",
+    re.IGNORECASE,
+)
+_CUE_WINDOW = 160
 _URLISH = re.compile(r"^(?:https?:|www\.)", re.IGNORECASE)
 
-_WALK_CAP = 4000  # files visited when looking for a deliverable by basename
+_WALK_CAP = 20000  # files visited when looking for a deliverable by basename
 
 
 def deliverable_paths(task: str) -> list[str]:
     """Output files the task text asks the worker to write, in order, unique."""
+    text = task or ""
     out: list[str] = []
-    for m in _WRITE_RE.finditer(task or ""):
+    for m in _PATH_RE.finditer(text):
         p = m.group("path").strip().rstrip(".,)")
-        if not p or _URLISH.match(p) or p in out:
+        if not p or p in out:
             continue
-        out.append(p)
+        start = m.start()
+        # Skip anything that is part of a URL.
+        line_start = text.rfind("\n", 0, start) + 1
+        if re.search(r"https?://\S*$", text[line_start:start]):
+            continue
+        window = text[max(0, start - _CUE_WINDOW) : start]
+        last_write = max((w.end() for w in _WRITE_CUE.finditer(window)), default=-1)
+        last_read = max((r.end() for r in _READ_CUE.finditer(window)), default=-1)
+        if last_write >= 0 and last_write > last_read:
+            out.append(p)
     return out[:8]
 
 
