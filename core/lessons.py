@@ -436,8 +436,8 @@ def pitfalls_block(message: str, tools: list[str] | None = None, *, session_id: 
     """Harness-filled [KNOWN PITFALLS] block for a scout report, or "".
 
     Up to three lessons quoted verbatim (score >= 1.0 after age decay) plus
-    the capability line. The query adds the planned tool names to the task
-    text: the rdap miss was on task text, while the plan named http_get."""
+    the capability line. `tools` is accepted for callers but not searched:
+    generic tool names outranked relevant lessons on the live store."""
     if not settings.lesson_pitfalls_enabled:
         return ""
     header = "[KNOWN PITFALLS — from past tool failures; check before you act]"
@@ -449,7 +449,11 @@ def pitfalls_block(message: str, tools: list[str] | None = None, *, session_id: 
 
         store = get_memory_store()
         if store and (message or "").strip():
-            query = (message or "")[:600] + " " + " ".join((tools or [])[:10])
+            # Task text only. Appending the planned tool names pulled generic
+            # tool-usage lessons ("http_get returns full sqlite.org pages") over
+            # the relevant one on the box; tool-specific failures are the error
+            # hint's job, keyed on the error itself.
+            query = (message or "")[:600]
             covered: set[str] = set()
             for r in store.search_lessons(query, limit=5, _track_hits=False):
                 if r.score < 1.0 or len(lines) >= 3:  # the documented weak floor; task text is a long query
