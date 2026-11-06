@@ -189,3 +189,12 @@ def test_signatures_backfill_existing_lessons(store):
     conn.close()
     assert lessons.backfill_signatures(store) == 1
     assert lessons.error_hint("http_get", "Error: application/rdap+json is not text", set())
+
+
+def test_a_block_page_returned_as_success_counts_as_a_failure(store):
+    page = "# Access Restricted\n**URL:** https://www.news-example.org/\nWe're unable to allow access to this page"
+    assert lessons.is_failure(page, was_error=False, command_failed=False, tool="browse_web")
+    assert not lessons.is_failure(page, was_error=False, command_failed=False, tool="bash")
+    lessons.record_outcome("browse_web", {"url": "https://www.news-example.org/"}, page, failed=True)
+    assert "news-example.org (bot wall)" in lessons.capability_line()
+    assert "news-example.org" in lessons.error_tokens(page)

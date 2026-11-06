@@ -3075,7 +3075,10 @@ async def _record_round_results(
         from core import lessons as _lessons
 
         _failed = _lessons.is_failure(
-            result.content, was_error=result.was_error, command_failed=bool(_tm.get("command_failed"))
+            result.content,
+            was_error=result.was_error,
+            command_failed=bool(_tm.get("command_failed")),
+            tool=result.tool_name,
         )
         _args = item.get("parsed_args") if isinstance(item.get("parsed_args"), dict) else {}
         await asyncio.to_thread(_lessons.record_outcome, result.tool_name, _args, result.content, failed=_failed)

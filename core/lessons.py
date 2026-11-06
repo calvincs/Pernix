@@ -54,6 +54,8 @@ _GENERIC = frozenset(
     {
         "bash", "sh", "line", "error", "exit", "command", "not", "found", "failed", "http", "https", "www",
         "the", "text", "application/json", "text/html", "text/plain", "localhost",
+        # httpx appends "For more information check: https://developer.mozilla.org/…"
+        "developer.mozilla.org",
     }
 )  # fmt: skip
 
@@ -67,7 +69,7 @@ def error_tokens(text: str) -> set[str]:
     for rx in (_CNF_RE, _NOT_INSTALLED_RE, _NO_MODULE_RE):
         out.update(m.group(1).lower() for m in rx.finditer(head))
     out.update(m.group(1).lower() for m in _CTYPE_RE.finditer(head))
-    if _STATUS_RE.search(head) or "blocked" in head.lower() or "access denied" in head.lower():
+    if _STATUS_RE.search(head) or "blocked" in head.lower() or _BLOCK_PAGE_RE.search(head[:400]):
         out.update(_host_of(m.group(1)) for m in _URL_HOST_RE.finditer(head))
     return {t for t in out if t and t not in _GENERIC}
 
@@ -198,10 +200,24 @@ def rejection(content: str) -> str:
 # ── error-time hint ─────────────────────────────────────────────────────
 
 
-def is_failure(content: str, *, was_error: bool, command_failed: bool) -> bool:
+_WEB_TOOLS = frozenset({"http_get", "browse_web", "fetch_url", "crawl4ai_fetch"})
+# A block page a web tool returns as a "success" (b70b43b415cb: browse_web
+# got news-example.org's "Access Restricted" page with was_error=false).
+_BLOCK_PAGE_RE = re.compile(
+    r"\b(?:Access (?:Restricted|Denied)|Attention Required|Just a moment|unable to allow access|"
+    r"Payment Required|verify you are (?:a )?human|Request blocked)\b",
+    re.IGNORECASE,
+)
+
+
+def is_failure(content: str, *, was_error: bool, command_failed: bool, tool: str = "") -> bool:
     """The hint trigger. http_get rejections are stored was_error=False and
-    begin "Error …", so the text check is needed alongside the flags."""
-    return bool(was_error or command_failed or (content or "").lstrip().startswith("Error"))
+    begin "Error …", and web tools return block pages as successes, so the
+    text checks are needed alongside the flags."""
+    text = (content or "").lstrip()
+    if was_error or command_failed or text.startswith("Error"):
+        return True
+    return tool in _WEB_TOOLS and bool(_BLOCK_PAGE_RE.search(text[:400]))
 
 
 def _age_days(epoch: int) -> int:
@@ -361,7 +377,7 @@ def record_outcome(tool: str, args: dict | None, content: str, *, failed: bool) 
                 _upsert("tool_limit", f"{tool}:{ct.group(1).lower()}", f"{tool} cannot read {ct.group(1).lower()}")
             elif st and st.group(1) in ("401", "402", "403", "429", "451"):
                 _upsert("blocked_host", host, f"HTTP {st.group(1)}")
-            elif re.search(r"access denied|just a moment|captcha|bot detect", text[:600], re.IGNORECASE):
+            elif _BLOCK_PAGE_RE.search(text[:600]) or re.search(r"captcha|bot detect", text[:600], re.IGNORECASE):
                 _upsert("blocked_host", host, "bot wall")
         elif len(text) > 500 and not text.lstrip().startswith("Error"):
             _clear("blocked_host", host)
