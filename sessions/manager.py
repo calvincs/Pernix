@@ -369,6 +369,12 @@ def _map_termination_to_v2_reason(tr: str | None) -> tuple[str, sv2.TerminationR
 _WORKER_RESUME_PREFIX = "[Watched workers have completed"
 
 
+def _is_worker_resume(entry) -> bool:
+    """True for a queued synthetic worker-resume message (never persisted)."""
+    e = PendingMessage.coerce(entry)
+    return e.msg_id is None and str(e.message or "").startswith(_WORKER_RESUME_PREFIX)
+
+
 def _apply_space_fields(session: AgentSession, space_id: str | None) -> None:
     """Set space_id + workspace_home on a session object (create AND
     rehydrate must both run this, or a restart strips space behavior).
@@ -3652,6 +3658,33 @@ class SessionManager:
                     session.session_id[:12],
                 )
                 return
+            # A resume queued while the turn was still running (it was blocked
+            # in await_workers, watching the same workers) is redundant once
+            # that turn read every result — the same check the idle path in
+            # _resume_from_workers makes before it queues anything.
+            if (
+                sv2._current_state(session) is sv2.SessionStateV2.IDLE_READY
+                and _is_worker_resume(session.pending_messages[0])
+                and await asyncio.to_thread(self._worker_results_already_collected, session)
+            ):
+                _keep = [e for e in session.pending_messages if not _is_worker_resume(e)]
+                session.pending_messages.clear()
+                session.pending_messages.extend(_keep)
+                session._watched_worker_ids.clear()
+                self._persist_watched(session)
+                logger.info(
+                    "Session %s: queued worker resume dropped — results already collected this turn",
+                    session.session_id[:12],
+                )
+                session.emit_event(
+                    {
+                        "type": "workers.resume_skipped",
+                        "workers": list(session.worker_ids),
+                        "reason": "results-already-collected",
+                    }
+                )
+                if not session.pending_messages:
+                    return
             # A durably debited continuation is claimed here, immediately
             # before the turn that spends it starts, and settled immediately
             # after. Anything the claim refuses — the goal was paused or
@@ -3870,8 +3903,12 @@ class SessionManager:
         # and AWAITING_WORKERS into one "idle" value.
         if sv2._current_state(session) is not sv2.SessionStateV2.FINALIZING:
             return
-        if session.pending_messages:
-            return  # Don't distill if more work queued
+        # Real queued work supersedes this turn's hooks. A queued worker-resume
+        # does not: it is the harness's own follow-up to THIS turn, and letting
+        # it suppress the hooks left the turn ungraded and undistilled (field
+        # case, session 810bc5142b05).
+        if any(not _is_worker_resume(e) for e in session.pending_messages):
+            return
 
         from sessions.hooks import run_post_task_hooks
 
