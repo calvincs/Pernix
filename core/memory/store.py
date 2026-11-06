@@ -309,6 +309,17 @@ class MemoryStore:
 
         content = sanitize_entry_content(content)
 
+        # Every lesson writer passes one filter (2026-11-06): a stored
+        # "route the write through a privileged shell (root/sudo)" lesson
+        # would otherwise be quoted back to the agent at the moment of need.
+        if entry_type == "lesson":
+            from core.lessons import rejection
+
+            why = rejection(content)
+            if why:
+                logger.info("Lesson rejected (%s): %.80s", why, content)
+                return f"Error: lesson rejected ({why})"
+
         # Only dedup substantive entries — short strings (< 60 chars) have
         # unreliable similarity scores and are allowed through unconditionally.
         if not skip_dedup and len(content) >= 60:
@@ -394,6 +405,10 @@ class MemoryStore:
                 finally:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
+        if entry_type == "lesson":
+            from core.lessons import index_lesson
+
+            index_lesson(file_name, epoch, content)
         return f"Saved to {file_name} (epoch={epoch})"
 
     def add_or_supersede_entry(
@@ -1488,7 +1503,13 @@ class MemoryStore:
             logger.debug("Failed to record memory hits: %s", e)
 
     def search_lessons(
-        self, query: str, limit: int = 10, _track_hits: bool = True, space_slug: str | None = None
+        self,
+        query: str,
+        limit: int = 10,
+        _track_hits: bool = True,
+        space_slug: str | None = None,
+        *,
+        lexical_only: bool = False,
     ) -> list[SearchResult]:
         """Search lesson-type memory entries with age-based decay.
 
@@ -1503,8 +1524,29 @@ class MemoryStore:
         beyond). Lessons that survive after decay still show up — they're
         just outranked by anything fresher and roughly comparable.
         """
-        results = self.search(query, mode="hybrid", limit=limit * 4, _track_hits=False, space_slug=space_slug)
-        lessons = [r for r in results if r.entry.entry_type == "lesson"]
+        # Lesson rows queried directly (2026-11-06): the hybrid top-k over all
+        # 13.7k entries, filtered afterwards, returned no lesson at all for
+        # "MX and TXT records for <domain>" — skills and profiles filled it.
+        # The hybrid pass stays for its semantic matches; both channels score
+        # on the BM25 scale, so the union keeps the higher score per entry.
+        from core.memory.search import search_bm25
+
+        conn = self._connect()
+        try:
+            direct = search_bm25(conn, query, limit=limit * 2, entry_type="lesson")
+        finally:
+            conn.close()
+        merged: dict[tuple, SearchResult] = {}
+        hybrid = (
+            []
+            if lexical_only
+            else self.search(query, mode="hybrid", limit=limit * 4, _track_hits=False, space_slug=space_slug)
+        )
+        for r in [*direct, *(h for h in hybrid if h.entry.entry_type == "lesson")]:
+            key = (r.entry.file_name, r.entry.epoch)
+            if key not in merged or r.score > merged[key].score:
+                merged[key] = r
+        lessons = list(merged.values())
         if not lessons:
             return []
 

@@ -45,6 +45,7 @@
 ## Web Access
 
 - **Memory first.** Before any web search, consider whether prior memory or sessions already answer the question. Scout pre-loads a baseline memory + cross-session search at turn start — if it's relevant, synthesize from it first and use the web only to fill gaps or verify. `search_web` will additionally surface matching memory and prior-session hits alongside its results; treat a strong internal match as authoritative unless you have a specific reason to favor the live web.
+- **After a tool error, check past lessons.** If a tool fails and no `[harness hint] past lesson` came with it, call `recall(<the error text>, type="lesson")` before you try another approach. A `[KNOWN PITFALLS]` block in your context lists failures already seen on this box — plan around them.
 - **search_web**: Use for broad research or finding URLs. Returns titles, URLs, and snippets, with internal-knowledge hits prepended.
 - **http_get**: Use for APIs, JSON endpoints, raw HTML, or simple static pages. Fast (~1-2s), lightweight, no JavaScript rendering.
 - **browse_web**: Use for JavaScript-heavy sites, SPAs, paywalled content, or pages where http_get returns garbled/empty content. Slower (~3-10s) but renders JavaScript and returns clean markdown.

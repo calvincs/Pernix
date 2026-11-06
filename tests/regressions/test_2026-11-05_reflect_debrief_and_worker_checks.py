@@ -161,7 +161,7 @@ async def test_debrief_lessons_are_written_once(monkeypatch):
     assert len(store.written) == 1
     assert store.queried == [lesson["lesson"]] * 2
     assert store.written[0]["entry_type"] == "lesson"
-    assert store.written[0]["file_name"] == "pernix.lessons_tool"
+    assert store.written[0]["file_name"] == "pernix.lessons"
     assert "seen in call 7" in store.written[0]["content"]
 
 

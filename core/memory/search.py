@@ -153,8 +153,12 @@ def search_bm25(
     limit: int = 5,
     after_epoch: int | None = None,
     file_prefix: str | None = None,
+    entry_type: str | None = None,
 ) -> list[SearchResult]:
     """BM25 keyword search via FTS5. Scores are length-normalized.
+
+    entry_type restricts the match to one type in SQL (lessons: 1,683 of
+    13.7k entries — post-filtering a top-k over everything starved them).
 
     Query tokens are OR'd, so the raw bm25() sum grows with query length:
     on the live store a 15-token query with no genuinely relevant entries
@@ -180,6 +184,10 @@ def search_bm25(
     if after_epoch:
         sql += " AND CAST(epoch AS INTEGER) > ?"
         params.append(after_epoch)
+
+    if entry_type:
+        sql += " AND entry_type = ?"
+        params.append(entry_type)
 
     if file_prefix:
         # Space-scoped supplemental query (v33): restrict to one file-name

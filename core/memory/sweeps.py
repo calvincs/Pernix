@@ -1054,6 +1054,12 @@ async def compact_memory_files(store, db, is_cancelled: Callable[[], bool]) -> i
         seeded = await asyncio.to_thread(moves.seed_from_store, store)
         db.set_snooze_state("move_ledger_seeded", str(seeded))
         logger.info("Snooze: seeded the move ledger with %d hops from memory files", seeded)
+    if not db.get_snooze_state("lesson_sigs_backfilled"):
+        from core import lessons
+
+        n = await asyncio.to_thread(lessons.backfill_signatures, store)
+        db.set_snooze_state("lesson_sigs_backfilled", str(n))
+        logger.info("Snooze: indexed match tokens for %d existing lessons", n)
     try:
         seen = json.loads(db.get_snooze_state("compact_mtimes") or "{}")
     except (ValueError, TypeError):

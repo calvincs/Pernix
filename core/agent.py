@@ -3068,6 +3068,28 @@ async def _record_round_results(
             stored_content = stored_content + "\n\n" + nudge
             logger.info("harness.nudge fired tool=%s pattern hint appended", result.tool_name)
 
+        # Lessons at the moment of need (core/lessons.py): a failed result
+        # gets at most one past lesson naming this error's distinctive token,
+        # and every result feeds the capability map. Both append-only to the
+        # tool message — the prompt prefix and tool list are untouched.
+        from core import lessons as _lessons
+
+        _failed = _lessons.is_failure(
+            result.content, was_error=result.was_error, command_failed=bool(_tm.get("command_failed"))
+        )
+        _args = item.get("parsed_args") if isinstance(item.get("parsed_args"), dict) else {}
+        await asyncio.to_thread(_lessons.record_outcome, result.tool_name, _args, result.content, failed=_failed)
+        if _failed:
+            _hint = await asyncio.to_thread(
+                _lessons.error_hint,
+                result.tool_name,
+                result.content,
+                nudges_fired,
+                session_id=getattr(session, "session_id", ""),
+            )
+            if _hint:
+                stored_content = stored_content + "\n\n" + _hint
+
         await save_turn_msg(
             "tool",
             stored_content,

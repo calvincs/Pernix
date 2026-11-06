@@ -224,7 +224,10 @@ async def _save_debrief_lessons(session_id: str, lessons: list[dict]) -> int:
             res = await asyncio.to_thread(
                 store.add_entry,
                 content=f"{item['lesson']} (evidence: {item['evidence']})",
-                file_name=f"pernix.lessons_{item['kind']}",
+                # The store snaps "pernix.lessons_<kind>" onto pernix.lessons
+                # or pernix.environment by name similarity anyway; the kind
+                # lives in the tags.
+                file_name="pernix.lessons",
                 entry_type="lesson",
                 tags=f"lesson,debrief,{item['kind']},{time.strftime('%Y-%m-%d')}",
                 weight="normal",

@@ -444,6 +444,7 @@ def recall(
     top: int = 5,
     file: str = "",
     include_seen: bool = False,
+    type: str = "",
     _context: dict | None = None,
 ) -> str:
     """Fast FTS5 memory search. Returns scored results (score > 3.0 = strong,
@@ -465,11 +466,12 @@ def recall(
         from core.spaces import space_slug_for_session
 
         fetch = top * 2 if file else top
-        results = store.search(
-            query,
-            limit=fetch,
-            space_slug=space_slug_for_session((_context or {}).get("session_id", "")),
-        )
+        _space = space_slug_for_session((_context or {}).get("session_id", ""))
+        if (type or "").strip().lower() == "lesson":
+            # Lesson rows directly — past workarounds for a tool error.
+            results = store.search_lessons(query, limit=fetch, space_slug=_space)
+        else:
+            results = store.search(query, limit=fetch, space_slug=_space)
         if file:
             results = [r for r in results if r.entry.file_name.lower() == file.lower()][:top]
         if not results:
@@ -766,6 +768,13 @@ def register(reg) -> None:
                 "file": {
                     "type": "string",
                     "description": "Optional: restrict search to one memory file by name (e.g. pernix.lessons)",
+                },
+                "type": {
+                    "type": "string",
+                    "description": (
+                        "Optional: 'lesson' searches only past lessons (workarounds learned from tool "
+                        "failures). Use it with the error text after a tool fails."
+                    ),
                 },
                 "include_seen": {
                     "type": "boolean",

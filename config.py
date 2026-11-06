@@ -510,6 +510,10 @@ class Settings:
     memory_move_breaker: int = 3
     memory_reroute_high_cap: int = 50  # high-confidence reroutes per cycle
     memory_compact_files_per_cycle: int = 25  # compaction rung budget
+    # Lessons at the moment of need (core/lessons.py, 2026-11-06)
+    lesson_hints_enabled: bool = True  # past-lesson hint on a matching tool error
+    lesson_pitfalls_enabled: bool = True  # [KNOWN PITFALLS] block in scout reports
+    capability_map_enabled: bool = True  # missing commands / blocked hosts from tool results
 
     # --- Session Queuing ---
     max_pending_messages: int = 10  # Max queued messages per session (backpressure)

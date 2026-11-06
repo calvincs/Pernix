@@ -1277,6 +1277,32 @@ async def run_scout(
     emit: Callable[[dict], None] | None = None,
     is_retry: bool = False,
 ) -> ScoutReport:
+    """Run the scout, then attach the harness's [KNOWN PITFALLS] block.
+
+    The block is filled here, after whichever path produced the report, so
+    the no-LLM fallback (22% of scouts) and worker scouts get it too.
+    """
+    brief = session_brief or build_session_brief(session_id)
+    report = await _run_scout_core(session_id, message, brief, emit, is_retry)
+    if report is not None and not memory_recall_denied(brief):
+        try:
+            from core.lessons import pitfalls_block
+
+            report.known_pitfalls = await asyncio.to_thread(
+                pitfalls_block, message, list(report.recommended_tools or []), session_id=session_id
+            )
+        except Exception as e:
+            logger.debug("pitfalls block failed for %s: %s", session_id, e)
+    return report
+
+
+async def _run_scout_core(
+    session_id: str,
+    message: str,
+    session_brief: SessionBrief | None = None,
+    emit: Callable[[dict], None] | None = None,
+    is_retry: bool = False,
+) -> ScoutReport:
     """Run the scout agent. Returns ScoutReport (from LLM or fallback).
 
     The scout:

@@ -574,7 +574,9 @@ async def _recall_lesson_evidence(session_id: str, messages: list) -> str:
         store = get_memory_store()
         if not store:
             return ""
-        lessons = await asyncio.to_thread(store.search_lessons, last_user_msg, limit=3)
+        # _track_hits=False: a grader read is not exposure — hit counts on
+        # lessons must mean the agent was shown one (2026-11-06).
+        lessons = await asyncio.to_thread(store.search_lessons, last_user_msg, limit=3, _track_hits=False)
         if not lessons:
             return ""
         import time as _t

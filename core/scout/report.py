@@ -97,6 +97,10 @@ class ScoutReport:
 
     # Curated context sections
     memory_context: str = ""  # Relevant memory entries, max ~500 tokens
+    # Harness-filled after every scout run — LLM, fallback, bypass, worker —
+    # never by the scout model, so a lesson is quoted, not paraphrased
+    # (core/lessons.py pitfalls_block). Rendered in the per-turn section only.
+    known_pitfalls: str = ""
     memory_queries_used: list[str] = field(default_factory=list)
     cross_session_context: str = ""  # Findings from other sessions, max ~500 tokens
 
@@ -190,6 +194,8 @@ class ScoutReport:
                 "reproduce the previous attempt — address the findings below.\n\n"
                 f"{self.retry_directive}"
             )
+        if self.known_pitfalls:
+            parts.append(self.known_pitfalls)
         if self.memory_context:
             parts.append(f"[RELEVANT MEMORY]\n{self.memory_context}")
         if self.cross_session_context:
