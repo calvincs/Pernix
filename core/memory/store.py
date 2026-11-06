@@ -1998,8 +1998,18 @@ class MemoryStore:
             "store_mb": round(total_bytes / 1e6, 1),
             "archived_sections": archived_sections,
             "bloated_files": sorted(bloated)[:10],
+            "profile_entries": self._profile_count(),
             **self._move_stats(),
         }
+
+    def _profile_count(self) -> int:
+        conn = self._connect()
+        try:
+            return conn.execute("SELECT COUNT(*) FROM memory_fts WHERE entry_type = 'profile'").fetchone()[0]
+        except Exception:
+            return 0
+        finally:
+            conn.close()
 
     def _move_stats(self) -> dict:
         from core.memory import moves

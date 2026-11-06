@@ -1155,6 +1155,8 @@ def _notify_churn(health: dict) -> None:
         reasons.append("large or tombstone-heavy files: " + ", ".join(health["bloated_files"][:5]))
     if (health.get("moves_24h") or 0) > 1000:
         reasons.append(f"{health['moves_24h']} entry moves in 24 h")
+    if (health.get("profile_entries") or 0) > int(settings.profile_alert_entries):
+        reasons.append(f"{health['profile_entries']} user-profile entries")
     if (health.get("bodies_at_breaker") or 0) > 100:
         reasons.append(f"{health['bodies_at_breaker']} entries frozen by the move breaker")
     if not reasons:

@@ -212,7 +212,7 @@ def rejection(content: str) -> str:
 
 _WEB_TOOLS = frozenset({"http_get", "browse_web", "fetch_url", "crawl4ai_fetch"})
 # A block page a web tool returns as a "success" (b70b43b415cb: browse_web
-# got news-example.org's "Access Restricted" page with was_error=false).
+# got a site's "Access Restricted" page with was_error=false).
 _BLOCK_PAGE_RE = re.compile(
     r"\b(?:Access (?:Restricted|Denied)|Attention Required|Just a moment|unable to allow access|"
     r"Payment Required|verify you are (?:a )?human|Request blocked)\b",

@@ -567,6 +567,11 @@ class SnoozeRunner:
             _announce(bus, "compact", "Compacting memory files")
             await self._rung("compact_memory_files", self._compact_memory_files())
 
+        # Activity 3e: User-profile consolidation (LLM, maintenance budget)
+        if not self._is_cancelled() and not did_maintenance_llm and self._llm_ready():
+            _announce(bus, "profile", "Merging duplicate user-profile facts")
+            did_maintenance_llm = bool(await self._rung("consolidate_profile", self._consolidate_profile(), default=0))
+
         # Activity 4: Tag enrichment (no LLM)
         if not self._is_cancelled():
             _announce(bus, "enrich_tags", "Enriching memory entry tags")
@@ -895,23 +900,17 @@ Output valid JSON only. No markdown fences. /no_think"""
                 if not content:
                     continue
 
-                # Multi-signal dedup against existing memories
-                if store.is_duplicate(content):
-                    continue
-
                 tags = entry.get("tags", "")
                 tags = f"user,profile,{tags}" if tags else "user,profile"
                 tags += f",{time.strftime('%Y-%m-%d')}"
 
-                await asyncio.to_thread(
-                    store.add_entry,
-                    content=content,
-                    file_name="user.profile",
-                    entry_type="profile",
-                    tags=tags,
-                    weight=entry.get("weight", "normal"),
-                    source="snooze",
+                from core.memory.profile import save_fact
+
+                res = await asyncio.to_thread(
+                    save_fact, store, content, source="snooze", tags=tags, weight=entry.get("weight", "normal")
                 )
+                if res.startswith("Skipped") or res.startswith("Memory already contains"):
+                    continue
                 saved += 1
                 await asyncio.sleep(0.1)
 
@@ -1382,6 +1381,17 @@ Output valid JSON only. No markdown fences. /no_think"""
         from core.memory import sweeps
 
         self._stats["entries_enriched"] += await sweeps.enrich_tags(self._store(), self._is_cancelled)
+
+    async def _consolidate_profile(self) -> int:
+        """Activity 3e — merge one cluster of near-duplicate profile facts."""
+        if _mutation_blocked():
+            return 0
+        from core.memory import profile
+        from db import models as db
+
+        retired = await profile.consolidate_step(self._store(), db, self._is_cancelled)
+        self._bump("profile_entries_merged", retired)
+        return retired
 
     async def _compact_memory_files(self) -> None:
         """Activity 3d — drop tombstones whose body is live elsewhere."""

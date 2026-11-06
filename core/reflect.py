@@ -114,7 +114,7 @@ EVIDENCE QUALITY (outcome vs. execution):
 # turn should know. Tested against eight real turns beside REFLECT_PROMPT: the
 # grade prompt extracted nothing on passed turns (what_worked/what_failed are
 # retry-only fields), while this one surfaced concrete, evidenced lessons
-# memory did not hold (http_get rejects application/rdap+json; a public API ignores
+# memory did not hold (http_get rejects a JSON media type; a public API ignores
 # one of its documented filters; the grep tool ignores \\d).
 DEBRIEF_PROMPT = """You are the Debrief step of an agent harness. A turn has finished. You do NOT grade it and nothing you say re-runs it. Your job is to record what is worth knowing NEXT time — so a future turn on a similar task goes better.
 
@@ -2192,18 +2192,16 @@ async def _save_user_observations(session_id: str, result: ReflectResult) -> Non
         store = get_memory_store()
         if not store:
             return
+        from core.memory.profile import save_fact
+
         for content in observations:
-            if len(content) < 20:
-                continue  # too short for the dedup gate to score reliably
-            await asyncio.to_thread(
-                store.add_entry,
-                content=content,
-                file_name="user.profile",
-                entry_type="profile",
-                tags=f"user,profile,reflect,{time.strftime('%Y-%m-%d')}",
-                weight="normal",
-                source="reflect",
+            # One gate for every automatic profile fact: correction replaces,
+            # same-meaning skips, daily cap (core/memory/profile.py).
+            res = await asyncio.to_thread(
+                save_fact, store, content, source="reflect", tags=f"user,profile,reflect,{time.strftime('%Y-%m-%d')}"
             )
+            if res.startswith("Skipped"):
+                logger.debug("Reflect user observation not saved: %s", res)
     except Exception as e:
         logger.debug("Reflect user-observation save failed for %s: %s", session_id, e)
 

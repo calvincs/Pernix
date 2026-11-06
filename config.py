@@ -514,6 +514,12 @@ class Settings:
     lesson_hints_enabled: bool = True  # past-lesson hint on a matching tool error
     lesson_pitfalls_enabled: bool = True  # [KNOWN PITFALLS] block in scout reports
     capability_map_enabled: bool = True  # missing commands / blocked hosts from tool results
+    # User profile lifecycle (core/memory/profile.py, 2026-11-06)
+    profile_daily_cap: int = 15  # automatic profile facts written per 24 h (reflect + snooze)
+    profile_gate_cosine: float = 0.88  # skip a fact this close to a stored one
+    profile_cluster_cosine: float = 0.85  # near-duplicates merged by the snooze pass
+    profile_consolidation_enabled: bool = True
+    profile_alert_entries: int = 2500  # churn notice when live profile entries exceed this
 
     # --- Session Queuing ---
     max_pending_messages: int = 10  # Max queued messages per session (backpressure)
