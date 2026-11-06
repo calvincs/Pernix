@@ -328,6 +328,11 @@ class AgentSession:
     # Session-scoped on purpose — TurnState is replaced at every turn boundary,
     # and this counter's whole job is to outlive the turn it was issued for.
     _deferred_reflect_seq: int = 0
+    # Ticket of the deferred grade still waiting to run, 0 when none is. A
+    # worker-resume turn skips its own grade only when one is: a turn that
+    # suspended on await_workers schedules nothing, and skipping the resume
+    # too left the whole task ungraded (field case, session 2bf19276665e).
+    _deferred_grade_pending: int = 0
 
     # One-at-a-time gate for this session's deferred grades (sessions/hooks.py).
     # Next-turn grading means a rapid-fire burst schedules a grade per turn

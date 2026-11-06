@@ -741,8 +741,28 @@ def _extend_to_resume_chain(session_obj, snap: _DeferredGrade) -> _DeferredGrade
     )
 
 
-async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj, gate_results, emit=None) -> None:
-    """Hand this turn's grade to a background task and return immediately."""
+def _last_real_user_msg_id(session_id: str) -> int | None:
+    """Id of the newest user row that is not a harness worker-resume message."""
+    from sessions.manager import _WORKER_RESUME_PREFIX
+
+    try:
+        rows = db.get_messages(session_id, last=REFLECT_TAIL_MESSAGES)
+    except Exception as e:
+        logger.debug("real-user-message lookup failed for %s: %s", session_id, e)
+        return None
+    for row in reversed(rows):
+        if row.get("role") == "user" and not str(row.get("content") or "").startswith(_WORKER_RESUME_PREFIX):
+            return row.get("id")
+    return None
+
+
+async def _schedule_deferred_reflect(
+    session_id: str, session: dict, session_obj, gate_results, emit=None, user_msg_id: int | None = None
+) -> None:
+    """Hand this turn's grade to a background task and return immediately.
+
+    user_msg_id overrides the turn's own user row — a worker-resume turn's
+    "user" row is the harness talking to itself, not the request to grade."""
     from sessions.manager import get_manager
 
     try:
@@ -764,7 +784,7 @@ async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj
         session_id=session_id,
         ticket=session_obj._deferred_reflect_seq,
         turn_id=getattr(session_obj, "_turn_id", 0),
-        turn_user_msg_id=getattr(session_obj, "current_turn_user_msg_id", None),
+        turn_user_msg_id=user_msg_id or getattr(session_obj, "current_turn_user_msg_id", None),
         attempt=session_obj.turn.reflect_count + 1,
         tool_summary=dict(session_obj.turn.tool_summary or {}),
         tool_summary_attempts=[dict(a) for a in (session_obj.turn.tool_summary_attempts or [])],
@@ -775,6 +795,7 @@ async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj
         turn_last_msg_id=turn_last_msg_id,
     )
 
+    session_obj._deferred_grade_pending = snap.ticket
     delay = max(0, int(settings.reflect_defer_idle_s))
     # Fire-and-forget by design: if the process dies before the grade runs the
     # turn is simply ungraded. _spawn_detached only supplies the strong task
@@ -801,6 +822,14 @@ async def _deferred_reflect_task(session_obj, snap: _DeferredGrade) -> None:
     a rapid-fire burst costs one reflect call at a time rather than one per
     turn simultaneously.
     """
+    try:
+        await _deferred_reflect_body(session_obj, snap)
+    finally:
+        if getattr(session_obj, "_deferred_grade_pending", 0) == snap.ticket:
+            session_obj._deferred_grade_pending = 0
+
+
+async def _deferred_reflect_body(session_obj, snap: _DeferredGrade) -> None:
     next_user_message = await _await_deferred_grade(session_obj, snap)
 
     async with _grade_lock(session_obj):
@@ -1100,10 +1129,23 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
         # A worker-resume turn synthesizes results the graded turn produced.
         # Grading it would bump _deferred_reflect_seq and cancel the pending
         # grade of the turn that did the work (session 3dc5a307d751).
+        # When no grade is waiting (the turn that started the work suspended
+        # on await_workers, which schedules none), the resume turn is the only
+        # place the task can be graded — against the user's real request.
+        user_msg_id = None
         if getattr(session_obj, "_turn_id", 0) in (getattr(session_obj, "_synthetic_turn_ids", None) or set()):
-            logger.info("Deferred reflect skipped for %s: synthetic worker-resume turn", session_id)
-            return
-        await _schedule_deferred_reflect(session_id, session, session_obj, gate_results, emit=emit)
+            if getattr(session_obj, "_deferred_grade_pending", 0):
+                logger.info("Deferred reflect skipped for %s: synthetic worker-resume turn", session_id)
+                return
+            user_msg_id = await asyncio.to_thread(_last_real_user_msg_id, session_id)
+            logger.info(
+                "Deferred reflect for %s: resume turn with no pending grade — grading the task from user msg %s",
+                session_id,
+                user_msg_id,
+            )
+        await _schedule_deferred_reflect(
+            session_id, session, session_obj, gate_results, emit=emit, user_msg_id=user_msg_id
+        )
         return
 
     # Pre-reflect enrichment: lessons recall. extra_evidence is appended to
