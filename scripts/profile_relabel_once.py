@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import re
 import sys
 from pathlib import Path
 
@@ -24,8 +23,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import settings  # noqa: E402
 from core.memory.profile import _SYSTEM_RE, observation_rejection  # noqa: E402
 from core.memory.store import get_memory_store  # noqa: E402
-
-_EXTRA = re.compile(r"\b(?:cron|loop|scheduled|automated|unattended|run|runs|drive|charter|agent)\b", re.I)
 
 PROMPT = """Each numbered line was stored as a fact about the USER (the person using an AI agent).
 Decide for each line whether it is a durable fact about that person — their preferences,
@@ -73,7 +70,9 @@ async def main() -> int:
         rows = conn.execute("SELECT file_name, epoch, content FROM memory_fts WHERE entry_type = 'profile'").fetchall()
     finally:
         conn.close()
-    cands = [r for r in rows if observation_rejection(r[2]) or _SYSTEM_RE.search(r[2]) or _EXTRA.search(r[2])]
+    # Narrow on purpose: a broad word list ("run", "agent") pulled in real
+    # preferences, and the model then agreed with too many of them.
+    cands = [r for r in rows if observation_rejection(r[2]) or _SYSTEM_RE.search(r[2])]
     print(f"profile entries={len(rows)} candidates={len(cands)}")
     confirmed = []
     for i in range(0, len(cands), 20):
