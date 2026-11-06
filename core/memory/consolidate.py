@@ -690,13 +690,19 @@ def execute_merge(store, decision: MergeDecision) -> dict:
         "fuse_failures": 0,
     }
 
-    # 1. Move kept entries from source files to target
+    # 1. Move kept entries from source files to target, through the one
+    # relocate path. A source holding an entry the move ledger refused is
+    # NOT archived below — whole-file archival would take that live entry
+    # out of search with no copy anywhere.
+    refused_sources: set[str] = set()
     for file_name, epoch in decision.entries_to_keep:
         if file_name == decision.target_file:
             stats["entries_kept"] += 1
             continue  # Already in target
-        moved = store.move_entries(file_name, decision.target_file, [epoch])
-        stats["entries_kept"] += moved
+        res = store.relocate_entries(file_name, decision.target_file, [epoch], reason="consolidate")
+        stats["entries_kept"] += len(res["retired"])
+        if res["refused"]:
+            refused_sources.add(file_name)
 
     # 2. Handle fused entries (LLM-produced merged content)
     # Fuse-verdict source refs whose fused write actually landed — only these
@@ -833,7 +839,10 @@ def execute_merge(store, decision: MergeDecision) -> dict:
                 and (source, e.epoch) not in fused_ok
             ]
             if unaddressed:
-                rescued = store.move_entries(source, decision.target_file, unaddressed)
+                res = store.relocate_entries(source, decision.target_file, unaddressed, reason="consolidate_rescue")
+                rescued = len(res["retired"])
+                if res["refused"]:
+                    refused_sources.add(source)
                 stats["entries_rescued"] += rescued
                 logger.warning(
                     "Merge verdict omitted %d entries in '%s' (epochs %s) — moved to '%s' instead of archiving",
@@ -842,6 +851,14 @@ def execute_merge(store, decision: MergeDecision) -> dict:
                     unaddressed[:20],
                     decision.target_file,
                 )
+        if source in refused_sources:
+            stats.setdefault("sources_kept_live", 0)
+            stats["sources_kept_live"] += 1
+            logger.info(
+                "Consolidation: '%s' keeps entries the move ledger refused — file left live, not archived",
+                source,
+            )
+            continue
         archived_actual += sum(1 for f, _ in archive_set if f == source)
         store.archive_file(source)
 

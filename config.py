@@ -501,6 +501,15 @@ class Settings:
     snooze_dedup_interval_days: int = 7  # Days between dedup sweeps per file
     snooze_consolidation_interval_hours: int = 24  # Hours between consolidation scans
     snooze_consolidation_cluster_threshold: float = 0.55  # Min pair score to cluster
+    # Move ledger (2026-11-06): every sweep move goes through
+    # store.relocate_entries, which refuses a body moved within the cooldown,
+    # a move that reverses the body's last move, and a body already moved
+    # `memory_move_breaker` times in 30 days. Stops split<->reroute and
+    # split<->consolidate oscillation (143 MB store, 9 MB live).
+    memory_move_cooldown_days: int = 7
+    memory_move_breaker: int = 3
+    memory_reroute_high_cap: int = 50  # high-confidence reroutes per cycle
+    memory_compact_files_per_cycle: int = 25  # compaction rung budget
 
     # --- Session Queuing ---
     max_pending_messages: int = 10  # Max queued messages per session (backpressure)

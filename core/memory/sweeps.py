@@ -112,6 +112,76 @@ def _remove_from_index(store, file_name: str, epochs: set[int]) -> None:
         conn.close()
 
 
+def _move_history(store, entries) -> dict:
+    """Move-ledger history for these entries' bodies (empty on any failure)."""
+    from core.memory import moves
+
+    if not entries:
+        return {}
+    try:
+        conn = store._connect()
+        try:
+            return moves.load_history(conn, [moves.body_key(e.content) for e in entries])
+        finally:
+            conn.close()
+    except Exception as e:  # a missing table on an old index must not stop a sweep
+        logger.debug("move ledger unavailable: %s", e)
+        return {}
+
+
+def _ledger_refuses(history: dict, entry, src: str, dst: str) -> str:
+    """The ledger's refusal for moving `entry` src → dst ("" = allowed)."""
+    from core.memory import moves
+
+    return moves.refusal(history.get(moves.body_key(entry.content)), src, dst, entry_type=entry.entry_type)
+
+
+def _ledger_frozen(history: dict, entry) -> bool:
+    """True when the ledger refuses every sweep move of this body right now
+    (cooldown or breaker) — whatever the destination."""
+    from core.memory import moves
+
+    h = history.get(moves.body_key(entry.content))
+    if h is None:
+        return False
+    return moves.refusal(h, "\x00src", "\x00dst") in ("cooldown", "breaker")
+
+
+def _cluster_frozen(store, cluster: list[str]) -> str:
+    """Why the move ledger rules out merging this cluster ("" = it may merge).
+
+    Checked before planning, so a merge never gets half-way and then meets
+    refusals: a cluster is skipped when any live entry in it moved within the
+    cooldown, hit the breaker, or last moved between two of its own files
+    (merging would reverse that move — the split<->consolidate loop that
+    moved one body 144 times in a month).
+    """
+    from core.memory import moves
+    from core.memory.format import parse_entries_from_markdown
+
+    names = set(cluster)
+    entries = []
+    for name in cluster:
+        md = store.read_file(name)
+        if md:
+            entries.extend(parse_entries_from_markdown(name, md))
+    history = _move_history(store, entries)
+    for e in entries:
+        h = history.get(moves.body_key(e.content))
+        if h is None:
+            continue
+        if _ledger_frozen(history, e):
+            return "recent move"
+        if h.last_src in names and h.last_dst in names:
+            return "would reverse a move"
+    return ""
+
+
+async def _relocate(store, src: str, dst: str, epochs: list[int], reason: str) -> dict:
+    """store.relocate_entries on a worker thread (uncancellable once started)."""
+    return await asyncio.to_thread(store.relocate_entries, src, dst, epochs, reason=reason)
+
+
 def _strip_fence(text: str) -> str:
     """Drop a leading ``` fence line (and a trailing one) from an LLM reply."""
     text = text.strip()
@@ -368,6 +438,10 @@ async def consolidate_files(
     for cluster in clusters[:_MAX_CLUSTER_ATTEMPTS]:
         if is_cancelled():
             return used_llm, consolidated
+        frozen_why = await asyncio.to_thread(_cluster_frozen, store, cluster)
+        if frozen_why:
+            logger.info("Snooze: consolidation skipped cluster %s (move ledger: %s)", cluster, frozen_why)
+            continue
         logger.info("Snooze: consolidating cluster %s (%d files)", cluster, len(cluster))
 
         # Try trivial merge first (no LLM). Also CPU-heavy when a cluster has
@@ -502,14 +576,21 @@ def classify_entry(entry, src_file: str, file_keywords: dict[str, set[str]], is_
     """
     src_bucket = space_bucket(src_file)
 
-    if entry.entry_type == "profile" and src_file != "user.profile" and src_bucket is None:
+    from core.memory.routing import home_for, home_ok
+
+    _home = home_for(entry.entry_type, src_file)
+    if _home and not home_ok(entry.entry_type, src_file):
         return {
             "entry": entry,
             "src_file": src_file,
-            "target_file": "user.profile",
+            "target_file": _home,
             "confidence": "high",
-            "reason": "profile type outside user.profile",
+            "reason": f"{entry.entry_type} type outside its home",
         }
+    if _home:
+        # In its home namespace (any user.* file for a profile entry): the
+        # keyword-affinity rule must not move it out again.
+        return None
 
     tag_str = " ".join(entry.tags).lower()
     content_lower = entry.content.lower()
@@ -590,7 +671,9 @@ def scan_for_reroute_candidates(
         if not md_content:
             continue
 
-        for entry in sorted(parse_entries_from_markdown(mem_file.name, md_content), key=lambda e: e.epoch):
+        file_entries = parse_entries_from_markdown(mem_file.name, md_content)
+        history = _move_history(store, file_entries)
+        for entry in sorted(file_entries, key=lambda e: e.epoch):
             if progress is not None and mem_file.name == resume_file and entry.epoch <= resume_epoch:
                 continue
             if stopped() or (progress is not None and checked >= entry_limit):
@@ -600,6 +683,8 @@ def scan_for_reroute_candidates(
             candidate = classify_entry(entry, mem_file.name, file_keywords, stopped)
             if stopped():
                 return high, medium
+            if candidate is not None and _ledger_refuses(history, entry, mem_file.name, candidate["target_file"]):
+                candidate = None
             if progress is not None:
                 progress.update(file=mem_file.name, epoch=entry.epoch, finished=False)
             checked += 1
@@ -679,15 +764,15 @@ async def reroute_misplaced_entries(
     used_llm = False
     rerouted = 0
 
-    # ── Pass 1: high-confidence reroutes (no LLM) ───────────────────
-    for item in high_conf:
+    # ── Pass 1: high-confidence reroutes (no LLM), capped per cycle ──
+    for item in high_conf[: max(1, int(settings.memory_reroute_high_cap))]:
         if is_cancelled():
             break
         entry = item["entry"]
         src, dst = item["src_file"], item["target_file"]
         try:
-            if store.move_entries(src, dst, [entry.epoch]):
-                await asyncio.to_thread(archive_entries, store, src, {entry.epoch})
+            res = await _relocate(store, src, dst, [entry.epoch], "reroute")
+            if res["retired"]:
                 rerouted += 1
                 logger.info(
                     "Snooze: rerouted entry (type=%s epoch=%d) %s → %s",
@@ -793,8 +878,8 @@ async def reroute_misplaced_entries(
                 if is_cancelled():
                     break
                 try:
-                    if store.move_entries(src, target, [epoch]):
-                        await asyncio.to_thread(archive_entries, store, src, {epoch})
+                    res = await _relocate(store, src, target, [epoch], "reroute_llm")
+                    if res["retired"]:
                         rerouted += 1
                         logger.info(
                             "Snooze: LLM rerouted epoch=%d %s → %s (%s)",
@@ -953,6 +1038,84 @@ async def enrich_tags(store, is_cancelled: Callable[[], bool], *, max_entries: i
 # ---------------------------------------------------------------------------
 
 
+async def compact_memory_files(store, db, is_cancelled: Callable[[], bool]) -> int:
+    """Drop tombstones whose body is live elsewhere (core.memory.compact).
+
+    Bounded: up to `memory_compact_files_per_cycle` files whose mtime changed
+    since their last compaction, largest first. Also seeds the move ledger
+    once from the @merged_from/@merged_at hops already in the files.
+    Returns sections dropped.
+    """
+    from core.memory import compact, moves
+
+    if not store:
+        return 0
+    if not db.get_snooze_state("move_ledger_seeded"):
+        seeded = await asyncio.to_thread(moves.seed_from_store, store)
+        db.set_snooze_state("move_ledger_seeded", str(seeded))
+        logger.info("Snooze: seeded the move ledger with %d hops from memory files", seeded)
+    try:
+        seen = json.loads(db.get_snooze_state("compact_mtimes") or "{}")
+    except (ValueError, TypeError):
+        seen = {}
+
+    def pick() -> list[str]:
+        rows = []
+        for md_path in store._dir.glob("*.md"):
+            try:
+                st = md_path.stat()
+            except OSError:
+                continue
+            if seen.get(md_path.stem) != int(st.st_mtime):
+                rows.append((st.st_size, md_path.stem))
+        rows.sort(reverse=True)
+        return [n for _, n in rows[: max(1, int(settings.memory_compact_files_per_cycle))]]
+
+    names = await asyncio.to_thread(pick)
+    if not names or is_cancelled():
+        return 0
+    totals = await asyncio.to_thread(compact.compact_files, store, names, is_cancelled=is_cancelled)
+    for name in names:
+        try:
+            seen[name] = int((store._dir / f"{name}.md").stat().st_mtime)
+        except OSError:
+            seen.pop(name, None)
+    db.set_snooze_state("compact_mtimes", json.dumps(seen))
+    dropped = totals["dropped_live_twin"] + totals["dropped_extra_copy"]
+    if dropped:
+        logger.info(
+            "Snooze: compacted %d file(s): dropped %d tombstones, %.1f MB -> %.1f MB",
+            totals["files"],
+            dropped,
+            totals["bytes_before"] / 1e6,
+            totals["bytes_after"] / 1e6,
+        )
+    return dropped
+
+
+def _notify_churn(health: dict) -> None:
+    """One notice a day when the store shows the churn signature again."""
+    from core import notices
+
+    reasons = []
+    if health.get("bloated_files"):
+        reasons.append("large or tombstone-heavy files: " + ", ".join(health["bloated_files"][:5]))
+    if (health.get("moves_24h") or 0) > 1000:
+        reasons.append(f"{health['moves_24h']} entry moves in 24 h")
+    if (health.get("bodies_at_breaker") or 0) > 100:
+        reasons.append(f"{health['bodies_at_breaker']} entries frozen by the move breaker")
+    if not reasons:
+        return
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    notices.notify(
+        "system.memory_churn",
+        title="Memory maintenance is churning",
+        body="; ".join(reasons) + f". Store is {health.get('store_mb', '?')} MB.",
+        subject="memory",
+        dedup_key=f"memory-churn:{day}",
+    )
+
+
 async def reconcile_index(store, db, is_cancelled: Callable[[], bool]) -> None:
     """Check and fix FTS5 index drift, plus the every-cycle embedding sweep."""
     if not store:
@@ -984,6 +1147,8 @@ async def reconcile_index(store, db, is_cancelled: Callable[[], bool]) -> None:
 
     health = await asyncio.to_thread(store.health_check, fix=True)
     db.set_snooze_state("last_index_reconcile", datetime.now(timezone.utc).isoformat())
+
+    _notify_churn(health)
 
     if health.get("action") == "reindexed":
         logger.info("Snooze: index reconciliation triggered reindex (%s)", health)
@@ -1059,8 +1224,34 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
     if len(entries) < 80:
         return False, 0
 
+    # A type home (user.* for profile entries) is never split: the entries
+    # belong exactly there, and the reroute rule would pull every one back —
+    # the loop that left 68,427 tombstones in user.profile.md.
+    from core.memory.routing import home_for, home_ok
+
+    homed = sum(1 for e in entries if home_for(e.entry_type, target.name) and home_ok(e.entry_type, target.name))
+    if homed * 2 > len(entries):
+        record_failure("type_home")
+        logger.info(
+            "Snooze: split skipped %s (a type home: %d/%d entries belong here)", target.name, homed, len(entries)
+        )
+        return False, 0
+
+    # Only entries the move ledger would let go anywhere, and not homed ones.
+    history = await asyncio.to_thread(_move_history, store, entries)
+    movable = [
+        e
+        for e in entries
+        if not _ledger_frozen(history, e)
+        and not (home_for(e.entry_type, target.name) and home_ok(e.entry_type, target.name))
+    ]
+    if len(movable) < 12:
+        record_failure("frozen")
+        logger.info("Snooze: split skipped %s (%d of %d entries movable)", target.name, len(movable), len(entries))
+        return False, 0
+
     # Start small and shrink after failures; later cycles continue the work.
-    sample = entries[:batch]
+    sample = movable[:batch]
 
     _existing = await asyncio.to_thread(store.list_files)
     # Only files in the source's own bucket are candidates: listing global
@@ -1155,6 +1346,9 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
         for idx in indices:
             if 0 <= idx < len(sample):
                 ep = sample[idx].epoch
+                # A typed entry only moves somewhere that satisfies its home.
+                if home_for(sample[idx].entry_type, file_name) and not home_ok(sample[idx].entry_type, file_name):
+                    continue
                 if ep not in seen_epochs:
                     seen_epochs.add(ep)
                     unique_epochs.append(ep)
@@ -1165,21 +1359,19 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
         record_failure("no_progress")
         return True, 0
 
-    # Move entries: write to target files, then archive in source.
-    # move_entries handles FTS indexing and hit-count migration.
-    all_moved_epochs: set[int] = set()
+    # Move entries through the one relocate path: copy, retire the source,
+    # record the move — refusals (ledger) simply stay where they are.
     moved = 0
     for file_name, epoch_list in epochs_by_file.items():
         if is_cancelled():
             break
-        count = await asyncio.to_thread(store.move_entries, target.name, file_name, epoch_list)
+        res = await _relocate(store, target.name, file_name, epoch_list, "split")
+        count = len(res["retired"])
         if count > 0:
-            all_moved_epochs.update(epoch_list)
             moved += count
             logger.debug("Snooze: split %d entries → %s", count, file_name)
 
-    if moved and all_moved_epochs:
-        await asyncio.to_thread(archive_entries, store, target.name, all_moved_epochs)
+    if moved:
         logger.info(
             "Snooze: split %d entries from %s into %d file(s)",
             moved,

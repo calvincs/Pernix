@@ -1262,6 +1262,127 @@ class MemoryStore:
         logger.info("Moved %d entries from %s to %s", moved, source_file, target_file)
         return moved
 
+    def relocate_entries(
+        self,
+        source_file: str,
+        target_file: str,
+        epochs: list[int],
+        *,
+        reason: str,
+        enforce_ledger: bool = True,
+    ) -> dict:
+        """Move live entries to another file: the one path every sweep uses.
+
+        Copy, retire the source, and record the move, in one synchronous call.
+        Callers dispatch it with asyncio.to_thread, which cannot be cancelled,
+        so a snooze rung timeout can no longer land between the copy and the
+        archive (the race that left 283 bodies live in two files).
+
+        Per entry:
+          * refused  — the move ledger says no (core.memory.moves): moved
+                       within the cooldown, a reversal, or the breaker;
+          * deduped  — the target already holds the same body live: no copy,
+                       the source copy is retired and its hits are summed in;
+          * moved    — copied to the target and the source retired.
+        The retired source section is archived, and the compaction rung
+        removes it once its body is live elsewhere — the move leaves no
+        permanent tombstone.
+
+        enforce_ledger=False is for explicit user/agent moves only.
+        Returns {"moved": int, "deduped": int, "refused": [(epoch, why)],
+                 "retired": set[int]}.
+        """
+        from core.memory import moves as _moves
+
+        source_file = self._validate_name(source_file)
+        target_file = self._validate_name(target_file)
+        result: dict = {"moved": 0, "deduped": 0, "refused": [], "retired": set()}
+        if source_file == target_file or not epochs:
+            return result
+
+        md_content = self.read_file(source_file)
+        if not md_content:
+            return result
+        epoch_set = set(epochs)
+        entries = [e for e in parse_entries_from_markdown(source_file, md_content) if e.epoch in epoch_set]
+        if not entries:
+            return result
+
+        keys = {e.epoch: _moves.body_key(e.content) for e in entries}
+        to_move: list = []
+        twins: list[tuple] = []
+        conn = self._connect()
+        try:
+            history = _moves.load_history(conn, list(keys.values())) if enforce_ledger else {}
+            for e in entries:
+                why = (
+                    _moves.refusal(history.get(keys[e.epoch]), source_file, target_file, entry_type=e.entry_type)
+                    if enforce_ledger
+                    else ""
+                )
+                if why:
+                    result["refused"].append((e.epoch, why))
+                    continue
+                twin = conn.execute(
+                    "SELECT epoch FROM memory_fts WHERE file_name = ? AND content = ? LIMIT 1",
+                    (target_file, e.content),
+                ).fetchone()
+                if twin:
+                    twins.append((e, int(twin[0])))
+                else:
+                    to_move.append(e)
+
+            # Twins: the body is already live in the target. Sum the hits in.
+            for e, twin_epoch in twins:
+                hit_row = conn.execute(
+                    "SELECT hit_count, last_hit_at FROM memory_hits WHERE file_name = ? AND epoch = ?",
+                    (source_file, str(e.epoch)),
+                ).fetchone()
+                if hit_row:
+                    conn.execute(
+                        "INSERT INTO memory_hits (file_name, epoch, hit_count, last_hit_at) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(file_name, epoch) DO UPDATE SET "
+                        "hit_count = hit_count + ?, last_hit_at = MAX(last_hit_at, ?)",
+                        (
+                            target_file,
+                            str(twin_epoch),
+                            hit_row["hit_count"],
+                            hit_row["last_hit_at"],
+                            hit_row["hit_count"],
+                            hit_row["last_hit_at"],
+                        ),
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+        moved = self.move_entries(source_file, target_file, [e.epoch for e in to_move]) if to_move else 0
+        retired = {e.epoch for e, _ in twins}
+        if moved:
+            retired |= {e.epoch for e in to_move}
+        if retired:
+            from core.memory.sweeps import archive_entries
+
+            archive_entries(self, source_file, retired)
+            done = [e for e, _ in twins] + (to_move if moved else [])
+            conn = self._connect()
+            try:
+                _moves.record(conn, [(keys[e.epoch], source_file, target_file, reason) for e in done])
+                conn.commit()
+            finally:
+                conn.close()
+        result.update(moved=moved, deduped=len(twins), retired=retired)
+        if result["refused"]:
+            logger.debug(
+                "Relocate %s → %s (%s): refused %d (%s)",
+                source_file,
+                target_file,
+                reason,
+                len(result["refused"]),
+                ",".join(sorted({w for _, w in result["refused"]})),
+            )
+        return result
+
     # ------------------------------------------------------------------
     # Search operations
     # ------------------------------------------------------------------
@@ -1781,10 +1902,17 @@ class MemoryStore:
 
         md_count = 0
         collisions = 0
+        total_bytes = 0
+        archived_sections = 0
+        bloated: list[str] = []
         for md_path in self._dir.glob("*.md"):
             if not _NAME_RE.match(md_path.stem):
                 continue  # not indexable (see reindex) — not a drift signal either
-            if md_path.stat().st_size > 50 * 1024 * 1024:
+            size = md_path.stat().st_size
+            total_bytes += size
+            if size > 5 * 1024 * 1024:
+                bloated.append(md_path.stem)
+            if size > 50 * 1024 * 1024:
                 # reindex skips these too; counting them made in_sync False
                 # forever and every reconcile a full rebuild.
                 continue
@@ -1794,6 +1922,10 @@ class MemoryStore:
                 logger.warning("Skipping unreadable memory file %s: %s", md_path.name, e)
                 continue
             entries = parse_entries_from_markdown(md_path.stem, raw)
+            archived = raw.count("<!-- @archived: true -->")
+            archived_sections += archived
+            if archived > 1000 and md_path.stem not in bloated:
+                bloated.append(md_path.stem)
             md_count += len(entries)
             epochs = [e.epoch for e in entries]
             collisions += len(epochs) - len(set(epochs))
@@ -1804,7 +1936,24 @@ class MemoryStore:
             "in_sync": indexed == md_count,
             "epoch_collisions": collisions,
             "files": len(list(self._dir.glob("*.md"))),
+            # Churn signals (2026-11-06): the store reached 143 MB with 9 MB
+            # live and nothing reported it for three months.
+            "store_mb": round(total_bytes / 1e6, 1),
+            "archived_sections": archived_sections,
+            "bloated_files": sorted(bloated)[:10],
+            **self._move_stats(),
         }
+
+    def _move_stats(self) -> dict:
+        from core.memory import moves
+
+        conn = self._connect()
+        try:
+            return moves.stats(conn)
+        except Exception:
+            return {}
+        finally:
+            conn.close()
 
     def repair_archived_with_live_rows(self) -> int:
         """Reopen archived files that still have rows in the index.

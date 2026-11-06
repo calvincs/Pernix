@@ -290,6 +290,19 @@ CREATE TABLE IF NOT EXISTS memory_hits (
     PRIMARY KEY (file_name, epoch)
 );
 
+-- Move ledger: one row per entry body moved between files by a sweep.
+-- body_key = sha1 of the whitespace-collapsed content. Read by
+-- store.relocate_entries and by the sweeps before they propose a move.
+CREATE TABLE IF NOT EXISTS memory_moves (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    body_key TEXT NOT NULL,
+    src TEXT NOT NULL,
+    dst TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    reason TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_memory_moves_key ON memory_moves(body_key, at DESC);
+
 CREATE TABLE IF NOT EXISTS consolidation_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     target_file TEXT NOT NULL,

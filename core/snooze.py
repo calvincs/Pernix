@@ -54,7 +54,13 @@ SKILL_SWEEP_MAX_PENDING = 30
 
 # Captured by child tasks and worker contexts; a new cycle cannot revive old work.
 _CANCEL_SCOPES = contextvars.ContextVar("snooze_cancel_scopes", default=())
-RUNG_TIMEOUTS = {"consolidate_files": 240, "dedup_sweep": 60, "reroute_misplaced_entries": 60, "split_file": 120}
+RUNG_TIMEOUTS = {
+    "compact_memory_files": 120,
+    "consolidate_files": 240,
+    "dedup_sweep": 60,
+    "reroute_misplaced_entries": 60,
+    "split_file": 120,
+}
 
 
 # Session types snooze looks straight through (plan §5, pass-3 F3): they
@@ -555,6 +561,11 @@ class SnoozeRunner:
                 await self._rung("reroute_misplaced_entries", self._reroute_misplaced_entries(did_llm), default=False)
                 or did_llm
             )
+
+        # Activity 3d: Compaction — drop tombstones whose body is live (no LLM)
+        if not self._is_cancelled():
+            _announce(bus, "compact", "Compacting memory files")
+            await self._rung("compact_memory_files", self._compact_memory_files())
 
         # Activity 4: Tag enrichment (no LLM)
         if not self._is_cancelled():
@@ -1371,6 +1382,15 @@ Output valid JSON only. No markdown fences. /no_think"""
         from core.memory import sweeps
 
         self._stats["entries_enriched"] += await sweeps.enrich_tags(self._store(), self._is_cancelled)
+
+    async def _compact_memory_files(self) -> None:
+        """Activity 3d — drop tombstones whose body is live elsewhere."""
+        if _mutation_blocked():
+            return
+        from core.memory import sweeps
+        from db import models as db
+
+        self._bump("tombstones_compacted", await sweeps.compact_memory_files(self._store(), db, self._is_cancelled))
 
     async def _reconcile_index(self) -> None:
         """Activity 5 — FTS5 drift check plus the every-cycle embedding sweep."""

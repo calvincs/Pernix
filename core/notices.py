@@ -119,6 +119,7 @@ CATEGORIES: dict[str, Category] = {
     "system.tavily_key": Category("bell"),
     "system.tavily_limit": Category("bell"),
     "system.memory_oversized": Category("bell"),
+    "system.memory_churn": Category("bell"),
     "system.push_rejected": Category("bell"),
 }
 

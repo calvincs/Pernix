@@ -215,3 +215,36 @@ TOPIC_KEYWORDS: dict[str, list[str]] = {
         "status",
     ],
 }
+
+
+# ---------------------------------------------------------------------------
+# Type homes (2026-11-06): where an entry type belongs, shared by every sweep
+# ---------------------------------------------------------------------------
+
+# A typed entry whose home is a namespace. split, reroute and consolidation
+# all ask `home_ok` — the loop that filled user.profile.md with 68,427
+# tombstones was split moving profile entries OUT of user.profile and
+# reroute pulling them straight back, because each sweep had its own rule.
+TYPE_HOMES: dict[str, tuple[str, str]] = {
+    # entry_type: (namespace prefix any home file satisfies, default home)
+    "profile": ("user.", "user.profile"),
+}
+
+
+def home_for(entry_type: str, file_name: str) -> str | None:
+    """The default home of a typed entry, or None when it has none here.
+
+    Space files have no type homes: their entries never cross the bucket.
+    """
+    if space_bucket(file_name) is not None:
+        return None
+    home = TYPE_HOMES.get(entry_type or "")
+    return home[1] if home else None
+
+
+def home_ok(entry_type: str, file_name: str) -> bool:
+    """True when `file_name` satisfies the entry type's home (or it has none)."""
+    if space_bucket(file_name) is not None:
+        return True
+    home = TYPE_HOMES.get(entry_type or "")
+    return home is None or (file_name or "").startswith(home[0])
