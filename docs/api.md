@@ -148,7 +148,7 @@ PATCH /api/sessions/{session_id}
 ```
 Any subset of the five keys; absent keys are left unchanged.
 
-`archived: true` stamps `archived_at` with now, `false` clears it. An archived session leaves the session list and its space group, keeps every message, stays searchable, and opens read-only (`read_only_reason` becomes *"Archived — restore it to continue"*). Deleting stays a separate, explicit act.
+`archived: true` stamps `archived_at` with now, `false` clears it. An archived session leaves the session list and its space group, keeps every message, stays searchable, and opens read-only (`read_only_reason` becomes *"Archived — restore it to continue"*). Deleting stays a separate, explicit act. The session's workers and their RLM runs are archived and restored with it, carrying the same stamp.
 
 **Nothing here bumps `updated_at`.** Recency ordering is what the sidebar's time buckets and the idle horizon are computed from, so archiving must not reshuffle the list and restoring must put a session back exactly where it was. Archiving and restoring also emit a `session.archived` SSE event on that session's stream, carrying `archived`, `archived_at`, `read_only` and `read_only_reason`.
 

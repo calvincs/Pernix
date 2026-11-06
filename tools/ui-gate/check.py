@@ -114,6 +114,41 @@ SMALL_ALLOW = (
 )
 
 
+# Every fresh load starts with spaces folded (2026-11-06: Today open, the rest
+# folded). The checks below measure what is INSIDE a space, so each load opens
+# them first — after recording that the fresh shape was the folded one.
+FRESH_FOLDS_JS = r"""() => {
+  const heads = [...document.querySelectorAll('.session-group-header:not(.space-group-header)')]
+    .filter(h => !h.closest('.space-group-body'));
+  const open = heads.filter(h => !h.classList.contains('collapsed')).map(h => h.dataset.group);
+  const spaces = [...document.querySelectorAll('.space-group-header .sg-toggle')];
+  return { open, spaces: spaces.length,
+           spacesOpen: spaces.filter(t => t.getAttribute('aria-expanded') === 'true').length };
+}"""
+
+fresh_folds = []
+# A group may be open on a fresh load only because the landed session is in it.
+LANDING_GROUPS = {"Pinned", "Yesterday", "This Week", "This Month", "Older"}
+
+
+def goto_home(pg):
+    """Load the app, note its fresh fold shape, then open every space."""
+    pg.goto(base + "/", wait_until="load")
+    try:
+        pg.wait_for_selector(".session-item", state="attached", timeout=8000)
+    except Exception:
+        return
+    fresh_folds.append(pg.evaluate(FRESH_FOLDS_JS))
+    open_spaces(pg)
+
+
+def open_spaces(pg):
+    pg.evaluate(
+        "() => document.querySelectorAll('.space-group-header .sg-toggle[aria-expanded=\"false\"]')"
+        ".forEach(t => t.click())"
+    )
+
+
 def small_filtered(m):
     return [s for s in m["small"] if not any(s.startswith(a) for a in SMALL_ALLOW)]
 
@@ -410,7 +445,7 @@ def run_vp(browser, name, w, h, opts):
     pg = ctx.new_page()
     pg.on("console", console_sink(name))
     pg.on("pageerror", lambda e: console_errors.append(f"[{name}] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.8)
     compact = w < 900
 
@@ -745,7 +780,7 @@ def desktop_layout(browser):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
     pg.on("console", console_sink("desktop"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.8)
     out = {}
 
@@ -1011,7 +1046,7 @@ def state_map_colours(browser):
     pg.on("pageerror", lambda e: console_errors.append(f"[state-map] pageerror: {e}"))
     vendor_reqs = []
     pg.on("request", lambda r: vendor_reqs.append(r.url) if "mermaid" in r.url else None)
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.8)
 
     toks = pg.evaluate(TOKENS_JS)
@@ -1147,7 +1182,7 @@ def timeline_lane(browser, light=False):
     pg = ctx.new_page()
     pg.on("console", console_sink(f"lane-{theme}"))
     pg.on("pageerror", lambda e: console_errors.append(f"[lane-{theme}] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.8)
     open_timeline(pg)
     pg.wait_for_selector("#timeline-lane .tl-lane-row", timeout=15000)
@@ -1221,7 +1256,7 @@ def timeline_lane_touch(browser):
     pg = ctx.new_page()
     pg.on("console", console_sink("lane-touch"))
     pg.on("pageerror", lambda e: console_errors.append(f"[lane-touch] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.8)
     open_session(pg, TIMELINE, True)
     pg.click("#state-badge")
@@ -1296,7 +1331,7 @@ def composer_desktop(browser):
     pg = ctx.new_page()
     pg.on("console", console_sink("composer"))
     pg.on("pageerror", lambda e: console_errors.append(f"[composer] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.5)
     pg.evaluate(f"() => document.querySelector('[data-sid=\"{MAIN}\"]')?.click()")
     time.sleep(1.4)
@@ -1529,7 +1564,7 @@ def composer_streaming(browser):
     pg = ctx.new_page()
     pg.on("console", console_sink("composer-run"))
     pg.on("pageerror", lambda e: console_errors.append(f"[composer-run] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.5)
     pg.evaluate(f"() => document.querySelector('[data-sid=\"{MAIN}\"]')?.click()")
     # Wait for the state, not for a stopwatch: opening a session is four awaited
@@ -1577,7 +1612,7 @@ def sidebar_resizer(browser):
     pg = ctx.new_page()
     pg.on("console", console_sink("resizer"))
     pg.on("pageerror", lambda e: console_errors.append(f"[resizer] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.8)
 
     h = pg.evaluate("""() => { const e=document.getElementById('sidebar-resizer'); if(!e) return null;
@@ -1693,7 +1728,7 @@ def sidebar_scale(browser):
     pg = ctx.new_page()
     pg.on("console", console_sink("scale"))
     pg.on("pageerror", lambda e: console_errors.append(f"[scale] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.8)
 
     # --- a space groups its sessions by time, and folds the long tail
@@ -1781,6 +1816,7 @@ def sidebar_scale(browser):
     pg.unroute("**/api/sessions?limit=*", _flood_today)
     pg.reload()
     time.sleep(1.5)
+    open_spaces(pg)
     pg.evaluate(CLICK_SHOW_ALL, "Scale")  # back to at-rest for the legend pass
     time.sleep(0.6)
 
@@ -1898,7 +1934,7 @@ def space_suggestions_flow(browser):
     pg = ctx.new_page()
     pg.on("console", console_sink("suggest"))
     pg.on("pageerror", lambda e: console_errors.append(f"[suggest] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(2.0)
 
     # --- the new-space sheet
@@ -2191,7 +2227,7 @@ def message_feedback(browser):
     pg = ctx.new_page()
     pg.on("console", console_sink("feedback"))
     pg.on("pageerror", lambda e: console_errors.append(f"[feedback] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.6)
     open_session(pg, MAIN, False)
 
@@ -2296,7 +2332,7 @@ def message_feedback_touch(browser):
     pg = ctx.new_page()
     pg.on("console", console_sink("feedback-touch"))
     pg.on("pageerror", lambda e: console_errors.append(f"[feedback-touch] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.6)
     open_session(pg, MAIN, True)
 
@@ -2384,7 +2420,7 @@ def hover_row_actions(browser):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
     pg.on("console", console_sink("hover-row"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.6)
     sel = ".session-item:not(.worker)"
     pg.hover(sel)
@@ -2455,7 +2491,7 @@ def adaptive_head_wrap(browser):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
     pg = ctx.new_page()
     pg.on("console", console_sink("adaptive-head"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.6)
     pg.click("#files-btn")
     time.sleep(0.9)
@@ -2490,7 +2526,7 @@ def trust_tab(browser):
     pg = ctx.new_page()
     pg.on("console", console_sink("trust"))
     pg.on("pageerror", lambda e: console_errors.append(f"[trust] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.6)
     _open_trust_tab(pg)
 
@@ -2601,7 +2637,7 @@ def trust_loop_absent(browser):
     pg.route("**/api/settings", _strip)
     pg.on("console", console_sink("absent"))
     pg.on("pageerror", lambda e: console_errors.append(f"[absent] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.6)
     open_session(pg, MAIN, False)
 
@@ -2721,7 +2757,7 @@ def bell_tiers(browser):
     pg = ctx.new_page()
     pg.on("console", console_sink("bell"))
     pg.on("pageerror", lambda e: console_errors.append(f"[bell] pageerror: {e}"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.6)
 
     counts = _api(pg, "/api/notifications/counts")
@@ -2833,7 +2869,7 @@ def bell_tiers(browser):
     )
     pg = ctx.new_page()
     pg.on("console", console_sink("bell-touch"))
-    pg.goto(base + "/", wait_until="load")
+    goto_home(pg)
     time.sleep(1.6)
     pg.evaluate("() => document.getElementById('notification-bell')?.click()")
     time.sleep(1.2)
@@ -2958,6 +2994,19 @@ with sync_playwright() as p:
                 check(vp, "m2: pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
     browser.close()
 
+# Running sessions in the seed make a fresh load land on one, which opens the
+# group holding it; every other top-level group, and every space, starts folded.
+check(
+    "all",
+    "fresh load: only Today (and the landed session's group) open, every space folded",
+    bool(fresh_folds)
+    and all(
+        set(f["open"]) <= {"Today"} | LANDING_GROUPS and len(set(f["open"]) - {"Today"}) <= 1 and f["spacesOpen"] <= 1
+        for f in fresh_folds
+    )
+    and any(f["spaces"] for f in fresh_folds),
+    fresh_folds[:3],
+)
 check("all", "no console errors", len(console_errors) == 0, console_errors[:6])
 json.dump(
     {"level": LEVEL, "results": results, "console_errors": console_errors},

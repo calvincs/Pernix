@@ -47,8 +47,11 @@ const CHILD_TYPES = new Set(['worker', 'rlm']);
 // user learns "Older", not two that could drift into disagreeing about what
 // the word means.
 const GROUP_ORDER = ['Pinned', 'Today', 'Yesterday', 'This Week', 'This Month', 'Older'];
+// Every open of the UI starts with Today open and everything else folded —
+// spaces and Archived included. The one exception is the group that holds the
+// session the page lands on, which opens so its row is in view.
 const DEFAULT_COLLAPSED = {
-    Pinned: false, Today: false, Yesterday: false,
+    Pinned: true, Today: false, Yesterday: true,
     'This Week': true, 'This Month': true, Older: true,
 };
 
@@ -723,12 +726,24 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     // this is the second line rather than the first: it catches a payload
     // fetched before the toggle, and a legacy cron session typed 'normal',
     // which the server's column-keyed clause cannot see as a cron session.
-    const topLevel = allTopLevel.filter(s => !hidden[_getTypeKey(s)]);
-    const children = allChildren.filter(s => !hidden[_getTypeKey(s)]);
+    const visibleChildren = allChildren.filter(s => !hidden[_getTypeKey(s)]);
+
+    // A child whose parent is not in this payload at all (archived before
+    // archiving took children along, deleted, or past the page horizon) has
+    // nowhere to nest. It used to be drawn loose after the last group, where
+    // it looked like part of that group but never folded with it. Now it is
+    // an ordinary row, bucketed by its own time like any other, and anything
+    // it owns still nests under it. A child whose parent IS in the payload
+    // stays with that parent — hidden with it, folded with it, capped with it.
+    const payloadIds = new Set(sessions.map(s => s.id));
+    const isStray = c => !c.parent_session_id || !payloadIds.has(c.parent_session_id);
+    const topLevel = allTopLevel.filter(s => !hidden[_getTypeKey(s)])
+        .concat(visibleChildren.filter(isStray));
+    const children = visibleChildren.filter(c => !isStray(c));
 
     const childrenByParent = {};
     for (const c of children) {
-        const pid = c.parent_session_id || '_orphan';
+        const pid = c.parent_session_id;
         if (!childrenByParent[pid]) childrenByParent[pid] = [];
         childrenByParent[pid].push(c);
     }
@@ -873,16 +888,6 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
 
     _renderListEnd(list, sessions.length);
 
-    // Orphaned children (parent filtered out or missing)
-    const renderedParents = new Set(topLevel.map(s => s.id));
-    for (const [pid, ws] of Object.entries(childrenByParent)) {
-        if (pid === '_orphan' || !renderedParents.has(pid)) {
-            for (const w of ws) {
-                _renderSessionItem(w, list, activeSid, true);
-            }
-        }
-    }
-
     // Empty states. "Nothing here" is only useful with the next action
     // attached to it — and the two ways of ending up with an empty list want
     // different next actions.
@@ -929,7 +934,7 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
 function _renderArchivedGroup(list, activeSid, sidebarState) {
     if (!_showArchived()) return;
 
-    const collapsed = sidebarState.collapsed?.[ARCHIVED_GROUP] ?? false;
+    const collapsed = sidebarState.collapsed?.[ARCHIVED_GROUP] ?? true;
     const header = el('div', {
         class: 'session-group-header archived-group-header' + (collapsed ? ' collapsed' : ''),
         'data-group': ARCHIVED_GROUP,
@@ -1121,7 +1126,7 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
         (childrenByParent[s.id] || []).some(w => w.id === activeSid ||
             (childrenByParent[w.id] || []).some(g => g.id === activeSid)));
     const savedCollapsed = sidebarState.collapsed?.[collapseKey];
-    const collapsed = savedCollapsed !== undefined ? savedCollapsed : (hasActive ? false : false);
+    const collapsed = savedCollapsed !== undefined ? savedCollapsed : !hasActive;
 
     // The disclosure control is an inner role=button, not the whole header:
     // the header also holds three real buttons, and an interactive element
@@ -1390,6 +1395,37 @@ function _getTypeKey(session) {
     if (session.session_type === 'cron') return 'cron';
     if (session.title && session.title.startsWith('Cron:')) return 'cron';
     return 'chat';
+}
+
+// Session kinds that run on their own schedule. A running one is never what a
+// person opening the UI came to watch, so it never takes the first view.
+const BACKGROUND_TYPES = new Set(['cron', 'snooze', 'canary']);
+
+/**
+ * The session a fresh load should open: the most recently updated running
+ * conversation, or null when nothing is running.
+ *
+ * A running worker or RLM run counts as the session that owns it — that is
+ * where its progress shows — so the walk climbs parent links to the top.
+ * A child whose parent is not in the list stands for itself.
+ */
+export function pickLandingSession(sessions, isBusy) {
+    const byId = new Map((sessions || []).map(s => [s.id, s]));
+    let best = null;
+    let bestAt = '';
+    for (const s of byId.values()) {
+        if (!isBusy(s)) continue;
+        let root = s;
+        for (let hops = 0; hops < 8 && CHILD_TYPES.has(root.session_type); hops++) {
+            const parent = byId.get(root.parent_session_id);
+            if (!parent) break;
+            root = parent;
+        }
+        if (BACKGROUND_TYPES.has(_getTypeKey(root))) continue;
+        const at = String(s.updated_at || '');
+        if (!best || at > bestAt) { best = root; bestAt = at; }
+    }
+    return best ? best.id : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2147,9 +2183,11 @@ function _updateArchivedLegend() {
 function _toggleArchived() {
     const state = _loadState();
     state.showArchived = !state.showArchived;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    _writeState(state);
     _updateArchivedLegend();
     if (state.showArchived) {
+        // Asked for just now, so it opens; it only starts folded on a fresh load.
+        _saveCollapsed(ARCHIVED_GROUP, false);
         _loadArchived();
         announce('Showing archived sessions');
     } else {
@@ -2164,7 +2202,7 @@ function _toggleType(typeKey) {
     const state = _loadState();
     if (!state.hiddenTypes) state.hiddenTypes = {};
     state.hiddenTypes[typeKey] = !state.hiddenTypes[typeKey];
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    _writeState(state);
 
     // Update legend UI
     const btn = document.querySelector(`.legend-item[data-type="${typeKey}"]`);
@@ -2463,7 +2501,7 @@ function _flushVisited() {
     }
     const state = _loadState();
     state.lastVisited = seen;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    _writeState(state);
     _visitedDirty = false;
     _visitedFlushAt = Date.now();
 }
@@ -2497,23 +2535,35 @@ function _finishedWhileAway(session) {
 // localStorage persistence
 // ---------------------------------------------------------------------------
 
+// Folds (time groups, spaces, a space's buckets, a session's worker list)
+// live in memory only. Every open of the UI starts from the same shape —
+// Today open, everything else folded — and a fold the user makes holds until
+// the page reloads. They used to sit in localStorage, so one group opened in
+// March stayed open on every load after it.
+const _VIEW_KEYS = ['collapsed', 'parentCollapsed'];
+const _view = { collapsed: {}, parentCollapsed: {} };
+
 function _loadState() {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
-    catch { return {}; }
+    let stored = {};
+    try { stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') || {}; }
+    catch { stored = {}; }
+    for (const k of _VIEW_KEYS) stored[k] = _view[k];
+    return stored;
+}
+
+/** Persist the durable part of the sidebar state; folds never reach storage. */
+function _writeState(state) {
+    const out = { ...state };
+    for (const k of _VIEW_KEYS) delete out[k];
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(out)); } catch { /* storage blocked */ }
 }
 
 function _saveCollapsed(label, isCollapsed) {
-    const state = _loadState();
-    if (!state.collapsed) state.collapsed = {};
-    state.collapsed[label] = isCollapsed;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    _view.collapsed[label] = isCollapsed;
 }
 
 function _saveParentCollapsed(orchId, isCollapsed) {
-    const state = _loadState();
-    if (!state.parentCollapsed) state.parentCollapsed = {};
-    state.parentCollapsed[orchId] = isCollapsed;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    _view.parentCollapsed[orchId] = isCollapsed;
 }
 
 /** "Show all N" for one space — the same shape as parentCollapsed. */
@@ -2521,7 +2571,7 @@ function _saveSpaceShowAll(spaceId, on) {
     const state = _loadState();
     if (!state.spaceShowAll) state.spaceShowAll = {};
     state.spaceShowAll[spaceId] = !!on;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    _writeState(state);
 }
 
 /** "Show all N" for one time group. */
@@ -2529,7 +2579,7 @@ function _saveTimeShowAll(label, on) {
     const state = _loadState();
     if (!state.timeShowAll) state.timeShowAll = {};
     state.timeShowAll[label] = !!on;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    _writeState(state);
 }
 
 /**
@@ -2547,7 +2597,7 @@ function _clearSpaceBucketFolds(spaceId) {
     for (const key of Object.keys(state.collapsed)) {
         if (key.startsWith(prefix)) delete state.collapsed[key];
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    _writeState(state);
 }
 
 // ---------------------------------------------------------------------------

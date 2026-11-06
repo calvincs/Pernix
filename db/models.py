@@ -508,6 +508,59 @@ def set_session_meta(
     vals = list(updates.values()) + [session_id]
     with connect_sessions() as conn:
         conn.execute(f"UPDATE sessions SET {cols} WHERE id = ?", vals)
+        if "archived_at" in updates:
+            _cascade_archive(conn, session_id, updates["archived_at"])
+
+
+# Session types that live under a parent row instead of in the list on their
+# own. Archiving the parent has to take them along: a worker whose parent has
+# left the list has nowhere to nest, and the sidebar drew it loose at the end
+# of the list, outside every collapsible group.
+_CHILD_SESSION_TYPES = ("worker", "rlm")
+
+
+def _cascade_archive(conn, session_id: str, archived_at: str | None) -> int:
+    """Give every worker/RLM descendant of ``session_id`` the same
+    ``archived_at`` as the parent (a stamp, or NULL on restore). Returns the
+    number of rows changed."""
+    marks = ",".join("?" for _ in _CHILD_SESSION_TYPES)
+    # sqlite3 reports rowcount -1 for a statement that starts with WITH,
+    # so count from total_changes.
+    before = conn.total_changes
+    conn.execute(
+        f"""WITH RECURSIVE kids(id) AS (
+                SELECT id FROM sessions
+                 WHERE parent_session_id = ? AND session_type IN ({marks})
+                UNION
+                SELECT s.id FROM sessions s JOIN kids k ON s.parent_session_id = k.id
+                 WHERE s.session_type IN ({marks})
+            )
+            UPDATE sessions SET archived_at = ?
+             WHERE id IN (SELECT id FROM kids)
+               AND archived_at IS NOT ?""",
+        (session_id, *_CHILD_SESSION_TYPES, *_CHILD_SESSION_TYPES, archived_at, archived_at),
+    )
+    return conn.total_changes - before
+
+
+def archive_stranded_children() -> int:
+    """One-time repair: archive live worker/RLM sessions whose parent is
+    archived (they were left behind before archiving cascaded). Workers whose
+    parent row is gone entirely are left alone. Returns rows archived."""
+    marks = ",".join("?" for _ in _CHILD_SESSION_TYPES)
+    total = 0
+    with connect_sessions() as conn:
+        parents = conn.execute(
+            f"""SELECT DISTINCT p.id, p.archived_at FROM sessions c
+                  JOIN sessions p ON p.id = c.parent_session_id
+                 WHERE c.archived_at IS NULL
+                   AND c.session_type IN ({marks})
+                   AND p.archived_at IS NOT NULL""",
+            _CHILD_SESSION_TYPES,
+        ).fetchall()
+        for pid, stamp in parents:
+            total += _cascade_archive(conn, pid, stamp)
+    return total
 
 
 def set_session_state_v2(session_id: str, state_v2: str) -> None:

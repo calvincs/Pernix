@@ -18,6 +18,7 @@ import {
     setListMeta,
     refreshSuggestions,
     isDeletedSession,
+    pickLandingSession,
 } from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel, EXPLORER_GROUPS } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
@@ -313,6 +314,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (_notifSession) {
         history.replaceState(null, '', window.location.pathname);
         setTimeout(() => selectSession(_notifSession), 0);
+    } else if (!state.sid) {
+        // A fresh open lands on the conversation that is running right now,
+        // if there is one, instead of the empty welcome screen.
+        const landing = pickLandingSession(state.sessions, s => _BUSY_STATES.has(s.state_v2));
+        if (landing) setTimeout(() => selectSession(landing), 0);
     }
 
     // Jobs indicator

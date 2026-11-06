@@ -6,6 +6,18 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## Unreleased (next-3.4.3)
+
+- The sidebar opens with Today open and every other group folded,
+  spaces, Pinned and Archived included. A fold you make holds until the page
+  reloads. Folds used to be saved forever.
+- Opening the UI while a conversation is running now opens that
+  conversation. A running worker opens its parent. Cron, snooze and canary
+  runs never take the first view.
+- Archiving a session now archives its workers and RLM runs too. Before, they
+  stayed in the list with no parent and showed up loose below the last
+  group, where folding could not hide them.
+
 ## v3.4.2 — 2026-11-04
 
 Version 3.4.2 is a patch release on `main`, tagged as `v3.4.2`. No migration
