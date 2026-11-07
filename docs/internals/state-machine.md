@@ -468,7 +468,7 @@ Compaction is the context-budget management layer. Full details live in `core/co
 The LLM layer is abstracted by `ProviderRouter` (`core/llm/router.py`) sitting behind `core/llm/client.py`. Essentials:
 
 - **Providers** — three: `OllamaProvider` (local, always available, `settings.llm_base_url`), `OpenRouterProvider` (remote, opt-in, requires `OPENROUTER_API_KEY`) and `OpenAIProvider` (native OpenAI-compatible, `settings.openai_base_url`, key via `OPENAI_API_KEY`). Held in the name-keyed `self._providers` map (`router.py:110-114`); selection is model-driven via `router.registry.resolve_provider(model)` (`router.py:190-193`), which returns `"ollama" | "openrouter" | "openai"`. `get_provider()` falls back to Ollama when the resolved remote provider is unavailable (`router.py:150-172`).
-- **Per-provider semaphores** (`router.py:96-107`, `self._semaphores` at `:115-119`) — independent `SessionAwareLLMScheduler` instances, each constructed with `session_timeout = settings.llm_session_timeout` (default 1800s; `0` means unlimited):
+- **Per-provider semaphores** (`router.py:96-107`, `self._semaphores` at `:115-119`) — independent `SessionAwareLLMScheduler` instances, each constructed with `session_timeout = settings.llm_session_timeout` (default `0`, unlimited; a positive value caps each turn):
   - Ollama capacity = `settings.llm_max_concurrent` (default 1)
   - OpenRouter capacity = `settings.openrouter_max_concurrent` (default 4)
   - OpenAI capacity = `settings.openai_max_concurrent` (default 4)

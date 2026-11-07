@@ -138,7 +138,7 @@ If you want to know when a cron job did something:
 ## Limits and gotchas
 
 - **Max 5 concurrent workers** (`max_concurrent_workers`) applies to cron sessions too. If your daily brief tries to spawn 10 parallel research workers, the spawns past the cap fail immediately with an error — there's no queue — until earlier workers complete.
-- **`llm_session_timeout`** (default 1800 seconds) caps a cron session's total LLM time. A long-running cron session that would blow the budget gets terminated cleanly.
+- **`llm_session_timeout`** (default `0`, unlimited) caps a turn's LLM time when set. A cron run that would pass the cap ends cleanly; `cron_dispatch_timeout` bounds each fire either way.
 - **No retry semantics** — if a cron job fails (network error, model down), it just fails for that run. The next run fires on schedule. Build retry into your prompt if you need it.
 - **Crash safety** — each run's row is claimed in the DB before the prompt is dispatched, and any ticks missed while the server was down are coalesced into a single catch-up run at startup rather than replayed one by one.
 - **Run sessions prune after 7 days** — each firing's `Cron:` session (transcript included) is auto-deleted a week after its last activity, whether or not it's bound to a space. **Pin** a run to keep it around, or make sure the job itself writes anything you'll want later into memory or a workspace file — those outlive the session either way.

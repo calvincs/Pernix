@@ -289,7 +289,20 @@ def _active_turn_root_index(convo: list[dict]) -> int:
 
 
 def _clamp_boundary_to_live_turn(convo: list[dict], boundary_idx: int, turn_user_msg_id: int | None) -> int:
-    """Never let the boundary advance past the live turn's root.
+    """Where the boundary may sit relative to the live turn.
+
+    With a known root (the agent loop), the boundary may enter the live turn:
+    compile_context pins that root row by id whatever compacted_up_to says, so
+    folding the turn's earlier rounds no longer costs the agent its ask. A
+    single long turn — 20 videos, 156 rounds, 2026-11-06 — otherwise held
+    ~140k tokens for its whole life, each round 2.5x slower than at 58k,
+    because nothing older than its root existed to fold. Two rows still stop
+    it: any user row after the root (a queued message, or an injected
+    correction — the compiler filters on id, so folding one would lose it),
+    and a tool row at the cut, which would leave a result without its call.
+
+    Without a known root (the manual /compact endpoint), never advance past
+    the live turn's root.
 
     When the agent loop knows its turn root (`turn_user_msg_id`), that row
     is authoritative. The positional guess in `_active_turn_root_index`
@@ -305,8 +318,15 @@ def _clamp_boundary_to_live_turn(convo: list[dict], boundary_idx: int, turn_user
             if m.get("id") == turn_user_msg_id and m.get("role") == "user":
                 root_idx = i
                 break
-    if root_idx < 0:
-        root_idx = _active_turn_root_index(convo)
+    if root_idx >= 0:
+        for i in range(root_idx + 1, min(boundary_idx, len(convo))):
+            if convo[i].get("role") == "user":
+                boundary_idx = i
+                break
+        while root_idx < boundary_idx < len(convo) and convo[boundary_idx].get("role") == "tool":
+            boundary_idx -= 1
+        return boundary_idx
+    root_idx = _active_turn_root_index(convo)
     return root_idx if 0 <= root_idx < boundary_idx else boundary_idx
 
 
@@ -356,6 +376,10 @@ class CompactionOutcome:
     reason: str = COMPACTION_FAILED
     covered: int = 0
     chunks: int = 0
+    # The slice reached into the live turn's own rounds (2026-11-06). A
+    # failure there must not end the turn: before in-turn compaction existed
+    # that slice was a refusal, and the turn carried on the compiler's trim.
+    in_turn: bool = False
 
 
 @dataclass
@@ -613,7 +637,7 @@ async def compact_with_llm(
     clamped = _clamp_boundary_to_live_turn(convo, boundary_idx, turn_user_msg_id)
     if clamped != boundary_idx:
         logger.info(
-            "Compaction boundary clamped from %d to %d to preserve the active turn (session %s)",
+            "Compaction boundary moved from %d to %d to keep the live turn intact (session %s)",
             boundary_idx,
             clamped,
             session_id,
@@ -621,6 +645,8 @@ async def compact_with_llm(
         boundary_idx = clamped
 
     to_summarize = convo[:boundary_idx]
+    if turn_user_msg_id is not None:
+        outcome.in_turn = any(m.get("id") == turn_user_msg_id for m in to_summarize[:-1])
     if len(to_summarize) < 4:
         # Not a failure: there is nothing older than the live turn that this
         # compactor is permitted to fold. Callers must not read this as the

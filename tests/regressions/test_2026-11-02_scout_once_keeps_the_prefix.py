@@ -58,8 +58,8 @@ def _session(report=None, allowlist=None, excluded=None):
 
 
 def test_every_native_tool_really_exists(registry):
-    # These three register only when their feature is on.
-    optional = {"goal_complete", "goal_status", "repl"}
+    # These register only when their feature is on.
+    optional = {"goal_complete", "goal_create", "goal_status", "repl"}
     assert NATIVE_TOOLS - optional - {t.name for t in registry.all_tools()} == set()
 
 

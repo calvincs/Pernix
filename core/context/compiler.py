@@ -1277,7 +1277,12 @@ def compile_context(
         m
         for m in raw_messages
         if m["role"] not in ("compaction", "scout", "notice", "reflect", "model_divider", "eval")
-        and (m["id"] > compacted_up_to or _delivery_pending(m))
+        and (
+            m["id"] > compacted_up_to
+            or _delivery_pending(m)
+            # The live turn's ask survives compaction of its own rounds.
+            or (turn_user_msg_id is not None and m["id"] == turn_user_msg_id and m["role"] == "user")
+        )
         and not (
             turn_user_msg_id is not None and m["role"] == "user" and m["id"] > turn_user_msg_id and not _is_injected(m)
         )

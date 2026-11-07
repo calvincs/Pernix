@@ -23,8 +23,10 @@ CONVO = [
 def test_known_turn_root_wins_over_the_positional_guess():
     # The positional guess lands on the injected row (index 2)...
     assert _clamp_boundary_to_live_turn(CONVO, boundary_idx=6, turn_user_msg_id=None) == 2
-    # ...but the loop knows its root is id 90 (index 0).
-    assert _clamp_boundary_to_live_turn(CONVO, boundary_idx=6, turn_user_msg_id=90) == 0
+    # ...the loop knows its root is id 90. Since 2026-11-06 the boundary may
+    # fold the live turn's own rounds (the compiler pins the root by id), but
+    # it still stops before the injected row so that note is never folded.
+    assert _clamp_boundary_to_live_turn(CONVO, boundary_idx=6, turn_user_msg_id=90) == 2
 
 
 def test_a_boundary_already_below_the_root_is_left_alone():

@@ -3,6 +3,10 @@
 A goal is an explicit contract: objective + optional budgets, closed only by
 goal_complete (refused while goal-scoped gates fail). Goals come from
 explicit user intent — the agent must never infer one from conversation.
+A request to work through a long batch ("process every video in these
+playlists", "keep going until all of it is done") IS that intent: it asks
+for work that outlives one turn, and without a goal every round ceiling
+or budget cut parks the job until the user comes back.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ def goal_create(
     continuation_budget: int = 0,
     _context: dict | None = None,
 ) -> str:
-    """Create the session's goal. Only when the USER explicitly asked for one."""
+    """Create the session's goal: when the user asked for one, or handed over a long batch to finish."""
     from db import models as db
 
     session_id = (_context or {}).get("session_id", "")
@@ -181,8 +185,10 @@ def register(reg) -> None:
         name="goal_create",
         func=goal_create,
         description=(
-            "Create this session's persistent goal — ONLY when the user explicitly asked for "
-            "one; never infer a goal from conversation. The goal carries across turns until "
+            "Create this session's persistent goal — when the user explicitly asked for one, "
+            "OR handed you a long batch to work through to the end (many items, 'process all "
+            "of these', 'keep going until done'). Never infer one from ordinary chat. Tell the "
+            "user you created it; they can stop it any time. The goal carries across turns until "
             "goal_complete. Budgets are optional; continuation_budget > 0 lets the harness "
             "auto-continue the goal after a turn ends (round ceiling, budget cut, or clean "
             "finish) up to that many times — default 0 waits for the user between turns."
@@ -195,7 +201,7 @@ def register(reg) -> None:
                 "time_budget_s": {"type": "integer", "description": "Optional wall-clock ceiling in seconds"},
                 "continuation_budget": {
                     "type": "integer",
-                    "description": "Auto-continuations allowed (default 0 = user-driven)",
+                    "description": "Auto-continuations allowed (default 0 = user-driven). For a long batch, size it to the work left (about one per round window).",
                 },
             },
             "required": ["objective"],

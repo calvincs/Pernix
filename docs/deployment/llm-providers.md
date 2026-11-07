@@ -30,7 +30,7 @@ If a name has a slash but you don't have an OpenRouter key, the call falls throu
 |---|---|---|
 | `llm_base_url` | `http://localhost:11434/v1` | OpenAI-compatible Ollama endpoint |
 | `llm_max_concurrent` | `1` | Max simultaneous Ollama requests |
-| `llm_session_timeout` | `1800` | Max seconds any session may hold an Ollama slot (`0` = unlimited) |
+| `llm_session_timeout` | `0` | Wall-clock cap on one turn's LLM use, in seconds (`0` = unlimited, the default) |
 
 To use a different Ollama install (different machine, custom port), change `llm_base_url`. In network mode it's locked — edit `data/settings.json` directly from localhost if you need to.
 

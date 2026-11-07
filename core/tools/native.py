@@ -9,6 +9,10 @@ real turns when scout chose it.
 So the list holds the tools most turns need, and every other tool is reached
 through `lookup` and `use_tool`. Of 523 real turns, 24 needed a tool outside
 this set.
+
+goal_create is native because the moment it matters is mid-turn on a long
+job, when the agent would otherwise have to discover it through lookup: a
+319-video ingest never found it and stopped at every budget cut.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ NATIVE_TOOLS = frozenset(
         "get_worker_result",
         "glob",
         "goal_complete",
+        "goal_create",
         "goal_status",
         "grep",
         "http_get",

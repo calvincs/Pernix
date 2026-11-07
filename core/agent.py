@@ -1398,6 +1398,10 @@ class _CompactionController:
     """
 
     ATTEMPT_LIMIT = 3
+    # Rounds between proactive compactions in one long turn. A turn that
+    # works through a batch grows by one item every few rounds; compacting
+    # every round would re-summarize constantly and spoil the prompt cache.
+    PROACTIVE_GAP_ROUNDS = 8
 
     def __init__(self, session: AgentSession, session_id: str):
         self._session = session
@@ -1408,9 +1412,31 @@ class _CompactionController:
         self._stalled = False
         self._refused = False
         self._floor_announced = False
+        self._last_productive = False
+        self._last_round: int | None = None
         # The live turn's root user row, set by run_agent once known, so the
         # compactor clamps to the real ask rather than guessing it.
         self.turn_user_msg_id: int | None = None
+
+    def proactive_due(self, tool_round: int) -> bool:
+        """Whether the compiler's needs_compaction flag should compact now.
+
+        The first time in a turn, always. After that only when the last
+        compaction worked — it ran, and the next compile measured it as
+        having shrunk the context — and PROACTIVE_GAP_ROUNDS have passed.
+        It used to be once per turn, so a long batch turn compacted once and
+        then rode a ~140k-token window for two hours on view pruning alone.
+        A compactor that failed or stalled hands over to the critical path,
+        which keeps its attempt limit and stalled() guard.
+        """
+        if self._refused:
+            return False
+        if self.attempts == 0:
+            return True
+        if not self._last_productive or self._stalled or self._awaiting_measure or self._last_round is None:
+            return False
+        # A renewed round window restarts tool_round at 0; count that as due.
+        return tool_round < self._last_round or tool_round - self._last_round >= self.PROACTIVE_GAP_ROUNDS
 
     @property
     def exhausted(self) -> bool:
@@ -1486,8 +1512,14 @@ class _CompactionController:
         transition_reason: str,
         event_reason: str | None = None,
         restore_state_on_failure: bool = False,
+        tool_round: int | None = None,
+        count_success: bool = True,
     ) -> bool:
-        """Compact once. Returns whether the compactor actually ran."""
+        """Compact once. Returns whether the compactor actually ran.
+
+        count_success=False is for a repeat proactive compaction: a success
+        then spends none of the attempt budget the critical and overflow
+        paths depend on, while a failure still does."""
         from sessions import state_v2 as _sv2
 
         event: dict = {"type": "context.compacting"}
@@ -1518,8 +1550,15 @@ class _CompactionController:
         # and burning the attempt budget on it only walked a long first turn
         # to compaction_failed three rounds sooner.
         self._refused = not compacted and outcome.reason == NOTHING_TO_SUMMARIZE
-        if not self._refused:
+        if not compacted and outcome.in_turn:
+            # A failed fold of the live turn's own rounds is the old refusal
+            # case: keep the turn on the compiler's trim, stop compacting.
+            self._refused = True
+        if not self._refused and (count_success or not compacted):
             self.attempts += 1
+        self._last_productive = bool(compacted)
+        if tool_round is not None:
+            self._last_round = tool_round
         self._session.touch()  # keep the reaper honest — COMPACTING can take seconds
         if compacted or self._refused or restore_state_on_failure:
             try:
@@ -1951,8 +1990,14 @@ async def run_agent(
         # A refusal costs no attempt, so `attempts == 0` alone would re-run
         # the compactor — a full transcript read — on every round of a turn
         # it has already said it cannot help with.
-        if payload.needs_compaction and compaction.attempts == 0 and not compaction.cannot_help:
-            await compaction.run(payload, transition_reason="compact-proactive", restore_state_on_failure=True)
+        if payload.needs_compaction and compaction.proactive_due(tool_round):
+            await compaction.run(
+                payload,
+                transition_reason="compact-proactive",
+                restore_state_on_failure=True,
+                tool_round=tool_round,
+                count_success=compaction.attempts == 0,
+            )
 
         # Normalize for provider
         messages = payload.messages
@@ -2597,6 +2642,17 @@ async def _grant_round_renewal(
         else "This is the LAST renewal — when these rounds run out the next "
         "round is text-only synthesis with no tools."
     )
+    # The budget-cut notice names goal_create too, but only after the turn
+    # has ended, when no tool call can follow it. A renewal is the one point
+    # where a long job is visibly outgrowing its turn AND the agent can still
+    # act (2026-11-06: a 319-item ingest renewed, stopped, and waited).
+    goal_hint = ""
+    if settings.goals_enabled and not getattr(session, "active_goal_id", None):
+        goal_hint = (
+            " If the user handed you a long batch that will not fit in this turn, "
+            "call goal_create(objective=..., continuation_budget=N) now so the "
+            "harness carries it across turns instead of parking it."
+        )
     await asyncio.to_thread(
         db.add_message,
         session_id,
@@ -2604,7 +2660,7 @@ async def _grant_round_renewal(
         f"[round budget renewed ({granted}/{authorized}) — {settings.max_tool_rounds} "
         f"fresh tool rounds, granted because tool work is still progressing. Use "
         f"them to FINISH: complete the task or wrap up honestly with verified "
-        f"state. {tail}]",
+        f"state. {tail}{goal_hint}]",
     )
     session.emit_event(
         {

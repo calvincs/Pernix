@@ -90,7 +90,12 @@ class Settings:
     embedding_fallback_after_minutes: int = 30
     embedding_fallback_recover_minutes: int = 60
     llm_max_concurrent: int = 1  # Max concurrent Ollama requests (semaphore slots)
-    llm_session_timeout: int = 1800  # Max seconds any session may hold LLM slots (0 = unlimited)
+    # Wall-clock cap on one turn's LLM use (0 = unlimited, the default). It
+    # was 1800, which cut long jobs mid-item (a 319-video ingest stopped at
+    # video 20 and sat idle for 100 minutes): the clock counts the whole turn,
+    # and slots are taken one call at a time, so it never protected other
+    # sessions. The stuck detector, max_tool_rounds and Stop are the guards.
+    llm_session_timeout: int = 0
     # After a provider rejects a call for exhausted quota (daily key cap,
     # billing hard limit), the stream ladder refuses to fail over TO that
     # model for this many seconds. Each failover attempt otherwise pays one

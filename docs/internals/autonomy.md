@@ -111,8 +111,9 @@ the notification channel so it reaches you even if no browser is attached.
 **Cron sessions can carry goals.** Goal auto-continuation applies to
 `normal` *and* `cron` sessions, so a scheduled job that picks up the active
 goal keeps driving it. Goals are still only ever *created* by
-`goal_create` from explicit user intent; a cron session attaches to whatever
-goal is already active, it does not mint one.
+`goal_create` from explicit user intent — asking for a goal, or handing over
+a long batch to finish ("process every video in these playlists"); a cron
+session attaches to whatever goal is already active, it does not mint one.
 
 **Goal continuations are snooze-transparent.** While a session is being
 auto-driven by continuations it sets `goal_continuation_active`, which takes
