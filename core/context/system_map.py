@@ -148,6 +148,13 @@ def build_system_map(app=None) -> str:
         "# SYSTEM MAP — machine-generated, regenerated at every boot. Do not edit.",
         f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}. "
         "Read this before spelunking /app or guessing a table, path, or route.",
+        f"Local API: {base}"
+        + (
+            " (self-signed TLS: use `curl -k`, or an ssl context with verification off; "
+            "plain http on this port fails with BadStatusLine)."
+            if scheme == "https"
+            else "."
+        ),
         "",
         "## Data layout",
         "```",

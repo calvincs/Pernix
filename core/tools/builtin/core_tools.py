@@ -1133,7 +1133,29 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
                 effective_timeout = settings.shell_timeout
 
             try:
-                process.wait(timeout=effective_timeout)
+                interrupted_after = _wait_or_user_interrupt(process, effective_timeout, _session)
+                if interrupted_after is not None:
+                    _kill_process_tree(process)
+                    _out_text, _out_meta = _capture_evidence(out_f, "stdout")
+                    _err_text, _err_meta = _capture_evidence(err_f, "stderr")
+                    partial = (_out_text + _err_text).strip()
+                    msg = (
+                        f"[interrupted after {interrupted_after}s: the user sent a message while this "
+                        "command ran. The command was stopped so you can read it now. Answer the user "
+                        "first; re-run the command only if it still fits what they said.]"
+                    )
+                    if partial:
+                        msg += f"\n[partial output before the interrupt]\n{partial[-2000:]}"
+                    msg = _prepend_acquisition_notes(msg, [_out_meta, _err_meta])
+                    return msg, {
+                        "exit_code": None,
+                        "timed_out": False,
+                        "interrupted_by_user": True,
+                        "cwd": cwd_display,
+                        "truncated": False,
+                        "total_chars": len(partial),
+                        "was_error": False,
+                    }
             except subprocess.TimeoutExpired:
                 _kill_process_tree(process)
                 # Include what the command managed to print — the difference
@@ -1249,6 +1271,37 @@ def _get_session_from_context(ctx: dict | None):
         return get_manager().get(sid)
     except Exception:
         return None
+
+
+def _wait_or_user_interrupt(process, timeout: float, session) -> int | None:
+    """Wait for `process` like process.wait(timeout), but give way to the user.
+
+    Returns None when the process exited. Returns the seconds elapsed when a
+    user message arrived mid-command and the command had run at least
+    settings.shell_user_interrupt_after_s — the caller kills it. Raises
+    subprocess.TimeoutExpired on the normal timeout, as wait() does.
+    """
+    import time as _time
+
+    grace = int(getattr(settings, "shell_user_interrupt_after_s", 0) or 0)
+    if session is None or grace <= 0:
+        process.wait(timeout=timeout)
+        return None
+    start_seq = getattr(session, "user_steer_seq", 0)
+    started = _time.monotonic()
+    deadline = started + timeout
+    while True:
+        left = deadline - _time.monotonic()
+        if left <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        try:
+            process.wait(timeout=min(1.0, left))
+            return None
+        except subprocess.TimeoutExpired:
+            pass
+        elapsed = _time.monotonic() - started
+        if elapsed >= grace and getattr(session, "user_steer_seq", 0) != start_seq:
+            return int(elapsed)
 
 
 def _kill_process_tree(process):

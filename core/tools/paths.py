@@ -504,7 +504,11 @@ def build_shell_env(workspace_root: Path | None = None, run_dir: Path | None = N
         env = {k: v for k, v in os.environ.items() if k in allowed}
     # Always override PATH and HOME for sandbox
     # Prepend workspace venv bin so pip/python resolve to venv, not system
-    env["PATH"] = f"{venv_dir / 'bin'}:/usr/local/bin:/usr/bin:/bin"
+    # The shared workspace .local/bin holds tools the agent installed itself
+    # (deno, yt-dlp shims). HOME follows a space's folder, so `~/.local/bin`
+    # does not reach it from a space session: 2026-11-07 a Publisher-space
+    # session could not find tools a plain session had just installed.
+    env["PATH"] = f"{venv_dir / 'bin'}:{ws / '.local' / 'bin'}:/usr/local/bin:/usr/bin:/bin"
     env["HOME"] = str(home)
     env["VIRTUAL_ENV"] = str(venv_dir)
     # Python block-buffers stdout when it isn't a tty, so a long-running

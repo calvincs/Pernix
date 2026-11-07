@@ -47,7 +47,12 @@ def read_session_summary(session_id: str, recent: int = 5, _context: dict | None
 
     # --- Metadata block ---
     created = (session.get("created_at") or "")[:19]
-    updated = (session.get("updated_at") or "")[:19]
+    # sessions.updated_at is not bumped while a long turn runs, so on its own
+    # it read "last active 1h47m ago" for a session writing messages every
+    # minute (2026-11-07, 937fd96364ba) and the caller cancelled a live turn
+    # as stuck. The newest message is the real activity clock.
+    _last_msg_at = max((m.get("created_at") or "" for m in messages), default="")
+    updated = max(session.get("updated_at") or "", _last_msg_at)[:19]
     parent = session.get("parent_session_id") or ""
     subtitle = session.get("subtitle") or ""
     state = session.get("state_v2") or session.get("state") or "unknown"
@@ -59,8 +64,13 @@ def read_session_summary(session_id: str, recent: int = 5, _context: dict | None
         lines.append(f"Subtitle: {subtitle}")
     lines += [
         f"Type: {session['session_type']}  |  State: {state}",
-        f"Started: {created}  |  Last active: {updated}",
+        f"Started: {created}  |  Last active: {updated} (UTC, newest message)",
     ]
+    if state in ("processing", "scouting", "compacting", "awaiting_workers"):
+        lines.append(
+            "A turn is running. A long tool call (a sleep, a build) writes nothing until it returns, "
+            "so a quiet stretch is not proof the session is stuck."
+        )
     if parent:
         lines.append(f"Parent session: {parent[:8]}")
 

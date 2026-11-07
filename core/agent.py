@@ -786,6 +786,17 @@ def _announces_future_work(text: str) -> bool:
     return bool(_FUTURE_INTENT_RE.search(tail))
 
 
+def _round_answers_a_mid_turn_message(payload) -> bool:
+    """True when this round's request carried a message sent mid-turn.
+
+    The compiler lists such rows in delivered_message_ids (rows still pending
+    delivery; the turn's own opening message is already settled). The reply
+    is then an answer to someone who is present, and a forced follow-up must
+    not talk over it.
+    """
+    return bool(getattr(payload, "delivered_message_ids", ()))
+
+
 def _build_followup_nudge(session_id: str, content: str, attempt: int, cap: int) -> str:
     """Data-driven nudge: name the unfinished thing, never a generic 'continue'.
 
@@ -2232,6 +2243,12 @@ async def run_agent(
                 and tool_round < settings.max_tool_rounds - 2
                 and not session.cancel_requested
                 and collected_content
+                # A round that carried a mid-turn user message is the model
+                # answering that person, and the person is right there. A nudge
+                # here talks over them: 2026-11-07 (937fd96364ba) the user said
+                # to pause, the agent agreed, and the goal-worded nudge read as an
+                # override of that request — so it kept working.
+                and not _round_answers_a_mid_turn_message(payload)
                 and _announces_future_work(collected_content)
             ):
                 _forced_followups += 1

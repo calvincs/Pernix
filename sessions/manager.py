@@ -1822,6 +1822,8 @@ class SessionManager:
                     meta["parent_user_msg_id"] = session.current_turn_user_msg_id
                 mid = db.add_message(session_id, "user", message, metadata=json.dumps(meta))
                 session.turn.user_row_version += 1
+                if origin == "user":
+                    session.user_steer_seq += 1
                 session.emit_event(
                     {
                         "type": "message.injected",

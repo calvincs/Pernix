@@ -241,6 +241,12 @@ class Settings:
     # --- Tools / Shell ---
     tool_timeout: int = 300
     shell_timeout: int = 30
+    # A user message sent mid-turn stops a bash command that has already run
+    # this long, so the agent reads it now instead of after the command ends.
+    # 2026-11-07 (937fd96364ba): a request to pause waited 8 minutes behind a
+    # `sleep 1800`, and a later message was lost when the turn was cancelled
+    # during a `sleep 600`. 0 disables. Short commands are left to finish.
+    shell_user_interrupt_after_s: int = 15
     # Threads for ordinary tool calls. Tools run on their own pool so they can
     # never occupy asyncio's default executor, which every API route needs for
     # its DB reads — see the pool comments in core/tools/executor.py. Sized

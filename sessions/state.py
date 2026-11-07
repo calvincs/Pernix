@@ -317,6 +317,11 @@ class AgentSession:
     # Typed loosely to avoid importing subprocess for a field nothing in
     # sessions/ dereferences.
     _active_processes: dict = field(default_factory=dict)
+    # Bumped by every user message injected mid-turn. A running bash call
+    # compares it with the value it started with and yields when it moves
+    # (settings.shell_user_interrupt_after_s). Read from tool threads; a plain
+    # int is enough because only the event loop writes it.
+    user_steer_seq: int = 0
 
     # Monotonic-ish timestamp of the last "workers appear stalled" warning
     # emitted by orchestration.await_workers, which logs at most once a minute.
