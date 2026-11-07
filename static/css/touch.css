@@ -1055,8 +1055,12 @@ body[data-touch] .ce-fallback {
 #composer.is-rest-inline #msg-input { order: 2; flex: 1 1 auto; }
 #composer.is-rest-inline #voice-btn { order: 3; }
 #composer.is-rest-inline #send-btn { order: 4; }
+/* Stop stays on the line while a turn runs. Folding it away with the other
+   controls left a phone with no way to stop a long goal-driven turn unless
+   you first tapped into an empty composer (2026-11-07). */
+#composer.is-rest-inline.is-streaming #stop-btn { order: 5; }
 #composer.is-rest-inline #expand-btn,
-#composer.is-rest-inline #stop-btn,
+#composer.is-rest-inline:not(.is-streaming) #stop-btn,
 #composer.is-rest-inline #composer-count,
 #composer.is-rest-inline #composer-row .grow { display: none; }
 

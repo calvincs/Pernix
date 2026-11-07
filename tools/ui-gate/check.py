@@ -373,6 +373,27 @@ COMPOSER_TOUCH_JS = r"""() => {
 
 def composer_touch(pg, name, shot):
     """The composer and its expand sheet under a finger."""
+    # A running turn on an untouched phone composer: Stop must still be on
+    # the line. The folded row hid it, and a long goal-driven turn could not
+    # be stopped from a phone without first tapping into the composer.
+    stop = pg.evaluate(
+        "() => { const t=document.getElementById('msg-input'); t.value=''; t.blur();"
+        " t.dispatchEvent(new Event('input', {bubbles: true}));"
+        " const c=document.getElementById('composer'); const s=document.getElementById('stop-btn');"
+        " const was={streaming: c.classList.contains('is-streaming'), hidden: s.hidden};"
+        " c.classList.add('is-streaming'); s.hidden=false;"
+        " const r=s.getBoundingClientRect();"
+        " const out={rest: c.classList.contains('is-rest-inline'), shown: !!s.offsetParent && r.width>0,"
+        "            w: Math.round(r.width), h: Math.round(r.height)};"
+        " c.classList.toggle('is-streaming', was.streaming); s.hidden=was.hidden; return out; }"
+    )
+    check(
+        name,
+        "m2: Stop stays visible on a resting touch composer while a turn runs",
+        stop["rest"] and stop["shown"] and stop["w"] >= 44 and stop["h"] >= 44,
+        stop,
+        "m2",
+    )
     # Typing drops .is-rest-inline, which is the state the controls are all
     # in the row and the expand button exists.
     pg.evaluate(
