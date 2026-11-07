@@ -319,6 +319,55 @@ def search_vector(conn, query_vec: list[float], limit: int = 5) -> list[SearchRe
 
 _RRF_K = 60  # standard reciprocal-rank-fusion constant
 
+# Term coverage for the fused lexical channel (2026-11-06). Query tokens are
+# OR'd and the bm25 sum is divided by token count, so an entry matching ONE
+# token of a two-word query scores like a full match when that token is
+# frequent in it: "sagging middle" put a "Middle East" policy entry at 6.6,
+# "strong" on the shared scale. Scaling by the squared share of query terms
+# the entry contains keeps a full match untouched (1.0), halves-squared a
+# one-of-two match (0.25), and reorders the lexical list toward entries that
+# answer more of the question. Matching is a prefix test that tolerates the
+# porter stemmer's suffix folding; it only has to agree with FTS5 roughly.
+_COVERAGE_POWER = 2
+
+
+def query_terms(query: str) -> list[str]:
+    """The distinct lowercased words prepare_fts_query matches on."""
+    clean = re.sub(r"@tags:\s*[\w,-]+", " ", query)
+    clean = re.sub(r"[^\w\s-]", " ", clean)
+    words: list[str] = []
+    for w in re.split(r"[\s-]+", clean.lower()):
+        w = w.strip("-_")
+        if len(w) >= 2 and w not in words:
+            words.append(w)
+    return words
+
+
+def _stem_key(word: str) -> str:
+    return word[: max(4, len(word) - 3)] if len(word) > 4 else word
+
+
+def term_coverage(entry: MemoryEntry, terms: list[str]) -> float:
+    """Share of `terms` that appear in the entry (name, content or tags)."""
+    if len(terms) < 2:
+        return 1.0
+    text = f"{entry.file_name} {entry.content} {' '.join(entry.tags or [])}".lower()
+    words = set(re.split(r"[^\w]+", text))
+    hit = 0
+    for t in terms:
+        key = _stem_key(t)
+        if t in words or any(w.startswith(key) for w in words if len(w) >= len(key)):
+            hit += 1
+    return hit / len(terms)
+
+
+def _with_term_coverage(r: SearchResult, terms: list[str]) -> SearchResult:
+    cov = term_coverage(r.entry, terms)
+    if cov >= 1.0:
+        return r
+    return SearchResult(entry=r.entry, score=r.score * cov**_COVERAGE_POWER, source=r.source)
+
+
 # Cosine → BM25-scale mapping for entries only the semantic channel surfaced.
 # Every consumer of `score` reads one absolute scale (RULES.md, recall/
 # search_lessons, internal_recall's strong-match nudge): > 3.0 strong ·
@@ -352,7 +401,8 @@ def _rrf_fuse(lexical: list[SearchResult], semantic: list[SearchResult], limit: 
     Ordering is reciprocal-rank fusion over both channels. The reported
     `score` is NOT the RRF sum (see the anchors above): a result BM25 saw
     keeps its BM25 score untouched, a vector-only result gets its cosine
-    mapped onto the same scale. `source` names the channel that contributed
+    mapped onto the same scale, and a result both saw takes the higher of
+    the two readings. `source` names the channel that contributed
     the most rank weight, so a result that owes its position to the vector
     channel is not mislabeled "bm25".
     """
@@ -372,8 +422,12 @@ def _rrf_fuse(lexical: list[SearchResult], semantic: list[SearchResult], limit: 
                 }
                 continue
             slot["rrf"] += contribution
-            if channel == "bm25":
-                slot["score"] = r.score  # lexical score always wins the scale
+            # Both channels saw it: the stronger reading wins. Lexical-wins
+            # let one shared common word ("middle") label an off-topic entry
+            # strong while its cosine said noise; meaning-wins alone would
+            # bury exact identifiers the embedder cannot see.
+            other = r.score if channel == "bm25" else vector_to_scale(r.score)
+            slot["score"] = max(slot["score"], other)
             if contribution > slot["best"]:
                 slot["best"] = contribution
                 slot["source"] = channel
@@ -439,7 +493,9 @@ def search_hybrid(
         key = (r.entry.file_name, r.entry.epoch)
         if key not in seen or r.score > seen[key].score:
             seen[key] = r
-    bm25_ranked = sorted(seen.values(), key=lambda r: r.score, reverse=True)[:fetch]
+    terms = query_terms(query)
+    lexical = [_with_term_coverage(r, terms) for r in seen.values()]
+    bm25_ranked = sorted(lexical, key=lambda r: r.score, reverse=True)[:fetch]
 
     # Signal 1b: semantic channel (1f). Degrades to lexical-only on any
     # failure — unset model, Ollama down, no vectors yet.

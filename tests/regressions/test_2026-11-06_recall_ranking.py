@@ -43,11 +43,16 @@ def test_scale_is_monotonic_and_capped():
     assert max(ys) <= 6.0
 
 
-def test_vector_only_hit_gets_mapped_score_and_bm25_score_is_untouched():
-    lex = [_r("a", "note", score=4.2)]
-    sem = [_r("b", "note", score=0.65, source="vector"), _r("a", "note", score=0.9, source="vector")]
+def test_vector_only_hit_gets_mapped_score_and_a_shared_hit_takes_the_higher_reading():
+    lex = [_r("a", "note", score=4.2), _r("c", "note", score=6.6)]
+    sem = [
+        _r("b", "note", score=0.65, source="vector"),
+        _r("a", "note", score=0.9, source="vector"),
+        _r("c", "note", score=0.24, source="vector"),
+    ]
     out = {r.entry.file_name: r for r in _rrf_fuse(lex, sem, 5)}
-    assert out["a"].score == 4.2  # lexical score always wins the scale
+    assert out["a"].score == vector_to_scale(0.9)  # meaning reads stronger than the keywords
+    assert out["c"].score == 6.6  # an exact keyword hit the embedder misses keeps its score
     assert out["b"].score == vector_to_scale(0.65)
     assert out["b"].source == "vector"
 
@@ -127,3 +132,29 @@ def test_a_format_change_marks_existing_vectors_stale(tmp_path, monkeypatch):
     assert len(s.pending_embeddings()) == 1
     s.store_embeddings([(p["file_name"], p["epoch"], p["content_hash"], [0.1, 0.2]) for p in pending])
     assert s.pending_embeddings() == []
+
+
+# ── term coverage ───────────────────────────────────────────────────────
+# "sagging middle" scored an off-topic "Middle East" entry 6.6 ("strong"):
+# one shared common word out of two counted like a full match.
+
+
+def test_partial_term_match_is_scaled_down_and_full_match_is_untouched():
+    from core.memory.search import _with_term_coverage, query_terms
+
+    terms = query_terms("sagging middle")
+    one = _r("geo", "finding", score=6.6)
+    one.entry.content = "Tensions in the Middle East"
+    both = _r("craft", "finding", score=4.0)
+    both.entry.content = "Fix a sagging middle with a midpoint reversal"
+    assert _with_term_coverage(one, terms).score < 3.0
+    assert _with_term_coverage(both, terms).score == 4.0
+
+
+def test_coverage_tolerates_stemmed_forms_and_ignores_one_word_queries():
+    from core.memory.search import query_terms, term_coverage
+
+    e = _r("x", "note").entry
+    e.content = "Suspenseful chapter endings and a ticking clock"
+    assert term_coverage(e, query_terms("tick clocks chapters ending")) == 1.0
+    assert term_coverage(e, query_terms("unrelated")) == 1.0
