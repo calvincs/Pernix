@@ -8,6 +8,17 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ## Unreleased (next-3.4.3)
 
+- A worker that was stopped is no longer reported as having produced
+  nothing. When a worker ends without a written result, its parent now
+  hears how it ended (cancelled is named as a stop, not a failure), how
+  many tool calls it made, its last progress notes, and the files it
+  wrote, with `resume_worker` as the way forward. Before, a worker whose
+  replies held only tool calls read as "NO OUTPUT" however much it had
+  done.
+- `terminal` and `browser` follow-ups: a repeated `open` returns the
+  terminal or page that is already open; pressing the same key again in
+  a terminal is no longer flagged as a stuck loop when the screen
+  changed; `open` waits for the program's first output.
 - Two new tools for work that needs a conversation. `terminal` runs a
   program on a real pseudo-terminal and keeps it open between calls: ssh
   sessions, REPLs, installers that ask questions, full-screen text UIs. It

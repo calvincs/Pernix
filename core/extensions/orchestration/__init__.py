@@ -376,6 +376,124 @@ def _worker_has_output(wid: str) -> bool:
     return any(m["role"] == "assistant" and m.get("content") for m in messages)
 
 
+# How a run that left no written result ended, in words a parent can act on.
+_END_PHRASES = {
+    "cancelled": "was CANCELLED (stopped by the user or by its parent) — it did not fail",
+    "round_ceiling": "hit its round limit",
+    "budget_exhausted": "ran out of its time or token budget",
+    "stuck_loop": "was stopped as stuck in a loop",
+    "compaction_failed": "ended when its context could not be compacted",
+    "scout_error": "ended on a planning error",
+    "error": "ended on an error",
+}
+_FILE_WRITERS = ("file_write", "file_edit", "multiedit")
+
+
+def _work_evidence(wid: str) -> dict:
+    """What a worker DID, read from its tool calls: how many it made, the
+    progress notes it sent its parent, the files it wrote.
+
+    "Output" used to mean one thing — an assistant message with text in it. A
+    worker on a model that puts nothing but tool calls in its replies made 58
+    of them, cleared three stages of its task, sent two progress notes and
+    wrote 35 files; then its turn was cancelled from the UI, and its parent
+    was told it "produced NO OUTPUT" and "finished with no output". The parent
+    took that for a failure, threw away the worker's working driver and
+    rebuilt it four times (2026-11-18). No text is not no work.
+    """
+    calls = 0
+    notes: list[str] = []
+    files: list[str] = []
+    try:
+        messages = db.get_messages(wid)
+    except Exception:
+        messages = []
+    for m in messages:
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        raw = m["tool_calls"]
+        try:
+            tcs = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            continue
+        for tc in tcs if isinstance(tcs, list) else []:
+            if not isinstance(tc, dict):
+                continue
+            calls += 1
+            name = tc.get("name") or ""
+            args = tc.get("arguments")
+            try:
+                args = json.loads(args) if isinstance(args, str) else args
+            except (ValueError, TypeError):
+                args = None
+            if not isinstance(args, dict):
+                continue
+            if name == "use_tool" and isinstance(args.get("arguments"), dict):
+                name, args = str(args.get("name") or ""), args["arguments"]
+            if name == "notify_parent":
+                note = str(args.get("message") or args.get("findings_summary") or "").strip()
+                if note:
+                    notes.append(note)
+            elif name in _FILE_WRITERS:
+                path = str(args.get("path") or args.get("file_path") or "").strip()
+                if path and path not in files:
+                    files.append(path)
+    return {"calls": calls, "notes": notes, "files": files}
+
+
+def _silent_end(wid: str, term_reason: str | None = None) -> tuple[str, dict]:
+    """(kind, evidence) for a finished worker with no written result.
+
+    kind is "cancelled" (someone stopped it), "worked" (it made tool calls but
+    wrote no result) or "empty" (nothing at all).
+    """
+    evidence = _work_evidence(wid)
+    if term_reason is None:
+        term_reason, _ = worker_termination_reason(wid)
+    evidence["reason"] = term_reason or ""
+    if term_reason == "cancelled":
+        return "cancelled", evidence
+    return ("worked" if evidence["calls"] else "empty"), evidence
+
+
+def _evidence_counts(evidence: dict) -> str:
+    parts = [f"{evidence['calls']} tool call(s)"]
+    if evidence["notes"]:
+        parts.append(f"{len(evidence['notes'])} progress note(s)")
+    if evidence["files"]:
+        parts.append(f"{len(evidence['files'])} file(s) written")
+    return ", ".join(parts)
+
+
+def _silent_end_report(worker_id: str, kind: str, evidence: dict) -> str:
+    """get_worker_result's answer for a worker that left no written result."""
+    wid = worker_id[:8]
+    phrase = _END_PHRASES.get(evidence.get("reason") or "", "")
+    if kind == "cancelled":
+        head = f"Worker {wid} {_END_PHRASES['cancelled']}. It wrote no final result because it was stopped mid-work."
+    elif phrase:
+        head = f"Worker {wid} {phrase} before it wrote a final result."
+    else:
+        head = f"Worker {wid} ended without writing a final result."
+    lines = [head, f"What it did before that: {_evidence_counts(evidence)}."]
+    if evidence["notes"]:
+        lines.append("Its last progress notes to you (already in your history):")
+        lines.extend(f"- {n[:400]}" for n in evidence["notes"][-3:])
+    if evidence["files"]:
+        shown = evidence["files"][-12:]
+        lines.append("Files it wrote (read these before redoing anything): " + ", ".join(shown))
+        if len(evidence["files"]) > len(shown):
+            lines.append(f"(+{len(evidence['files']) - len(shown)} earlier file(s))")
+    lines.append(
+        "Its work is NOT lost and nothing here says its approach was wrong. To continue from where it "
+        "stopped, call resume_worker. get_worker_transcript shows its last steps."
+    )
+    task = next((m.get("content", "") for m in db.get_messages(worker_id) if m["role"] == "user"), "")
+    if task:
+        lines.append(f"Original task: {task[:_TASK_PREVIEW_CHARS]}")
+    return "\n".join(lines)
+
+
 def _worker_has_live_process(w) -> bool:
     """True when the worker still has a subprocess of its own running."""
     if w is None:
@@ -496,7 +614,15 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
             parts.append(f"ERROR: {worker_obj.error[:100]}")
             failed += 1
         elif truly_done and not _worker_has_output(wid):
-            parts.append("WARNING: no output produced")
+            _kind_of_end, _evidence = _silent_end(wid)
+            if _kind_of_end == "cancelled":
+                parts.append(
+                    f"CANCELLED before it wrote a result ({_evidence_counts(_evidence)}) — stopped, not failed"
+                )
+            elif _kind_of_end == "worked":
+                parts.append(f"ended without a written result ({_evidence_counts(_evidence)})")
+            else:
+                parts.append("WARNING: no output produced")
             empty += 1
         if v2 not in (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_USER):
             # A live subprocess is work in progress, not silence.
@@ -889,6 +1015,9 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
                 f"Worker {worker_id[:8]} is still running, so it has no result yet. "
                 "Call await_workers to wait for it."
             )
+    _kind_of_end, _evidence = _silent_end(worker_id, term_reason)
+    if _kind_of_end != "empty":
+        return _silent_end_report(worker_id, _kind_of_end, _evidence)
     return f"Worker {worker_id[:8]} finished with no output.{_next_step(worker_id)}"
 
 
@@ -1367,7 +1496,23 @@ def await_workers(
             if fail_ids:
                 result += f"\n⚠ {len(fail_ids)} FAILED: {', '.join(fail_ids)} — call get_worker_result on each for its task and next step."
             if empty_ids:
-                result += f"\n⚠ {len(empty_ids)} produced NO OUTPUT: {', '.join(empty_ids)} — call get_worker_result on each for its task and next step."
+                ends = {wid: _silent_end(wid)[0] for wid in empty_ids}
+                cancelled_ids = [wid for wid in empty_ids if ends[wid] == "cancelled"]
+                worked_ids = [wid for wid in empty_ids if ends[wid] == "worked"]
+                nothing_ids = [wid for wid in empty_ids if ends[wid] == "empty"]
+                if cancelled_ids:
+                    result += (
+                        f"\n⚠ {len(cancelled_ids)} CANCELLED before writing a result: {', '.join(cancelled_ids)} — "
+                        "stopped by the user or the parent, NOT a failure. Its work so far stands: call "
+                        "get_worker_result to see what it did, resume_worker to continue it."
+                    )
+                if worked_ids:
+                    result += (
+                        f"\n⚠ {len(worked_ids)} ended without a written result: {', '.join(worked_ids)} — it did "
+                        "work (see the tool-call counts above). Call get_worker_result for what it did and how it ended."
+                    )
+                if nothing_ids:
+                    result += f"\n⚠ {len(nothing_ids)} produced NO OUTPUT: {', '.join(nothing_ids)} — call get_worker_result on each for its task and next step."
             return result
 
         if stalled:
