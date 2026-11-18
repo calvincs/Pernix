@@ -496,7 +496,23 @@ def _open(command, name, cols, rows, wait_for, wait_s, ctx) -> str:
 
     session_id = ctx.get("session_id", "") or "unknown"
     cap = int(settings.terminal_max_per_session)
-    live = [t for t in _visible(session_id) if not t.done and t.owner == session_id]
+    visible_live = [t for t in _visible(session_id) if not t.done]
+    # Opening a name that is already running hands back that terminal. Models
+    # re-issue an `open` they already made (after a long pause, a retry, a
+    # handoff to a worker), and each repeat used to start one more copy of the
+    # program until the cap refused the next one (first live run, 2026-11-18:
+    # six ssh sessions opened for one game).
+    if name:
+        for t in visible_live:
+            if t.name == name:
+                t.last_used = time.monotonic()
+                note = t.wait(pattern, min(wait_s, 2.0), ctx.get("_cancel_event")) if pattern else ""
+                reuse = (
+                    f"a terminal named '{name}' is ALREADY OPEN — this is it, no new program was started. "
+                    "Keep using it with action='send'; close it first if you really want a fresh one"
+                )
+                return t.render(note="; ".join(n for n in (reuse, note) if n))
+    live = [t for t in visible_live if t.owner == session_id]
     if len(live) >= cap:
         return f"Error: {cap} terminal(s) already open for this session — close one first.\n" + _format_list(live)
 
@@ -541,6 +557,11 @@ def _open(command, name, cols, rows, wait_for, wait_s, ctx) -> str:
     logger.info("terminal %s opened (session %s, pid %d, cwd %s)", term_id, session_id[:12], proc.pid, cwd)
     note = term.wait(pattern, wait_s, ctx.get("_cancel_event"))
     opened = f"opened in {cwd}; use id='{term_id}' with action send / screen / close"
+    others = [t.id + (f' "{t.name}"' if t.name else "") for t in visible_live]
+    if others:
+        opened += (
+            f"; {len(others)} other terminal(s) still open ({', '.join(others)}) — close the ones you no longer need"
+        )
     return term.render(note="; ".join(n for n in (opened, note) if n))
 
 

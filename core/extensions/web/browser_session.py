@@ -329,6 +329,22 @@ async def _owners() -> dict[str, str]:
     return {pid: s.owner for pid, s in _pages.items()}
 
 
+async def _urls() -> dict[str, str]:
+    return {pid: s.page.url for pid, s in _pages.items()}
+
+
+async def _reuse(page_id: str) -> dict:
+    sess = _pages.get(page_id)
+    if sess is None:
+        return {"text": f"Error: page {page_id} is no longer open."}
+    sess.last_used = time.monotonic()
+    note = (
+        f"this address is ALREADY OPEN as page {page_id} — this is it, no new page was opened. "
+        "Keep using this id; action='goto' reloads it, action='close' ends it"
+    )
+    return {"text": await _snapshot(sess, _TEXT_CAP_SNAPSHOT, note)}
+
+
 async def _listing(ids: list[str]) -> str:
     rows = []
     for pid in ids:
@@ -651,6 +667,12 @@ def browser(
             return _call(loop, _listing(visible), 15)
 
         if action == "open":
+            # Same reasoning as the terminal: a repeated `open` of a page that
+            # is already open hands that page back instead of stacking copies.
+            urls = _call(loop, _urls(), 15)
+            for pid in visible:
+                if urls.get(pid, "").rstrip("/") == url.rstrip("/"):
+                    return _call(loop, _reuse(pid), 20)["text"]
             cap = int(settings.browser_max_sessions)
             mine = [pid for pid, owner in owners.items() if owner == session_id]
             if len(mine) >= cap:

@@ -210,6 +210,18 @@ def test_per_session_cap_is_enforced(term, monkeypatch):
     assert "already open" in term(action="open", command="sleep 60", wait_seconds=0.5)
 
 
+def test_opening_a_name_that_is_running_hands_back_that_terminal(term):
+    # First live run: a model re-issued the same `open` six times and got six
+    # copies of the program. A repeat must return the one that is running.
+    first = term(action="open", name="game", command="bash --norc --noprofile -i", cols=80, rows=10)
+    term(action="send", input="MARK=still-here<enter>")
+    again = term(action="open", name="game", command="bash --norc --noprofile -i")
+    assert _id_of(again) == _id_of(first) and "ALREADY OPEN" in again
+    assert "still-here" in term(action="send", input="echo $MARK<enter>")
+    other = term(action="open", command="sleep 60", wait_seconds=0.5)
+    assert "1 other terminal(s) still open" in other and _id_of(first) in other
+
+
 def test_a_worker_can_take_over_its_parents_terminal_and_a_stranger_cannot(term):
     tid = _id_of(term(action="open", command="bash --norc --noprofile -i", cols=80, rows=10))
     worker = db.create_session(title="worker", session_type="worker", parent_session_id=term.sid)
@@ -440,7 +452,9 @@ def test_pages_are_shared_with_workers_capped_and_closed(web, monkeypatch):
     out = browser_session.browser(action="snapshot", _context={"session_id": stranger, "_loop": web.loop})
     assert out.startswith("Error: no page is open")
 
+    again = web(action="open", url=web.base + "/")
+    assert "ALREADY OPEN" in again and "Test Bench" in again  # same page handed back
     monkeypatch.setattr("config.settings.browser_max_sessions", 1)
-    assert "already open" in web(action="open", url=web.base)
+    assert "already open for this session" in web(action="open", url=web.base + "/second")
     assert "closed" in web(action="close")
     assert "No pages are open" in web(action="list")
