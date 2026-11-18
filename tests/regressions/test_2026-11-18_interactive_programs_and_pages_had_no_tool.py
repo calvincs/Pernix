@@ -160,6 +160,13 @@ def test_a_full_screen_program_is_read_as_a_screen_not_a_byte_log(term, tmp_path
     assert "exited code 0" in term(action="screen")
 
 
+def test_open_waits_for_a_slow_starter_to_say_something(term):
+    # A program that connects before it prints (ssh) used to come back as
+    # "(screen is empty)" after a third of a second of honest silence.
+    out = term(action="open", command="sleep 1.2; echo finally-here; sleep 30", wait_seconds=10)
+    assert "finally-here" in out and "screen is empty" not in out
+
+
 def test_scrollback_keeps_what_left_the_screen(term):
     term(action="open", command="bash --norc --noprofile -i", cols=80, rows=8)
     out = term(action="send", input="seq 1 30<enter>")
@@ -274,6 +281,34 @@ def test_scout_is_told_to_name_the_interactive_tools():
     assert "terminal tool" in prompt and "browser tool" in prompt
     # The no-think line must stay last; conditional rules go in above it.
     assert prompt.index("INTERACTIVE PROGRAMS AND PAGES") < prompt.rindex("Do NOT use <think>")
+
+
+def test_the_same_key_twice_is_progress_when_the_screen_moved():
+    # Paging a long pane sends the identical call again and again. The stuck
+    # detector used to see only the arguments and tell the model to stop.
+    from core.agent import StuckDetector
+    from core.tools.builtin import load_builtin_tools
+    from core.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    load_builtin_tools(registry)
+    assert registry.exists("terminal")
+
+    call = {"name": "terminal", "arguments": '{"action": "send", "id": "game", "input": "<pgdn>"}'}
+    args = {"action": "send", "id": "game", "input": "<pgdn>"}
+
+    moving = StuckDetector()
+    for page in range(4):
+        score, _ = moving.evaluate("", [call], {}, registry)
+        assert score < 0.3, f"page {page} read as a loop"
+        moving.mark_success("terminal", args, f"[terminal game | 120 new bytes]\nreference page {page}")
+
+    stalled = StuckDetector()
+    scores = []
+    for _ in range(3):
+        scores.append(stalled.evaluate("", [call], {}, registry)[0])
+        stalled.mark_success("terminal", args, "[terminal game | no new output]\nend of reference")
+    assert scores[0] < 0.3 and scores[-1] >= 0.4  # same screen back each time: that IS a loop
 
 
 # --- browser ----------------------------------------------------------------

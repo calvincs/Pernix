@@ -301,7 +301,14 @@ class _Terminal:
             out.append("".join(row[x].data for x in range(self.cols)).rstrip())
         return out, total
 
-    def wait(self, pattern: re.Pattern | None, timeout: float, cancel_event=None, after_input: bool = False) -> str:
+    def wait(
+        self,
+        pattern: re.Pattern | None,
+        timeout: float,
+        cancel_event=None,
+        after_input: bool = False,
+        need_output: bool = False,
+    ) -> str:
         """Block until the screen settles or `pattern` shows up. Returns a note.
 
         after_input: the caller just typed something. The screen still shows
@@ -324,7 +331,11 @@ class _Terminal:
                     if now >= deadline:
                         return f"pattern not seen after {timeout:g}s"
                 else:
-                    if now - max(self.last_output, start) >= _SETTLE_S:
+                    # A program that has not printed anything yet (ssh still
+                    # connecting, an interpreter still starting) is not
+                    # "settled", it is not there yet.
+                    waiting_for_first = need_output and self.bytes_total == 0 and not self.done
+                    if not waiting_for_first and now - max(self.last_output, start) >= _SETTLE_S:
                         return ""
                     if self.done:
                         return ""
@@ -555,7 +566,9 @@ def _open(command, name, cols, rows, wait_for, wait_s, ctx) -> str:
     with _registry_lock:
         _terminals[term_id] = term
     logger.info("terminal %s opened (session %s, pid %d, cwd %s)", term_id, session_id[:12], proc.pid, cwd)
-    note = term.wait(pattern, wait_s, ctx.get("_cancel_event"))
+    note = term.wait(pattern, wait_s, ctx.get("_cancel_event"), need_output=True)
+    if not note and term.bytes_total == 0 and not term.done:
+        note = f"the program has printed nothing yet after {wait_s:g}s — call action='screen' with wait_for or wait_seconds"
     opened = f"opened in {cwd}; use id='{term_id}' with action send / screen / close"
     others = [t.id + (f' "{t.name}"' if t.name else "") for t in visible_live]
     if others:

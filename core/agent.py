@@ -51,6 +51,15 @@ _FILE_TOOLS = {"file_edit", "file_write", "file_read", "file_append"}
 # bash only counts as a mutation when its output changed, though: see
 # StuckDetector.mark_success.
 _MUTATING_TOOLS = frozenset({"file_write", "file_edit", "multiedit", "repl", "bash"})
+# Tools where the same call is the normal way to make progress, so only the
+# RESULT can say whether anything happened. bash: an identical rerun after an
+# edit. terminal/browser: pressing <pgdn> or <enter> again, clicking Next
+# again — the arguments repeat while the screen moves on. An identical call
+# counts as a change when its result differs from the last time, and as a
+# cycle when it does not (first live terminal run, 2026-11-18: a model paging
+# through a reference pane was told "You are repeating tool calls (terminal)"
+# and abandoned a working session).
+_OUTPUT_COMPARED_TOOLS = frozenset({"bash", "terminal", "browser"})
 
 # Empirically-verified tool-name hallucinations with compatible argument schemas.
 # Rewrite silently (logged) instead of burning a round on the difflib hint path.
@@ -472,7 +481,7 @@ class StuckDetector:
         """
         self.has_unresolved_failure = False
         self.unresolved_failure_rounds = 0
-        if tool_name == "bash" and content is not None:
+        if tool_name in _OUTPUT_COMPARED_TOOLS and content is not None:
             key = _hash_args(args or {})
             digest = hashlib.sha256(content.encode()).hexdigest()[:12]
             if self.bash_outputs.get(key) != digest:
