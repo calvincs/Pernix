@@ -279,6 +279,14 @@ class Settings:
     jobs_max_concurrent: int = 3  # running jobs per session
     jobs_default_timeout_s: int = 7200  # wall-clock cap via coreutils timeout
     jobs_max_timeout_s: int = 21600  # ceiling for caller-supplied caps
+    # --- Interactive terminal (the `terminal` tool) ---
+    # A program on a real pseudo-terminal that stays open between tool calls:
+    # ssh sessions, REPLs, installers, full-screen text UIs. Shares bash's
+    # command policy, environment and rlimit knobs above.
+    terminal_enabled: bool = True
+    terminal_max_per_session: int = 4  # open terminals per session
+    terminal_idle_timeout_s: int = 1800  # closed after this long without a tool call. 0 = never
+    terminal_max_lifetime_s: int = 21600  # hard cap on one terminal's life. 0 = none
     # Max bytes for file_write / file_edit / multiedit per call. 0 = no cap.
     max_file_write_size: int = 100 * 1024 * 1024  # 100 MB
     # Max file size for file_edit's whole-file fuzzy-match path. Above this the
@@ -583,6 +591,10 @@ class Settings:
     browser_enabled: bool = True  # browse_web tool only registered when True
     browser_headless: bool = True  # False = headed mode (for login flows, debugging)
     browser_timeout: int = 30  # Page load timeout in seconds
+    # Interactive pages (the `browser` tool): a page that stays open between
+    # tool calls so the agent can click, type, take screenshots and run script.
+    browser_max_sessions: int = 2  # open pages per session
+    browser_session_idle_s: int = 900  # a page is closed after this long without a tool call
 
     # --- Voice Input (STT) ---
     # How the mic button turns speech into chat input. Each engine has a

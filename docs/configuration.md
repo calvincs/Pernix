@@ -301,6 +301,19 @@ Detached long-compute processes via the `job_start` / `job_status` / `job_tail` 
 
 ---
 
+## Interactive Terminal
+
+The `terminal` tool runs a command on a real pseudo-terminal and keeps it open between tool calls and across turns: ssh sessions, REPLs, installers that ask questions, debuggers, full-screen text UIs. One tool with an `action` argument (`open`, `send`, `screen`, `resize`, `list`, `close`). The screen is kept by a terminal emulator and returned as plain text, with scrollback on request. Input is text with named keys in angle brackets (`ls -la<enter>`, `<ctrl-c>`, `<f6>`, `<wait:0.5>`). Same command policy, environment and rlimits as `bash`. A terminal can be used by the session that opened it, its parent, and its workers. Raw output is logged under `<workspace>/.terminals/<id>/output.log`. Terminals live in server memory: a server restart ends them.
+
+| Setting | Default | Description |
+|---|---|---|
+| `terminal_enabled` | `true` | Register the `terminal` tool at startup. Restart required for a change to take effect. |
+| `terminal_max_per_session` | `4` | Open terminals per session. Further `open` calls are refused until one is closed. |
+| `terminal_idle_timeout_s` | `1800` | A terminal is closed after this long without a tool call (30 min). `0` = never. |
+| `terminal_max_lifetime_s` | `21600` | Hard cap on one terminal's life (6 h). `0` = none. |
+
+---
+
 ## MCP Servers
 
 Connect external tool servers speaking the Model Context Protocol; each
@@ -362,6 +375,10 @@ Settings → Integrations → MCP Servers. Full guide: [mcp.md](mcp.md).
 |---|---|---|
 | `browser_enabled` | `true` | Enable the `browse_web` tool (requires Playwright installed). Independent of `web_search_enabled` — `browse_web` works without a Tavily key. |
 | `browser_headless` | `true` | Run Chromium without a visible window. Set to `false` to debug browser sessions visually (local mode only). |
+| `browser_max_sessions` | `2` | Pages the `browser` tool may keep open per session. |
+| `browser_session_idle_s` | `900` | A `browser` page is closed after this long without a tool call (15 min). |
+
+`browser_enabled` also controls the `browser` tool: a page that stays open between tool calls, for sites that must be operated (click, type, log in) or that draw on a canvas. One tool with an `action` argument (`open`, `goto`, `back`, `snapshot`, `click`, `type`, `select`, `scroll`, `screenshot`, `eval`, `wait`, `list`, `close`). A snapshot is the page text plus a numbered list of clickable and typable elements, with notes about canvases, WebSocket connections, console errors and failed requests. `screenshot` saves a JPEG under `<workspace>/.browser/<id>/` and shows it to the model the way `view_image` does. Requests to private and internal addresses are blocked, as in `browse_web`.
 
 ---
 

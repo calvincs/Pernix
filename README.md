@@ -53,6 +53,7 @@ Read the [change summary](docs/changelog.md#v320--2026-10-04),
 - **Session kernel** — an optional persistent per-session Python REPL (`repl` tool) whose variables survive turns, compaction, and restarts; huge tool results auto-bind as variables instead of flooding context
 - **Spaces** ([guide](docs/guides/spaces.md)) — named, colored groups of long-lived sessions that share directives, memory, workspace, and kernel; Pernix can also *suggest* one for work you keep coming back to (off by default) — a suggestion is a row you accept or decline, nothing is created without your click
 - **Background jobs** — detached long-running compute via `job_start` / `job_status` / `job_tail` / `job_kill`: output captured to a log, completion durable across server restarts, wall-clock caps, whole-group kill
+- **Interactive terminal and browser** — `terminal` holds a program open on a real pseudo-terminal (ssh, REPLs, installers, full-screen text UIs) and returns its screen as text; `browser` holds a web page open to click, type, take screenshots and run script, including pages drawn on a canvas
 - **Vision on demand** — `view_image` lets the agent look at images it has rendered or downloaded (vision models), instead of reasoning blind about its own plots and screenshots
 - **Long-running autonomy** — deterministic gates (shell checks Reflect can't overrule), and persistent goals with budgets and auto-continuations — composing into unattended multi-hour tasks ([docs](docs/internals/autonomy.md))
 

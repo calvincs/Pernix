@@ -177,6 +177,12 @@ def _kill_driver():
 async def _close_browser():
     """Shut down browser + Playwright. Must run on the loop the browser was bound to."""
     global _browser, _playwright, _browser_headless, _browser_loop
+    try:
+        from core.extensions.web.browser_session import forget_all
+
+        forget_all()  # interactive pages die with the browser they live in
+    except Exception:
+        pass
     if _browser is not None:
         try:
             await _browser.close()
@@ -1136,5 +1142,9 @@ def register(reg) -> None:
             safety_level="dangerous",
         )
         logger.info("browse_web tool registered (playwright available)")
+
+        from core.extensions.web.browser_session import register_browser
+
+        register_browser(reg)
     except ImportError:
         logger.info("playwright not installed — browse_web tool not available")

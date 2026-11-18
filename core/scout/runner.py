@@ -290,6 +290,19 @@ _SCOUT_JOBS_RULE = (
 )
 
 
+_SCOUT_INTERACTIVE_RULE = (
+    "- INTERACTIVE PROGRAMS AND PAGES: When the task means holding a conversation "
+    "with a program (an ssh login, a REPL, an installer that asks questions, a "
+    "full-screen text UI or terminal game) approach_guidance MUST name the "
+    "terminal tool: it keeps the program open between calls and returns its "
+    "screen as text. When the task means operating a web page (clicking, typing, "
+    "logging in) or the page draws on a canvas, name the browser tool: it keeps "
+    "the page open, lists what can be clicked, and takes screenshots the agent "
+    "can see. The agent must not build its own daemon, socket or terminal parser, "
+    "and must not reverse-engineer a page's network protocol first."
+)
+
+
 def _scout_system_prompt(max_rounds: int | None = None) -> str:
     """The scout prompt for `max_rounds` (default: the setting) plus
     conditional rules, keeping /no_think last."""
@@ -303,6 +316,8 @@ def _scout_system_prompt(max_rounds: int | None = None) -> str:
         rules.append(_SCOUT_KERNEL_RULE)
     if settings.jobs_enabled:
         rules.append(_SCOUT_JOBS_RULE)
+    if settings.terminal_enabled or settings.browser_enabled:
+        rules.append(_SCOUT_INTERACTIVE_RULE)
     if not rules:
         return base
     block = "\n".join(rules)

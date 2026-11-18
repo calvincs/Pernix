@@ -10,6 +10,12 @@ So the list holds the tools most turns need, and every other tool is reached
 through `lookup` and `use_tool`. Of 523 real turns, 24 needed a tool outside
 this set.
 
+terminal and browser are native for the same reason goal_create is: the
+moment they matter is mid-task, when a program or a page turns out to need a
+conversation. An agent that did not have them in view wrote its own daemon,
+socket and escape-code parser instead (a web terminal game, 2026-11-18), and
+rewrote it four times.
+
 goal_create is native because the moment it matters is mid-turn on a long
 job, when the agent would otherwise have to discover it through lookup: a
 319-video ingest never found it and stopped at every budget cut.
@@ -23,6 +29,7 @@ NATIVE_TOOLS = frozenset(
         "await_workers",
         "bash",
         "browse_web",
+        "browser",
         "call_model",
         "check_workers",
         "deep_recall",
@@ -51,6 +58,7 @@ NATIVE_TOOLS = frozenset(
         "search_web",
         "session_read",
         "spawn_worker",
+        "terminal",
         "use_tool",
         "view_image",
     }

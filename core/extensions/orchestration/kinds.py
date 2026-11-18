@@ -79,7 +79,7 @@ _BUILTIN_KINDS: dict[str, WorkerKind] = {
                 "You are a RESEARCH worker: gather facts, do not modify project "
                 "state. Prefer primary sources; note when sources disagree."
             ),
-            tool_allowlist=_COMMON_TOOLS | {"search_web", "browse_web", "http_get", "repl", "rlm_process"},
+            tool_allowlist=_COMMON_TOOLS | {"search_web", "browse_web", "browser", "http_get", "repl", "rlm_process"},
             verification=(
                 "Every non-obvious claim in the summary names its source (URL or document).\n"
                 "Unanswered sub-questions are listed explicitly, not omitted."
@@ -104,6 +104,7 @@ _BUILTIN_KINDS: dict[str, WorkerKind] = {
                 "job_status",
                 "job_tail",
                 "job_kill",
+                "terminal",
                 "rlm_process",
             },
             verification=(
@@ -141,6 +142,7 @@ _BUILTIN_KINDS: dict[str, WorkerKind] = {
                 "job_status",
                 "job_tail",
                 "job_kill",
+                "terminal",
                 "rlm_process",
             },
             verification=(
@@ -155,7 +157,7 @@ _BUILTIN_KINDS: dict[str, WorkerKind] = {
                 "You are a TRANSFORM worker: produce the output file(s) from the "
                 "input(s). Verify the output exists and parses/loads before done."
             ),
-            tool_allowlist=_COMMON_TOOLS | {"file_edit", "multiedit", "bash", "repl"},
+            tool_allowlist=_COMMON_TOOLS | {"file_edit", "multiedit", "bash", "repl", "terminal"},
             verification=("The summary names each output file and the check proving it parses/loads."),
         ),
     )

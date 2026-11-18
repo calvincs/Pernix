@@ -1757,6 +1757,20 @@ class SessionManager:
                 get_kernel_registry().shutdown_session_detached(session_id, snapshot=False, purge_state=True)
             except Exception as e:
                 logger.warning("Kernel purge scheduling failed for %s: %s", session_id[:12], e)
+            # Live programs and pages the session opened have nobody left to
+            # drive them; without this they run on until their idle timeout.
+            try:
+                from core.tools.builtin.terminal_tool import close_for_session as _close_terminals
+
+                _close_terminals(session_id)
+            except Exception as e:
+                logger.warning("Terminal cleanup failed for %s: %s", session_id[:12], e)
+            try:
+                from core.extensions.web.browser_session import close_for_session as _close_pages
+
+                _close_pages(session_id)
+            except Exception as e:
+                logger.warning("Browser page cleanup failed for %s: %s", session_id[:12], e)
             db.delete_session(session_id)
             logger.info("Deleted session %s", session_id)
 

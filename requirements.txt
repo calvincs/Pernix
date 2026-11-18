@@ -22,7 +22,8 @@ faster-whisper==1.*      # local speech-to-text for voice input (Settings → Vo
                          # pre-fetch when baking images for offline boxes
 
 tiktoken==0.9.*        # accurate token estimation
-playwright==1.58.*     # headless browser for browse_web + eval screenshots
+playwright==1.58.*     # headless browser for browse_web + browser + eval screenshots
+pyte==0.8.*            # terminal emulator behind the `terminal` tool's screen
 trafilatura==2.*       # HTML-to-markdown content extraction for browse_web
 tavily-python==0.5.*   # primary web search (needs API key)
 numpy>=1.26

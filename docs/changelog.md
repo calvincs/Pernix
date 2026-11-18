@@ -8,6 +8,16 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ## Unreleased (next-3.4.3)
 
+- Two new tools for work that needs a conversation. `terminal` runs a
+  program on a real pseudo-terminal and keeps it open between calls: ssh
+  sessions, REPLs, installers that ask questions, full-screen text UIs. It
+  returns the screen as plain text. `browser` keeps a web page open: click,
+  type, log in, take screenshots the model can see, run script. It also
+  works on pages drawn on a canvas, which `browse_web` cannot read. Both
+  take input as text with named keys (`ls -la<enter>`, `<ctrl-c>`), and a
+  parent and its workers can share what either opened. New settings:
+  `terminal_*`, `browser_max_sessions`, `browser_session_idle_s`. New
+  dependency: `pyte`.
 - The sidebar opens with Today open and every other group folded,
   spaces, Pinned and Archived included. A fold you make holds until the page
   reloads. Folds used to be saved forever.
