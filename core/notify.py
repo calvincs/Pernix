@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import urllib.request
 
 from config import settings
 
@@ -157,6 +156,8 @@ class NotificationDispatcher:
                 timeout=settings.notify_webhook_timeout,
             )
             logger.debug("Webhook POST to %s succeeded", url)
+        except WebhookRefused as e:
+            logger.warning("Webhook POST to %s not sent: %s", url, e)
         except Exception as e:
             logger.warning("Webhook POST to %s failed: %s", url, e)
 
@@ -220,13 +221,46 @@ class NotificationDispatcher:
 
     @staticmethod
     def _post(url: str, payload: bytes) -> None:
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=10)
+        """POST payload to url through the egress proxy.
+
+        _validate_url resolved the name to check it; connecting directly
+        would resolve it AGAIN, and a name can answer public to the check and
+        private to the connect. The egress proxy resolves once and connects
+        to the address it vetted. No proxy, no send: a direct fallback would
+        reopen that gap. Redirects are not followed — a webhook has no reason
+        to be bounced elsewhere, and a 3xx counts as a failed delivery.
+        trust_env=False keeps HTTP(S)_PROXY / NO_PROXY from the environment
+        out of the route.
+        """
+        import httpx
+
+        from core.extensions.web import egress_proxy
+
+        try:
+            proxy_url = egress_proxy.ensure_started()
+        except egress_proxy.EgressProxyError as e:
+            raise WebhookRefused(f"{e}; webhooks are not sent without it") from e
+        try:
+            with httpx.Client(proxy=proxy_url, follow_redirects=False, trust_env=False, timeout=10) as client:
+                resp = client.post(url, content=payload, headers={"Content-Type": "application/json"})
+        except httpx.ProxyError as e:
+            # A refused CONNECT (https) comes back as the proxy's status line.
+            if str(e).startswith("403"):
+                raise WebhookRefused(f"blocked by the egress guard: {e}") from e
+            raise
+        if resp.headers.get("x-pernix-egress") == "refused":
+            raise WebhookRefused(f"blocked by the egress guard: {resp.text.strip()[:400]}")
+        if resp.is_redirect:
+            raise WebhookRefused(
+                f"the endpoint answered {resp.status_code} with a redirect to "
+                f"{resp.headers.get('location', '?')!r}; redirects are not followed"
+            )
+        resp.raise_for_status()
+
+
+class WebhookRefused(RuntimeError):
+    """The webhook was deliberately not sent (or not re-sent): no proxy, a
+    refused destination, or a redirect."""
 
 
 _dispatcher: NotificationDispatcher | None = None
