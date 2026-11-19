@@ -74,6 +74,10 @@ WRAPPER_FLAGS_WITH_VALUE = {
     "sudo": {"-u", "-g", "-U", "-p", "-C", "-r", "-t"},
     "doas": {"-u", "-C"},
     "time": {"-f", "-o"},
+    "exec": {"-a"},
+    "env": {"-u", "-C"},
+    "xargs": {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"},
+    "timeout": {"-k", "-s"},
 }
 
 # Shells whose `-c SCRIPT` payload we recurse into for inspection.
@@ -144,101 +148,136 @@ REDIRECT_DENYLIST = [
 ]
 
 
-def _extract_command_words(command: str, _depth: int = 0) -> list[str]:
-    """Extract command words from a shell command using shlex tokenization.
+# Words that open or close a compound command. The word after an opener is a
+# command (`if reboot`, `do umount x`, `! reboot`); a closer ends one.
+_SHELL_RESERVED = frozenset(
+    {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}", "fi", "done", "esac", "coproc"}
+)
 
-    - Splits on pipe/chain operators and returns the first real command word
-      of each segment.
-    - Peels off prefix wrappers (env, nice, nohup, time, xargs, ...) so the
-      actual target command is still inspected (e.g. `env sudo rm` → sudo, rm).
-    - Recurses into `sh -c SCRIPT` / `bash -c SCRIPT` payloads so commands
-      hidden inside a shell wrapper are still detected.
-    - Falls back to whitespace splitting if shlex can't parse.
+# Constructs whose remaining words are data (loop items, case subject), not a
+# command. Substitutions inside them are still collected by the splitter.
+_SHELL_NO_COMMAND = frozenset({"for", "select", "case"})
+
+# How deep `sh -c`, `eval` and `$(...)` nesting is followed. Past this every
+# word of the remaining text is reported, so going deeper cannot hide one.
+_MAX_SCAN_DEPTH = 8
+
+_QUOTE_CHARS_RE = re.compile(r"['\"\\]")
+
+
+def _is_assignment(token: str) -> bool:
+    """`NAME=value` in command position is an environment assignment."""
+    if "=" not in token or token.startswith(("-", "/")):
+        return False
+    lhs = token.split("=", 1)[0]
+    return bool(lhs) and (lhs[0].isalpha() or lhs[0] == "_") and all(c.isalnum() or c == "_" for c in lhs)
+
+
+def _skip_flags(tokens: list[str], i: int, base: str) -> int:
+    """Index of the first token after `base`'s own flags (and their values)."""
+    flags_with_value = WRAPPER_FLAGS_WITH_VALUE.get(base, set())
+    while i < len(tokens) and tokens[i].startswith("-") and tokens[i] != "-":
+        flag = tokens[i]
+        i += 1
+        if "=" not in flag and flag in flags_with_value and i < len(tokens):
+            i += 1
+    return i
+
+
+def _scan_simple_command(tokens: list[str], depth: int, words: list[str], cmds: list[list[str]]) -> bool:
+    """Find the command word of one simple command (already split and unquoted).
+
+    Peels assignments, redirections, reserved words and wrappers that run their
+    argument (env, nice, sudo, command, builtin, exec, xargs, timeout, ...).
+    `eval ARGS` and `sh -c SCRIPT` are scanned as scripts of their own.
+    Appends wrapper and command words to `words` and the token list starting
+    at the real command to `cmds`. Returns False if a nested script could not
+    be parsed.
     """
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        segments = re.split(r"\s*(?:\|\||&&|;|\|)\s*", command)
-        return [s.strip().split()[0].lower() for s in segments if s.strip()]
-
-    commands: list[str] = []
+    tokens = _strip_redirections(tokens)
     i = 0
-    expect_command = True
-    # Guard against deeply nested shell -c to avoid pathological recursion.
-    max_depth = 3
-
     while i < len(tokens):
-        token = tokens[i]
-        if token in ("|", "||", "&&", ";"):
-            expect_command = True
+        tok = tokens[i]
+        if _is_assignment(tok) or tok in _SHELL_RESERVED:
             i += 1
             continue
+        if tok in _SHELL_NO_COMMAND:
+            return True
+        if tok == "function":
+            i += 2  # the function name; `()` and the body are separate segments
+            continue
+        base = os.path.basename(tok).lower()
+        if base in PREFIX_WRAPPERS or base in ("command", "builtin", "xargs", "timeout"):
+            words.append(base)
+            start = i + 1
+            i = _skip_flags(tokens, start, base)
+            if base == "command" and any(f.startswith("-") and ("v" in f or "V" in f) for f in tokens[start:i]):
+                return True  # `command -v x` looks x up; it does not run it
+            if base == "timeout":
+                i += 1  # the duration
+            continue
+        if base == "eval":
+            words.append(base)
+            return _scan_commands(" ".join(tokens[i + 1 :]), depth + 1, words, cmds)
+        words.append(base)
+        cmds.append(tokens[i:])
+        if base in SHELL_WRAPPERS:
+            # `sh -c SCRIPT`, also with the flag combined (`bash -lc SCRIPT`).
+            j = i + 1
+            while j < len(tokens) and tokens[j].startswith("-"):
+                if not tokens[j].startswith("--") and "c" in tokens[j] and j + 1 < len(tokens):
+                    return _scan_commands(tokens[j + 1], depth + 1, words, cmds)
+                j += 1
+        return True
+    return True
 
-        if expect_command:
-            # Strip leading env-var assignments like VAR=val.
-            if "=" in token and not token.startswith("-") and not token.startswith("/"):
-                # Only treat as env assignment if LHS looks like a var name.
-                lhs = token.split("=", 1)[0]
-                if lhs and (lhs[0].isalpha() or lhs[0] == "_") and all(c.isalnum() or c == "_" for c in lhs):
-                    i += 1
-                    continue
 
-            base = os.path.basename(token).lower()
+def _scan_commands(command: str, depth: int, words: list[str], cmds: list[list[str]]) -> bool:
+    """Scan a shell script for every simple command it would run.
 
-            # Peel prefix wrappers: keep scanning to find the actual command.
-            if base in PREFIX_WRAPPERS:
-                commands.append(base)
-                i += 1
-                flags_with_value = WRAPPER_FLAGS_WITH_VALUE.get(base, set())
-                # Skip the wrapper's own flags (and their value tokens).
-                while i < len(tokens) and tokens[i].startswith("-") and tokens[i] != "-":
-                    flag = tokens[i]
-                    i += 1
-                    # If the flag has an explicit "=value", value is attached.
-                    # Otherwise, if flag is known to take a value, eat the next token.
-                    if "=" not in flag and flag in flags_with_value and i < len(tokens):
-                        i += 1
-                # For env: skip VAR=val assignments until we see the real command.
-                if base == "env":
-                    while i < len(tokens):
-                        t = tokens[i]
-                        if "=" in t and not t.startswith("-") and not t.startswith("/"):
-                            lhs = t.split("=", 1)[0]
-                            if (
-                                lhs
-                                and (lhs[0].isalpha() or lhs[0] == "_")
-                                and all(c.isalnum() or c == "_" for c in lhs)
-                            ):
-                                i += 1
-                                continue
-                        break
-                # expect_command stays True so the wrapped command is inspected.
-                continue
+    Covers separators with or without spaces, subshells and groups, command
+    and process substitution (also inside double quotes), reserved words,
+    wrappers, `eval` and `sh -c`. Returns False when some part could not be
+    tokenized (an unbalanced quote); the words found are still reported, the
+    unparsed part with its quote characters dropped.
+    """
+    if depth > _MAX_SCAN_DEPTH:
+        rest = re.split(r"[\s;&|()`$<>{}]+", _QUOTE_CHARS_RE.sub("", command))
+        words.extend(b for b in (os.path.basename(t).lower() for t in rest) if b)
+        return False
+    ok = True
+    nested: list[str] = []
+    for segment in _split_shell_operators(command, nested):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            ok = False
+            tokens = _QUOTE_CHARS_RE.sub("", segment).split()
+        ok = _scan_simple_command(tokens, depth, words, cmds) and ok
+    for body in nested:
+        ok = _scan_commands(body, depth + 1, words, cmds) and ok
+    return ok
 
-            # xargs: next non-flag token is the wrapped command.
-            if base == "xargs":
-                commands.append(base)
-                i += 1
-                while i < len(tokens) and tokens[i].startswith("-") and tokens[i] != "-":
-                    i += 1
-                continue
 
-            commands.append(base)
+def _extract_command_words(command: str, _depth: int = 0) -> list[str]:
+    """The command word of every simple command in a shell string.
 
-            # Recurse into shell -c SCRIPT payloads.
-            if base in SHELL_WRAPPERS and _depth < max_depth:
-                # Look ahead for -c followed by a script string.
-                j = i + 1
-                while j < len(tokens) and tokens[j].startswith("-"):
-                    if tokens[j] == "-c" and j + 1 < len(tokens):
-                        commands.extend(_extract_command_words(tokens[j + 1], _depth + 1))
-                        break
-                    j += 1
+    Arguments and quoted text are not command words: `echo reboot` and
+    `git commit -m "a; reboot"` yield only `echo` and `git`. Wrapper names
+    (env, sudo, xargs, eval, ...) are reported along with what they run.
 
-            expect_command = False
-        i += 1
-
-    return commands
+    Fail safe: when some part cannot be parsed (an unbalanced quote), the
+    string is scanned a second time with its quote characters removed, so a
+    command an open quote would have hidden is still reported.
+    """
+    words: list[str] = []
+    try:
+        if not _scan_commands(command, _depth, words, []):
+            _scan_commands(command.replace("'", "").replace('"', ""), _depth, words, [])
+    except RecursionError:
+        # Pathological nesting: report every word rather than none.
+        _scan_commands(command, _MAX_SCAN_DEPTH + 1, words, [])
+    return words
 
 
 # Cache-only directory names whose `rm -rf` is treated as safe even though the
@@ -261,28 +300,178 @@ _SAFE_CACHE_DIRS: frozenset[str] = frozenset(
 )
 
 
-def _split_shell_operators(command: str) -> list[str]:
-    """Split a command string on shell operators, respecting quotes.
+# What a command or process substitution leaves in its segment. Keeping the
+# `$` matters: the rm exemptions refuse any target that interpolates.
+_SUBST_PLACEHOLDER = "$_"
+
+
+def _close_backtick(s: str, i: int) -> int:
+    """Index of the backtick closing one opened just before `i` (or len(s))."""
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+            continue
+        if s[i] == "`":
+            return i
+        i += 1
+    return len(s)
+
+
+def _unescape_backtick(body: str) -> str:
+    """The script inside a backtick substitution: `\\`` and `\\\\` lose their backslash."""
+    return re.sub(r"\\([`\\$])", r"\1", body)
+
+
+def _close_paren(s: str, i: int) -> int:
+    """Index of the `)` closing a `(` opened just before `i` (or len(s))."""
+    depth = 1
+    quote: str | None = None
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == "`":
+            i = _close_backtick(s, i + 1) + 1
+            continue
+        elif quote == '"':
+            if ch == '"':
+                quote = None
+            elif s.startswith("$(", i):
+                i = _close_paren(s, i + 2) + 1
+                continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n
+
+
+def _heredoc_delimiter(s: str, i: int) -> tuple[str, bool, bool, int]:
+    """Read the delimiter word after `<<` at `i`.
+
+    Returns (delimiter, strip_tabs, body_expands, index after the word). A
+    quoted delimiter (`<<'EOF'`) means the body is plain data.
+    """
+    strip = i < len(s) and s[i] == "-"
+    if strip:
+        i += 1
+    while i < len(s) and s[i] in " \t":
+        i += 1
+    word: list[str] = []
+    quoted = False
+    quote: str | None = None
+    while i < len(s):
+        ch = s[i]
+        if quote:
+            if ch == quote:
+                quote = None
+            else:
+                word.append(ch)
+        elif ch in "'\"":
+            quote = ch
+            quoted = True
+        elif ch == "\\" and i + 1 < len(s):
+            quoted = True
+            word.append(s[i + 1])
+            i += 1
+        elif ch in " \t\n;&|<>()":
+            break
+        else:
+            word.append(ch)
+        i += 1
+    return "".join(word), strip, not quoted, i
+
+
+def _text_substitutions(text: str, nested: list[str]) -> None:
+    """Collect `$(...)` and backtick bodies from text that expands but is not
+    split into commands (an unquoted heredoc body)."""
+    i = 0
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+        elif text.startswith("$(", i):
+            j = _close_paren(text, i + 2)
+            nested.append(text[i + 2 : j])
+            i = j + 1
+        elif text[i] == "`":
+            j = _close_backtick(text, i + 1)
+            nested.append(_unescape_backtick(text[i + 1 : j]))
+            i = j + 1
+        else:
+            i += 1
+
+
+def _split_shell_operators(command: str, nested: list[str] | None = None) -> list[str]:
+    """Split a command string into simple-command segments, respecting quotes.
 
     shlex alone is not enough: it keeps `x;` as one token, so a `;` written
     without a leading space hides the next command word. This scans the raw
     string instead, tracking quote state and backslash escapes, and cuts at
-    `;` `&&` `||` `|` `&` and newlines that are not inside quotes.
+    `;` `&&` `||` `|` `|&` `&` newlines and subshell parentheses that are not
+    inside quotes. Redirections (`2>&1`, `&>f`, `>|f`) are not cuts.
+
+    Command and process substitutions (`$(...)`, backticks, `<(...)`,
+    `>(...)`, also inside double quotes but not single quotes) become `$_` in
+    their segment and their bodies are appended to `nested` for the caller to
+    scan as scripts. Comments are dropped, and heredoc bodies are data: only
+    the substitutions of an unquoted heredoc are collected. A `)` with no open
+    `(` ends a `case` pattern, which is dropped.
     """
+    if nested is None:
+        nested = []
     parts: list[str] = []
     buf: list[str] = []
     quote: str | None = None
+    paren = 0
+    heredocs: list[tuple[str, bool, bool]] = []
     i = 0
     n = len(command)
+
+    def cut(keep: bool = True) -> None:
+        if keep:
+            parts.append("".join(buf))
+        buf.clear()
+
+    def substitution(start: int, end: int, backtick: bool = False) -> int:
+        body = command[start:end]
+        # Inside backticks `\`` is a nested backtick and `\\` a backslash.
+        nested.append(_unescape_backtick(body) if backtick else body)
+        buf.append(_SUBST_PLACEHOLDER)
+        return end + 1
+
     while i < n:
         ch = command[i]
-        if quote:
+        if quote == "'":
             buf.append(ch)
-            if ch == "\\" and quote == '"' and i + 1 < n:
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            if command[i + 1] != "\n":  # a line continuation vanishes
+                buf.append(ch)
                 buf.append(command[i + 1])
-                i += 2
-                continue
-            if ch == quote:
+            i += 2
+            continue
+        if command.startswith("$(", i):
+            i = substitution(i + 2, _close_paren(command, i + 2))
+            continue
+        if ch == "`":
+            i = substitution(i + 1, _close_backtick(command, i + 1), backtick=True)
+            continue
+        if quote == '"':
+            buf.append(ch)
+            if ch == '"':
                 quote = None
             i += 1
             continue
@@ -291,24 +480,71 @@ def _split_shell_operators(command: str) -> list[str]:
             buf.append(ch)
             i += 1
             continue
-        if ch == "\\" and i + 1 < n:
-            buf.append(ch)
-            buf.append(command[i + 1])
+        if ch in "<>" and command.startswith("(", i + 1):
+            i = substitution(i + 2, _close_paren(command, i + 2))
+            continue
+        if ch == "(" and buf and buf[-1].endswith("="):
+            # `a=(x y)` is an array of words, not a subshell.
+            j = _close_paren(command, i + 1)
+            _split_shell_operators(command[i + 1 : j], nested)
+            buf.append(_SUBST_PLACEHOLDER)
+            i = j + 1
+            continue
+        if ch == "#" and (not buf or buf[-1] in " \t"):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        if command.startswith("<<", i):
+            if command.startswith("<<<", i):
+                buf.append("<<<")
+                i += 3
+                continue
+            delim, strip, expands, _ = _heredoc_delimiter(command, i + 2)
+            if delim:
+                heredocs.append((delim, strip, expands))
+            buf.append("<<")
             i += 2
             continue
-        if ch in ";\n":
-            parts.append("".join(buf))
-            buf = []
+        if ch == "\n":
+            cut()
+            i += 1
+            for delim, strip, expands in heredocs:
+                while i < n:
+                    end = command.find("\n", i)
+                    end = n if end < 0 else end
+                    line = command[i:end]
+                    i = end + 1
+                    if (line.lstrip("\t") if strip else line) == delim:
+                        break
+                    if expands:
+                        _text_substitutions(line, nested)
+            heredocs = []
+            continue
+        if ch == "&" and ((buf and buf[-1] in "<>") or command.startswith(">", i + 1)):
+            buf.append(ch)  # `2>&1`, `<&3`, `&>file`
             i += 1
             continue
-        if ch in "&|":
-            parts.append("".join(buf))
-            buf = []
-            i += 2 if i + 1 < n and command[i + 1] == ch else 1
+        if ch == "|" and buf and buf[-1] == ">":
+            buf.append(ch)  # `>|file`
+            i += 1
+            continue
+        if ch in ";&|":
+            cut()
+            i += 1
+            continue
+        if ch == "(":
+            paren += 1
+            cut()
+            i += 1
+            continue
+        if ch == ")":
+            cut(keep=paren > 0)
+            paren = max(paren - 1, 0)
+            i += 1
             continue
         buf.append(ch)
         i += 1
-    parts.append("".join(buf))
+    cut()
     return [p for p in (p.strip() for p in parts) if p]
 
 
@@ -349,38 +585,39 @@ def _rm_segments(command: str) -> list[list[str]] | None:
     that told it the very target it had just used was allowed (Agent Mesh
     build, 2026-09-08).
 
+    Uses the same scan as the denylist, so an rm inside a subshell, group,
+    substitution, `eval` or `sh -c` is checked too, not only the visible ones.
+
     Returns None when a segment cannot be tokenized — the caller keeps the
     block, because an unparseable command is not one we can clear.
     """
-    out: list[list[str]] = []
-    for segment in _split_shell_operators(command):
-        try:
-            tokens = shlex.split(segment)
-        except ValueError:
+    cmds: list[list[str]] = []
+    try:
+        if not _scan_commands(command, 0, [], cmds):
             return None
-        i = 0
-        # Peel env assignments and prefix wrappers (env/nice/sudo/...) so
-        # `env FOO=1 rm -rf x` is still seen as an rm.
-        while i < len(tokens):
-            tok = tokens[i]
-            if "=" in tok and not tok.startswith(("-", "/")):
-                lhs = tok.split("=", 1)[0]
-                if lhs and (lhs[0].isalpha() or lhs[0] == "_") and all(c.isalnum() or c == "_" for c in lhs):
-                    i += 1
-                    continue
-            base = os.path.basename(tok).lower()
-            if base in PREFIX_WRAPPERS:
-                i += 1
-                while i < len(tokens) and tokens[i].startswith("-"):
-                    takes_value = tokens[i] in WRAPPER_FLAGS_WITH_VALUE.get(base, set())
-                    i += 1
-                    if takes_value and i < len(tokens):
-                        i += 1
-                continue
+    except RecursionError:
+        return None
+    return [["rm"] + tokens[1:] for tokens in cmds if os.path.basename(tokens[0]).lower() == "rm"]
+
+
+def _rm_is_recursive_force(tokens: list[str]) -> bool:
+    """True when ONE rm invocation carries both a recursive and a force flag.
+
+    Judged per invocation. Pooling the flags of the whole command made
+    `rm -f a.tmp` look like `rm -rf` whenever any other word in the same
+    script had an `r` in a flag (`grep -r`, `sort -rn`).
+    """
+    recursive = force = False
+    for tok in tokens[1:]:
+        if tok == "--":
             break
-        if i < len(tokens) and os.path.basename(tokens[i]).lower() == "rm":
-            out.append(["rm"] + _strip_redirections(tokens[i + 1 :]))
-    return out
+        if tok.startswith("--"):
+            recursive = recursive or tok == "--recursive"
+            force = force or tok == "--force"
+        elif tok.startswith("-") and tok != "-":
+            recursive = recursive or "r" in tok or "R" in tok
+            force = force or "f" in tok
+    return recursive and force
 
 
 def _rm_targets_are_safe_caches(command: str) -> bool:
@@ -394,9 +631,9 @@ def _rm_targets_are_safe_caches(command: str) -> bool:
     EVERY rm in the command must qualify — a compound command that cleans a
     cache and also deletes something else stays blocked.
     """
-    segments = _rm_segments(command)
+    segments = [seg for seg in (_rm_segments(command) or []) if _rm_is_recursive_force(seg)]
     if not segments:
-        return False  # parse failure or no rm at all → don't take the safe path
+        return False  # parse failure or no rm -rf at all → don't take the safe path
     for tokens in segments:
         targets = [tok for tok in tokens[1:] if not tok.startswith("-")]
         if not targets:
@@ -404,6 +641,8 @@ def _rm_targets_are_safe_caches(command: str) -> bool:
         for t in targets:
             # Reject absolute paths, parent traversal, env interpolation, globs.
             if t.startswith("/") or ".." in t.split("/") or "$" in t or "*" in t or "?" in t:
+                return False
+            if t.startswith("~") or "{" in t:  # expanded by the shell before rm runs
                 return False
             # The final path segment must match a known cache directory name.
             last = t.rstrip("/").rsplit("/", 1)[-1]
@@ -457,7 +696,7 @@ def _rm_targets_are_in_workspace(command: str) -> bool:
     blocked on the second segment."""
     from core.tools.paths import workspace
 
-    segments = _rm_segments(command)
+    segments = [seg for seg in (_rm_segments(command) or []) if _rm_is_recursive_force(seg)]
     if not segments:
         return False
     ws = workspace()
@@ -467,6 +706,10 @@ def _rm_targets_are_in_workspace(command: str) -> bool:
             return False
         for t in targets:
             if "$" in t or ".." in t.split("/"):
+                return False
+            # The shell expands `~` (home) and `{a,b}` (brace lists) before rm
+            # runs, so the literal text says nothing about the real target.
+            if t.startswith("~") or "{" in t:
                 return False
             first_seg = t.lstrip("/").split("/", 1)[0]
             if any(ch in first_seg for ch in "*?["):
@@ -509,28 +752,28 @@ def _check_command_security(command: str) -> str | None:
                 "not escalate privileges."
             )
         if word == "rm":
-            # Flag extraction over the entire command string so it catches
-            # `rm -rf` hidden inside `sh -c "..."` or similar wrappers.
-            has_rf = bool(re.search(r"\brm\s+(?:\S+\s+)*-[^\s]*r[^\s]*f", command)) or bool(
-                re.search(r"\brm\s+(?:\S+\s+)*-[^\s]*f[^\s]*r", command)
-            )
-            if not has_rf:
-                try:
-                    tokens = shlex.split(command)
-                except ValueError:
-                    tokens = command.split()
-                flags = [t for t in tokens if t.startswith("-") and t != "-"]
-                all_flags = "".join(f.lstrip("-") for f in flags)
-                has_rf = "r" in all_flags and "f" in all_flags
+            # Judge each rm on its own flags. Only when the command cannot
+            # be parsed does the whole string get pattern-matched instead.
+            rm_segments = _rm_segments(command)
+            if rm_segments is not None:
+                has_rf = any(_rm_is_recursive_force(seg) for seg in rm_segments)
+            else:
+                has_rf = bool(re.search(r"\brm\s+(?:\S+\s+)*-[^\s]*[rR][^\s]*f", command)) or bool(
+                    re.search(r"\brm\s+(?:\S+\s+)*-[^\s]*f[^\s]*[rR]", command)
+                )
+                if not has_rf:
+                    flags = [t for t in command.split() if t.startswith("-") and t != "-"]
+                    all_flags = "".join(f.lstrip("-") for f in flags)
+                    has_rf = ("r" in all_flags or "R" in all_flags) and "f" in all_flags
             if has_rf:
                 # Allow `rm -rf` for a curated set of safe cache directories
                 # (Python __pycache__, pytest/mypy/ruff caches, node_modules).
                 # These are deleted routinely during normal development and
                 # have no system-level consequence.
-                if _rm_targets_are_safe_caches(command):
-                    return None
-                if _rm_targets_are_in_workspace(command):
-                    return None
+                # An exempt rm clears only the rm rule: the words after it
+                # in the same command are still checked.
+                if _rm_targets_are_safe_caches(command) or _rm_targets_are_in_workspace(command):
+                    continue
                 return (
                     "Error: Command blocked by security policy: 'rm -rf' is "
                     "denylisted because it can recursively destroy files. "
