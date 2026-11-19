@@ -528,6 +528,17 @@ def http_get(url: str, _context: dict | None = None):
         return _fetch_outcome(f"Error: {e}", "refused", url, source_complete=False)
     import httpx
 
+    from core.extensions.web import egress_proxy
+
+    # Every hop but the own /workspace/ one goes through the egress proxy,
+    # which resolves the name once and connects to the address it checked.
+    # No proxy, no fetch: falling back to a direct connection would bring
+    # back the check-then-connect gap the proxy exists to close.
+    try:
+        proxy_url = egress_proxy.ensure_started()
+    except egress_proxy.EgressProxyError as e:
+        return _fetch_outcome(f"Error: {e}; http_get is unavailable until it runs", "error", url, source_complete=False)
+
     try:
         # Follow redirects manually so every hop goes through _validate_url —
         # httpx's automatic following would happily land on a private/metadata
@@ -560,10 +571,22 @@ def http_get(url: str, _context: dict | None = None):
             # One client per hop: TLS verification is chosen for the URL this
             # hop actually fetches (_own_tls_verify), so a redirect can never
             # carry the own-certificate trust over to another host.
+            # An explicit proxy= replaces any HTTP(S)_PROXY / NO_PROXY from
+            # the environment (httpx mounts it for all://), so nothing in the
+            # environment can route a hop around the proxy. TLS still runs
+            # end to end through the CONNECT tunnel: `verify` is unchanged.
+            direct = _own_server_target(url) == "workspace"
             with (
-                httpx.Client(follow_redirects=False, verify=_own_tls_verify(url)) as client,
+                httpx.Client(
+                    follow_redirects=False,
+                    verify=_own_tls_verify(url),
+                    proxy=None if direct else proxy_url,
+                ) as client,
                 client.stream("GET", url, timeout=op) as resp,
             ):
+                if resp.headers.get("x-pernix-egress") == "refused":
+                    reason = resp.read().decode("utf-8", "replace").strip()[:400]
+                    return _fetch_outcome(f"Error: {reason}", "refused", url, source_complete=False)
                 if resp.is_redirect:
                     location = resp.headers.get("location")
                     if not location:
@@ -626,6 +649,15 @@ def http_get(url: str, _context: dict | None = None):
         return _fetch_outcome(f"Error fetching {url}: too many redirects", "error", url, source_complete=False)
     except ValueError as e:
         return _fetch_outcome(f"Error: redirect blocked: {e}", "refused", url, source_complete=False)
+    except httpx.ProxyError as e:
+        # A refused CONNECT (https) comes back as the proxy's status line.
+        refused = str(e).startswith("403")
+        return _fetch_outcome(
+            f"Error fetching {url}: blocked by the egress guard: {e}" if refused else f"Error fetching {url}: {e}",
+            "refused" if refused else "error",
+            url,
+            source_complete=False,
+        )
     except Exception as e:
         if _fetch_cancelled(_context):
             # A socket torn down by our own unwind is a cancellation, not a
@@ -659,41 +691,70 @@ def _emit_browse_event(ctx: dict | None, event: dict) -> None:
         pass  # non-critical — don't break browsing if event emission fails
 
 
+_LOOPBACK_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+# The DNS64/NAT64 well-known prefix: an address here is an IPv4 address the
+# network translates, so 64:ff9b::a00:1 IS 10.0.0.1 on a NAT64 network.
+_NAT64 = None
+
+
+def _ip_blocked(ip, allow_loopback: bool = False) -> bool:
+    """True when an agent's request must not reach this address.
+
+    Anything not globally routable is refused: private ranges, link-local
+    (cloud metadata lives there), the shared address space 100.64.0.0/10 that
+    carrier NAT and overlay VPNs hand out, documentation and benchmark ranges,
+    multicast, the unspecified address (0.0.0.0 connects to this machine on
+    Linux) and the NAT64 prefix. An IPv4 address wrapped in IPv6
+    (::ffff:10.0.0.1) is judged as the IPv4 address it is. Loopback alone is
+    the caller's choice, through allow_loopback.
+    """
+    import ipaddress
+
+    global _NAT64
+    if isinstance(ip, str):
+        ip = ipaddress.ip_address(ip.split("%", 1)[0])
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            return _ip_blocked(ip.ipv4_mapped, allow_loopback)
+        if _NAT64 is None:
+            _NAT64 = ipaddress.ip_network("64:ff9b::/96")
+        if ip in _NAT64:
+            return True
+    if ip.is_loopback:
+        return not allow_loopback
+    if ip.is_multicast or ip.is_unspecified or ip.is_reserved or ip.is_link_local or ip.is_private:
+        return True
+    return not ip.is_global
+
+
 def _is_blocked_host(hostname: str, allow_loopback: bool = False) -> bool:
     """Check if a hostname resolves to a private/internal IP (SSRF protection).
 
     When allow_loopback=True, loopback addresses (127.0.0.0/8, ::1, "localhost")
     are permitted — appropriate for localhost-mode where the agent needs to
-    browse its own workspace server. RFC1918 private ranges, link-local,
-    reserved blocks, and cloud-metadata IPs stay blocked regardless.
+    browse its own workspace server. Every other non-public address stays
+    blocked regardless (see _ip_blocked).
+
+    This is the early check that gives the agent a readable refusal. It is
+    not the enforcement: the name is resolved again when the connection is
+    made, so the egress proxy re-checks the address it actually connects to.
     """
-    import ipaddress
     import socket
 
     blocked_hosts = {"metadata.google.internal", "metadata.goog"}
-    loopback_hosts = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
 
-    low = hostname.lower()
+    low = hostname.lower().rstrip(".")
     if low in blocked_hosts:
         return True
-    if low in loopback_hosts:
+    if low in _LOOPBACK_NAMES:
         return not allow_loopback
 
     try:
-        # Resolve DNS to check actual IP
+        # Resolve DNS to check actual IP. Any blocked answer blocks the name.
         for info in socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM):
-            addr = info[4][0]
-            ip = ipaddress.ip_address(addr)
-            if ip.is_loopback:
-                if allow_loopback:
-                    continue
+            if _ip_blocked(info[4][0], allow_loopback=allow_loopback):
                 return True
-            if ip.is_private or ip.is_link_local or ip.is_reserved:
-                return True
-            # AWS/cloud metadata endpoint (link-local but belt-and-braces)
-            if str(ip) == "169.254.169.254":
-                return True
-    except (socket.gaierror, ValueError):
+    except (OSError, UnicodeError, ValueError):
         # Fail-secure: block on DNS failure. Playwright resolves DNS independently
         # and may succeed where Python's resolver fails (split-horizon, transient).
         logger.warning("SSRF check: DNS resolution failed for %s — blocking", hostname)
@@ -708,24 +769,24 @@ def _loopback_allowed() -> bool:
     In network mode the server binds 0.0.0.0 with shared auth, so loopback
     could reach co-tenant services — keep the block on. In localhost mode the
     agent is already OS-sandboxed and needs to browse its own /workspace/ view.
+    The harness's own API stays out of reach in both modes (_own_server_target).
     """
     return not getattr(settings, "network_enabled", False)
 
 
 def _is_self_loopback(hostname: str, port: int | None) -> bool:
-    """True iff URL points at the harness's own listen address.
+    """True iff the host:port names the harness's own listen address by a
+    loopback name (localhost, 127.x, ::1) and its own port.
 
-    Carve-out for SSRF in network mode: the agent owns this server, so
-    reaching its own port over loopback is not privilege escalation. Other
-    loopback ports may be co-tenant services and stay blocked. Without this,
-    the agent has no way to test workspace files it just wrote (e.g. open
-    https://localhost:<port>/workspace/index.html in browse_web).
+    This alone grants nothing any more: _own_server_target also requires the
+    path to be under /workspace/. Other loopback ports may be co-tenant
+    services and stay blocked in network mode.
     """
     own_port = getattr(settings, "port", None)
     if own_port is None or port != own_port:
         return False
     low = hostname.lower()
-    if low in {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}:
+    if low in _LOOPBACK_NAMES:
         return True
     try:
         import ipaddress
@@ -733,6 +794,146 @@ def _is_self_loopback(hostname: str, port: int | None) -> bool:
         return ipaddress.ip_address(hostname).is_loopback
     except ValueError:
         return False
+
+
+_DEFAULT_PORTS = {"http": 80, "ws": 80, "https": 443, "wss": 443}
+
+
+def _is_workspace_path(raw_path: str) -> bool:
+    """True only for a path the server will route to /workspace/<file>.
+
+    Judged on what the server would actually see, and refusing when in doubt:
+    the path is percent-decoded until it stops changing (a server decodes
+    once, a client may decode %2e%2e into a dot segment first), and any dot
+    segment, doubled slash, backslash or control character refuses it, since
+    those are exactly the shapes that make a client and a server disagree
+    about where /workspace/../api/... ends up.
+    """
+    from urllib.parse import unquote
+
+    if not raw_path.startswith("/workspace/"):
+        return False
+    path = raw_path
+    for _ in range(4):
+        decoded = unquote(path)
+        if decoded == path:
+            break
+        path = decoded
+    else:
+        return False  # still decoding after four rounds: not a real file path
+    if "\\" in path or "//" in path or any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
+        return False
+    if not path.startswith("/workspace/"):
+        return False
+    return not any(seg in (".", "..") for seg in path.split("/"))
+
+
+def _resolves_to_this_machine(hostname: str) -> bool:
+    """True when the name answers with a loopback or unspecified address."""
+    import ipaddress
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except (OSError, UnicodeError, ValueError):
+        return False  # unresolvable: the private-address check refuses it anyway
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%", 1)[0])
+        except ValueError:
+            continue
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        if ip.is_loopback or ip.is_unspecified:
+            return True
+    return False
+
+
+def _own_server_target(url: str) -> str:
+    """Whether a URL is aimed at the harness's own server, and if so whether
+    it may go there.
+
+    Returns "" (not the own server), "workspace" (the own server, at a
+    /workspace/ path, by a loopback name — the one thing the agent may reach
+    there), or "refused" (the own server at any other path, or by any other
+    name for this machine). The server trusts loopback clients without a
+    token, and its API can read the access token and do everything else the
+    UI can, so without the path rule one http_get could take the token and a
+    second could send it anywhere. The carve-out exists only so the agent can
+    look at workspace files it wrote. Raises ValueError for a bad port.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    own = getattr(settings, "port", None)
+    port = parts.port or _DEFAULT_PORTS.get((parts.scheme or "").lower())
+    if own is None or port != own:
+        return ""
+    host = (parts.hostname or "").rstrip(".")
+    if not host:
+        return ""
+    if _is_self_loopback(host, port):
+        return "workspace" if _is_workspace_path(parts.path) else "refused"
+    # 127.1, 0.0.0.0, a DNS name that answers 127.0.0.1: the same server by
+    # another name. None of those get the direct route, so refuse them all.
+    return "refused" if _resolves_to_this_machine(host) else ""
+
+
+def _own_server_refusal(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    port = getattr(settings, "port", None)
+    return (
+        f"Blocked: {parts.hostname}:{port}{parts.path or '/'} is the harness's own server. "
+        f"Only /workspace/ paths on its own address are reachable "
+        f"(for example localhost:{port}/workspace/<file>); its API and other pages are not."
+    )
+
+
+def _request_refused(url: str, allow_loopback: bool, cache: dict | None = None) -> bool:
+    """The browser's per-request check (navigations, subresources, WebSockets).
+
+    The early, well-worded check: the egress proxy is what actually enforces
+    both rules. It alone resolves the name it connects to, and it alone sees
+    every redirect hop, which this route is never shown.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if (parts.scheme or "").lower() in ("data", "blob", "about"):
+        return False
+    host = parts.hostname or ""
+    if not host:
+        return False
+    try:
+        target = _own_server_target(url)
+    except ValueError:
+        return True
+    if target == "workspace":
+        return False
+    if target == "refused":
+        return True
+    if cache is None:
+        return _is_blocked_host(host, allow_loopback=allow_loopback)
+    key = f"{host}:{parts.port}"
+    if key not in cache:
+        cache[key] = _is_blocked_host(host, allow_loopback=allow_loopback)
+    return cache[key]
+
+
+def _browser_proxy(proxy_url: str) -> dict:
+    """Playwright proxy settings for a browsing context.
+
+    Everything goes through the egress proxy, the harness's own port
+    included. Playwright (1.58) adds `<-loopback>` to every context's bypass
+    list, which makes Chromium send loopback through the proxy too, and no
+    bypass is added back. The own port must not go direct: the request route
+    is not shown redirect hops, so a page could reach the API by bouncing a
+    request off a redirect. The proxy sees every hop and keeps the
+    /workspace/ rule itself.
+    """
+    return {"server": proxy_url}
 
 
 def _validate_url(url: str, *, allow_loopback: bool = False) -> str:
@@ -753,11 +954,16 @@ def _validate_url(url: str, *, allow_loopback: bool = False) -> str:
     if not parsed.netloc:
         raise ValueError("Invalid URL: missing domain")
 
-    # SSRF protection — block internal/private IPs (loopback conditionally allowed).
-    # Self-loopback (harness's own port) is always allowed: the agent owns this server.
-    hostname = parsed.hostname or ""
-    if _is_self_loopback(hostname, parsed.port):
+    # The harness's own server first: its /workspace/ files are reachable in
+    # both modes, everything else on it is refused in both modes (localhost
+    # mode allows loopback, but has no token at all in front of the API).
+    target = _own_server_target(url)
+    if target == "workspace":
         return url
+    if target == "refused":
+        raise ValueError(_own_server_refusal(url))
+    # SSRF protection — block internal/private IPs (loopback conditionally allowed).
+    hostname = parsed.hostname or ""
     if _is_blocked_host(hostname, allow_loopback=allow_loopback):
         raise ValueError(f"Blocked: {hostname} resolves to a private/internal address")
 
@@ -768,8 +974,15 @@ def _validate_url(url: str, *, allow_loopback: bool = False) -> str:
 _MAX_HTML_BYTES = 5_000_000
 
 
-async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | None) -> str:
+async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | None, proxy_url: str = "") -> str:
     """Full nav + content extraction as one coroutine. Runs on the FastAPI loop."""
+    if not proxy_url:
+        from core.extensions.web import egress_proxy
+
+        try:
+            proxy_url = egress_proxy.ensure_started()
+        except egress_proxy.EgressProxyError as e:
+            return f"Error: {e}; browse_web is unavailable until it runs"
     browser = await _get_browser_async()
     timeout_ms = settings.browser_timeout * 1000
     context = None
@@ -783,6 +996,10 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            proxy=_browser_proxy(proxy_url),
+            # A service worker's own fetches can slip past page routing, so
+            # the pages this tool opens do not get to install one.
+            service_workers="block",
         )
         page = await context.new_page()
 
@@ -812,17 +1029,10 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
             pass
 
         # SSRF: intercept requests to block navigation to internal hosts.
-        # Self-loopback (harness's own port) is allowed even in network mode.
+        # The harness's own port is reachable only at /workspace/ paths, so a
+        # workspace page's subresources load and a fetch to its API does not.
         async def _ssrf_route_handler(route, request):
-            from urllib.parse import urlparse as _urlparse
-
-            parsed_req = _urlparse(request.url)
-            req_host = parsed_req.hostname or ""
-            if (
-                req_host
-                and not _is_self_loopback(req_host, parsed_req.port)
-                and _is_blocked_host(req_host, allow_loopback=allow_loopback)
-            ):
+            if _request_refused(request.url, allow_loopback):
                 await route.abort("blockedbyclient")
             else:
                 await route.continue_()
@@ -837,16 +1047,12 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
 
         final_url = page.url
         try:
-            final_parsed = urlparse(final_url)
-            final_host = final_parsed.hostname or ""
-            if (
-                final_host
-                and not _is_self_loopback(final_host, final_parsed.port)
-                and _is_blocked_host(final_host, allow_loopback=allow_loopback)
-            ):
-                return f"Error: Redirect to blocked internal address: {final_host}"
-        except Exception:
-            pass
+            if _own_server_target(final_url) == "refused":
+                return f"Error: {_own_server_refusal(final_url)}"
+        except ValueError:
+            return f"Error: Redirect to blocked address: {final_url[:200]}"
+        if _request_refused(final_url, allow_loopback):
+            return f"Error: Redirect to blocked internal address: {urlparse(final_url).hostname}"
 
         html = await page.content()
         title = await page.title()
@@ -984,6 +1190,15 @@ def browse_web(url: str, _context: dict | None = None) -> str:
     except ValueError as e:
         return f"Error: {e}"
 
+    # Started here, on the tool's worker thread, so the first start never
+    # blocks the server's loop. No proxy, no browsing (see http_get).
+    from core.extensions.web import egress_proxy
+
+    try:
+        proxy_url = egress_proxy.ensure_started()
+    except egress_proxy.EgressProxyError as e:
+        return f"Error: {e}; browse_web is unavailable until it runs"
+
     _emit_browse_event(_context, {"type": "browse.start", "url": url})
 
     import asyncio as _asyncio
@@ -993,7 +1208,7 @@ def browse_web(url: str, _context: dict | None = None) -> str:
     if loop is None:
         return "Error: browse_web requires the event loop context. Internal error."
 
-    coro = _browse_and_extract_async(url, allow_loopback, _context)
+    coro = _browse_and_extract_async(url, allow_loopback, _context, proxy_url)
     try:
         fut = _asyncio.run_coroutine_threadsafe(coro, loop)
     except RuntimeError as e:

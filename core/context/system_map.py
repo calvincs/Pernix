@@ -155,6 +155,8 @@ def build_system_map(app=None) -> str:
             if scheme == "https"
             else "."
         ),
+        "Call it from bash (curl) or repl. http_get, browse_web and browser reach only "
+        "/workspace/ paths on this address; every other path is refused to them.",
         "",
         "## Data layout",
         "```",

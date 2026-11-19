@@ -5,6 +5,11 @@ Regression: in network mode, browsing/fetching the harness's own port over
 loopback was blocked as SSRF, so the agent could not test workspace files it
 just wrote (session 444e33b3968e). The fix carves out the harness's own
 `localhost:<port>` while keeping co-tenant loopback ports blocked.
+
+The carve-out covers /workspace/ paths only (2026-11-18): the rest of the own
+port is the harness's API, which trusts loopback without a token, so it is
+refused in both modes. See tests/regressions/test_2026-11-18_agent_web_tools_
+reached_internal_addresses.py for the full set.
 """
 
 from __future__ import annotations
@@ -102,3 +107,18 @@ def test_is_self_loopback_helper_matches_only_own_port():
         assert web_mod._is_self_loopback("localhost.example.com", 8090) is False
     finally:
         web_mod.settings.port = orig_port
+
+
+def test_own_port_outside_workspace_is_refused_in_network_mode(network_mode):
+    with pytest.raises(ValueError, match="Only /workspace/ paths"):
+        web._validate_url("https://localhost:8090/api/settings/auth-token")
+
+
+def test_own_port_outside_workspace_is_refused_in_localhost_mode(localhost_mode):
+    """Loopback is otherwise open in localhost mode, but the own API is not:
+    that mode has no token at all in front of it."""
+    with pytest.raises(ValueError, match="Only /workspace/ paths"):
+        web._validate_url("http://localhost:8090/", allow_loopback=web._loopback_allowed())
+    assert web._validate_url(
+        "http://localhost:8090/workspace/index.html", allow_loopback=web._loopback_allowed()
+    ).endswith("/workspace/index.html")

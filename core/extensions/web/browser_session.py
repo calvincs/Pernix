@@ -25,7 +25,9 @@ failed requests. Those four lines are usually the whole diagnosis of "the
 page looks empty".
 
 Safety is browse_web's: the same URL validation, and the same per-request
-check that keeps the page off private and internal addresses.
+check that keeps the page off private and internal addresses, and the same
+egress proxy underneath (egress_proxy.py), which is what actually decides
+which address a connection reaches.
 
 All Playwright objects live on the server's event loop (the browser is shared
 with browse_web). Tool calls arrive on worker threads and are marshalled onto
@@ -202,19 +204,19 @@ class _PageSession:
 
 
 def _host_blocked(sess: _PageSession | None, url: str, allow_loopback: bool) -> bool:
-    from core.extensions.web import _is_blocked_host, _is_self_loopback
+    """The early check for one request, WebSocket or landed page.
 
-    parsed = urlparse(url)
-    host = parsed.hostname or ""
-    if not host or parsed.scheme in ("data", "blob", "about"):
-        return False
-    if _is_self_loopback(host, parsed.port):
-        return False
-    key = f"{host}:{parsed.port}"
-    cache = sess.host_cache if sess is not None else {}
-    if key not in cache:
-        cache[key] = _is_blocked_host(host, allow_loopback=allow_loopback)
-    return cache[key]
+    The harness's own port is decided per URL, never cached: its /workspace/
+    files are reachable and nothing else on it is. Other hosts keep a
+    per-page verdict cache, which only spares repeated DNS lookups for this
+    early check. A name that answers differently later (DNS rebinding) gains
+    nothing from a stale "allowed" here, because every connection goes
+    through the egress proxy, which resolves and checks the address it
+    actually connects to.
+    """
+    from core.extensions.web import _request_refused
+
+    return _request_refused(url, allow_loopback, cache=sess.host_cache if sess is not None else None)
 
 
 async def _settle(page, extra_s: float = 0.3) -> None:
@@ -359,11 +361,20 @@ async def _listing(ids: list[str]) -> str:
     return ("Open pages:\n" + "\n".join(rows)) if rows else "No pages are open."
 
 
-async def _open(owner: str, url: str, width: int, height: int, out_root: Path, allow_loopback: bool) -> dict:
-    from core.extensions.web import _get_browser_async
+async def _open(
+    owner: str, url: str, width: int, height: int, out_root: Path, allow_loopback: bool, proxy_url: str
+) -> dict:
+    from core.extensions.web import _browser_proxy, _get_browser_async
 
     browser = await _get_browser_async()
-    context = await browser.new_context(user_agent=_USER_AGENT, viewport={"width": width, "height": height})
+    # All traffic goes through the egress proxy (see _browser_proxy); service
+    # workers are blocked because their fetches can slip past context routing.
+    context = await browser.new_context(
+        user_agent=_USER_AGENT,
+        viewport={"width": width, "height": height},
+        proxy=_browser_proxy(proxy_url),
+        service_workers="block",
+    )
     page_id = "b-" + uuid.uuid4().hex[:6]
     sess = None
     try:
@@ -427,9 +438,19 @@ async def _goto(sess: _PageSession, url: str, allow_loopback: bool, opened: bool
     except Exception:
         pass
     if _host_blocked(sess, sess.page.url, allow_loopback):
-        host = urlparse(sess.page.url).hostname
+        from core.extensions.web import _own_server_refusal, _own_server_target
+
+        landed = sess.page.url
         await _close_one(sess.id)
-        return {"text": f"Error: redirect to blocked internal address: {host}. The page was closed."}
+        try:
+            own = _own_server_target(landed) == "refused"
+        except ValueError:
+            own = False
+        if own:
+            return {"text": f"Error: {_own_server_refusal(landed)} The page was closed."}
+        return {
+            "text": f"Error: redirect to blocked internal address: {urlparse(landed).hostname}. The page was closed."
+        }
     return {"text": await _snapshot(sess, _TEXT_CAP_SNAPSHOT, note)}
 
 
@@ -634,7 +655,7 @@ def browser(
     _context: dict | None = None,
 ) -> str:
     """Drive a page that stays open between calls. See register() for the contract."""
-    from core.extensions.web import _loopback_allowed, _validate_url
+    from core.extensions.web import _loopback_allowed, _validate_url, egress_proxy
 
     if not settings.browser_enabled:
         return (
@@ -683,8 +704,16 @@ def browser(
             ws_root, _cwd = roots_for_context(ctx.get("workspace_override"), ctx.get("workspace_home"))
             w = max(320, min(int(width or 1280), 2560))
             h = max(240, min(int(height or 800), 1600))
+            # Started on this worker thread so a first start never blocks the
+            # server's loop. No proxy, no page: there is no direct fallback.
+            try:
+                proxy_url = egress_proxy.ensure_started()
+            except egress_proxy.EgressProxyError as e:
+                return f"Error: {e}; the browser tool is unavailable until it runs"
             result = _call(
-                loop, _open(session_id, url, w, h, ws_root, allow_loopback), float(settings.browser_timeout) + 20
+                loop,
+                _open(session_id, url, w, h, ws_root, allow_loopback, proxy_url),
+                float(settings.browser_timeout) + 20,
             )
             return result["text"]
 

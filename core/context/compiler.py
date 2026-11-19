@@ -488,6 +488,8 @@ def _build_server_context() -> str:
             "  schema, data layout, API routes, and context blocks. Read it BEFORE guessing a",
             "  table name, path, or endpoint — it is regenerated every boot and cannot drift.",
             f"- The store is the SQLite file {db_path} (python3 sqlite3 from bash or repl) and this API.",
+            "- Reach this API from bash (curl) or repl. http_get, browse_web and browser are refused",
+            "  everywhere on this address except /workspace/ paths.",
             f"- GET {base_url}/openapi.json lists every route with its query params and their DEFAULTS.",
             "  Read it before guessing an endpoint. A list route that defaults to one status hides the",
             f"  rest: e.g. {base_url}/api/notifications?view=log for every row, not just what the bell shows.",

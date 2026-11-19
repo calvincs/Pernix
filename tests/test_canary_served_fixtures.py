@@ -255,9 +255,11 @@ def test_http_get_reads_a_served_file_over_own_tls(own_cert, monkeypatch, tmp_pa
     from core.extensions.web import http_get
 
     crt, key = own_cert
+    # Under workspace/, as on the real server: /workspace/ is the only part of
+    # its own address the agent's web tools may reach.
     root = tmp_path / "www"
-    root.mkdir()
-    (root / "article.html").write_text("<h1>Seeded Title 4821</h1>", encoding="utf-8")
+    (root / "workspace").mkdir(parents=True)
+    (root / "workspace" / "article.html").write_text("<h1>Seeded Title 4821</h1>", encoding="utf-8")
 
     handler = lambda *a, **k: http.server.SimpleHTTPRequestHandler(*a, directory=str(root), **k)  # noqa: E731
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -269,7 +271,7 @@ def test_http_get_reads_a_served_file_over_own_tls(own_cert, monkeypatch, tmp_pa
     thread.start()
     try:
         monkeypatch.setattr("config.settings.port", port)
-        text, status = http_get(f"https://localhost:{port}/article.html")
+        text, status = http_get(f"https://localhost:{port}/workspace/article.html")
         assert status["fetch_status"] in ("ok", "capped"), text
         assert "Seeded Title 4821" in text
     finally:
