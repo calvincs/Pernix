@@ -23,7 +23,11 @@ read is always the latest full frame, not a byte log to re-parse.
 
 Admission is the same as bash and job_start (`check_shell_command`), with the
 same environment and rlimits: a third launcher must not be the way around the
-policy of the first two.
+policy of the first two. Checking only the command at `open` was not enough,
+though: open `bash`, and every line typed into it afterwards was a command
+nobody looked at. So each line `send` submits passes the bash denylist scan
+too (see `_screen_input`); a refused line means nothing from that call is
+typed.
 
 Lifetime: a terminal survives the end of the turn and a cancelled turn, like a
 job. It ends when the program exits, on `close`, after `terminal_idle_timeout_s`
@@ -95,6 +99,100 @@ def _exit_text(code: int | None) -> str:
     return f" code {code}"
 
 
+# -- typed-input policy --------------------------------------------------------
+#
+# `open` admits the command like bash does, but a shell opened that way then
+# takes any line typed into it. Each submitted line goes through the same
+# denylist scan bash uses, so `sudo`, `dd`, `rm -rf /...` typed into a
+# terminal are refused with the error bash gives.
+#
+# Honest limits: this is a best-effort guard on a program whose state the
+# harness cannot see. It follows the line the way a plain line editor would,
+# but a full-screen editor, a REPL, tab completion, history recall or a remote
+# shell all change what a line means in ways the buffer cannot track, and code
+# inside a REPL (`os.system(...)`) is not a shell command word at all. It
+# narrows the gap; the real boundary is still the tool's "dangerous" approval.
+#
+# Only the denylist half of the policy applies, in strict mode too: strict's
+# allowlist is a first-word check and would refuse ordinary input to a REPL or
+# an editor (`print(1)`, `:wq`). Same reasoning as `core.gates.check_gate_command`.
+# A mode in which bash itself applies no policy (`check_shell_command` returns
+# None for anything other than permissive/strict) scans nothing here either.
+#
+# The buffer is a list of segments: the text since the last submit, split
+# wherever a key with an effect we cannot follow arrived (arrows, home/end,
+# tab, esc, alt-keys, other control keys). Those keys keep the buffer rather
+# than clear it, so an arrow typed mid-word cannot dodge a refusal; and
+# because the true line after such a key is unknown, a submit scans both the
+# joined text and every segment on its own. Backspace removes one buffered
+# character. ctrl-c and ctrl-u abandon the line in every common line editor,
+# so they clear it. (A tty may also throw away input queued right behind a
+# ctrl-c, so the program can see less of the next line than the buffer holds;
+# that depends on timing and is one more thing this guard cannot follow.) A
+# line still being typed is not judged until its submit.
+
+_ESC_SEQ = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|O.|.)?", re.DOTALL)
+_SUBMIT_CHARS = "\r\n"
+_ERASE_CHARS = "\x7f\x08"
+_KILL_CHARS = "\x03\x15"  # ctrl-c, ctrl-u
+
+
+def _feed_typed(segs: list[str], text: str, submitted: list[list[str]]) -> list[str]:
+    """Advance the line buffer over `text` as it would reach the program."""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\x1b":
+            m = _ESC_SEQ.match(text, i)
+            i = m.end() if m else i + 1
+            segs = segs + [""]
+            continue
+        if ch in _SUBMIT_CHARS:
+            submitted.append(segs)
+            segs = [""]
+        elif ch in _ERASE_CHARS:
+            segs = list(segs)
+            while len(segs) > 1 and not segs[-1]:
+                segs.pop()
+            segs[-1] = segs[-1][:-1]
+        elif ch in _KILL_CHARS:
+            segs = [""]
+        elif ch < " ":
+            segs = segs + [""]
+        else:
+            segs = segs[:-1] + [segs[-1] + ch]
+        i += 1
+    return segs
+
+
+def _screen_input(typed: list[str], steps: list[tuple[str, object]]) -> tuple[list[str], str | None]:
+    """Run `steps` against the buffer without typing anything.
+
+    Returns (buffer after the steps, None), or (the buffer unchanged, the
+    bash refusal) when any line the steps would submit is refused.
+    """
+    from core.tools.builtin.core_tools import _check_command_security
+
+    submitted: list[list[str]] = []
+    segs = list(typed)
+    for kind, value in steps:
+        if kind == "text":
+            segs = _feed_typed(segs, str(value), submitted)
+        elif kind == "key":
+            segs = _feed_typed(segs, terminal_bytes(str(value)).decode("utf-8", "replace"), submitted)
+    if settings.shell_security_mode not in ("permissive", "strict"):
+        return segs, None
+    for line in submitted:
+        candidates = ["".join(line)] + (line if len(line) > 1 else [])
+        for candidate in candidates:
+            if not candidate.strip():
+                continue
+            refusal = _check_command_security(candidate)
+            if refusal:
+                return typed, refusal
+    return segs, None
+
+
 class _Terminal:
     """One program on one pseudo-terminal, with an emulated screen."""
 
@@ -134,6 +232,11 @@ class _Terminal:
         self.end_reason = ""
         self.done_at = 0.0
         self.feed_errors = 0
+        # The line typed since the last submit, as segments (see _screen_input).
+        # Guarded by _input_lock, not cond: the reader thread never touches it,
+        # and a send that sleeps between keys must not hold up the screen.
+        self.typed: list[str] = [""]
+        self._input_lock = threading.Lock()
         self._log_fh = None
         try:
             self._log_fh = open(log_path, "ab")
@@ -256,16 +359,31 @@ class _Terminal:
 
     # -- input ---------------------------------------------------------------
 
-    def send(self, steps: list[tuple[str, object]]) -> None:
-        for kind, value in steps:
-            if kind == "wait":
-                time.sleep(float(value))
-            elif kind == "text":
-                self._write(str(value).encode("utf-8", "replace"))
-            else:
-                with self.cond:
-                    app_cursor = _DECCKM in self.screen.mode
-                self._write(terminal_bytes(str(value), app_cursor))
+    def send(self, steps: list[tuple[str, object]]) -> str | None:
+        """Type the steps. Returns the refusal, and types nothing, when a line
+        the call would submit fails the command policy.
+
+        The whole call is checked before the first byte goes out. A refusal
+        halfway through would leave half a call typed and the program in a
+        state neither side can describe. One send at a time: two callers (a
+        parent and its worker) interleaving keys would garble both lines and
+        the buffer that tracks them.
+        """
+        with self._input_lock:
+            typed, refusal = _screen_input(self.typed, steps)
+            if refusal:
+                return refusal
+            self.typed = typed
+            for kind, value in steps:
+                if kind == "wait":
+                    time.sleep(float(value))
+                elif kind == "text":
+                    self._write(str(value).encode("utf-8", "replace"))
+                else:
+                    with self.cond:
+                        app_cursor = _DECCKM in self.screen.mode
+                    self._write(terminal_bytes(str(value), app_cursor))
+        return None
 
     def resize(self, cols: int, rows: int) -> None:
         with self.cond:
@@ -646,7 +764,9 @@ def terminal(
         steps = parse_input(input, raw=bool(raw))
         if not steps:
             return "Error: action='send' needs input, e.g. input='ls -la<enter>'. " + KEY_HELP
-        term.send(steps)
+        refused = term.send(steps)
+        if refused:
+            return f"{refused} The input was NOT sent: nothing from this call was typed into the terminal."
         note = term.wait(
             pattern, _wait_seconds(wait_seconds, _DEFAULT_WAIT_S), ctx.get("_cancel_event"), after_input=True
         )
@@ -712,7 +832,9 @@ def register(reg) -> None:
             "types, then returns the screen once output settles; screen -> current screen; "
             "resize (cols, rows); list; close. " + KEY_HELP + " "
             "Every result is the full current screen, so one send per step is enough. "
-            "Same command policy and environment as bash."
+            "Same environment as bash; the command at open is admitted like a bash command, and "
+            "every line you submit later (text then <enter>) passes the same denylist bash uses — "
+            "a refused line means nothing from that send is typed."
         ),
         parameters={
             "type": "object",
