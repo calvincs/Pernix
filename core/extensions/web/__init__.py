@@ -511,7 +511,15 @@ def _own_tls_verify(url: str):
         return True
     import ssl
 
-    return ssl.create_default_context(cafile=cert)
+    ctx = ssl.create_default_context(cafile=cert)
+    # The own certificate is often a leaf signed by a private CA that is not
+    # in the file (a locally issued development certificate, for one). OpenSSL
+    # only accepts a non-root certificate as a trust anchor with this flag;
+    # without it every such fetch failed "unable to get local issuer
+    # certificate". Trust is still exactly this one certificate, and the
+    # hostname is still checked.
+    ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    return ctx
 
 
 def http_get(url: str, _context: dict | None = None):
