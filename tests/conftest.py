@@ -13,6 +13,20 @@ _tmpdir = tempfile.mkdtemp(prefix="pernix_test_")
 os.environ.setdefault("CAI_TEST", "1")
 
 
+@pytest.fixture(autouse=True, scope="session")
+def trust_test_client_hosts():
+    """The app refuses Host names it does not know (DNS rebinding guard).
+    Test HTTP clients send placeholder names — Starlette's TestClient sends
+    `testserver`, and the httpx clients here use `test` and `t` — so trust
+    those for the run. Session-scoped so each xdist worker does it once."""
+    import api.app
+
+    names = {"testserver", "test", "t"}
+    api.app._EXTRA_TRUSTED_HOSTS.update(names)
+    yield
+    api.app._EXTRA_TRUSTED_HOSTS.difference_update(names)
+
+
 @pytest.fixture(autouse=True)
 def isolate_data(tmp_path, monkeypatch):
     """Isolate each test with temp data directories."""

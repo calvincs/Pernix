@@ -533,6 +533,98 @@ def _extract_token(scope: Scope) -> str | None:
     return None
 
 
+# DNS rebinding. A page on a hostile domain can point its own name at
+# 127.0.0.1; the browser then treats this server as that page's own origin and
+# lets its scripts read every response. The tell is the Host header, which
+# still carries the hostile name. A literal IP address or `localhost` cannot be
+# rebound, and a name the operator listed in cors_origins is one they chose, so
+# only those are trusted. Under HTTP/2 the ASGI server hands :authority over
+# as an ordinary `host` header, so this one check covers both protocols.
+# Tests add the placeholder host their HTTP client sends to this set.
+_EXTRA_TRUSTED_HOSTS: set[str] = set()
+
+
+def _host_name(scope: Scope) -> str | None:
+    """Host part of the Host header: port stripped, lower-cased, no trailing
+    dot. None when the header is missing or cannot be read."""
+    raw = None
+    for name, value in scope.get("headers", []):
+        if name == b"host":
+            raw = value.decode("latin-1").strip()
+            break
+    if not raw:
+        return None
+    if raw.startswith("["):
+        end = raw.find("]")
+        if end == -1:
+            return None
+        host = raw[1:end]
+    elif raw.count(":") > 1:
+        # Bare IPv6 with no brackets. Not valid in a Host header, but there
+        # is no port to strip, and the IP check below decides.
+        host = raw
+    else:
+        host = raw.partition(":")[0]
+    host = host.lower().rstrip(".")
+    return host or None
+
+
+def _is_ip_literal(host: str) -> bool:
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _cors_hosts() -> set[str]:
+    from urllib.parse import urlsplit
+
+    hosts = set()
+    for origin in settings.cors_origins or []:
+        origin = str(origin).strip()
+        if not origin or origin == "*":
+            continue
+        # An origin is "scheme://host[:port]"; a bare host name is accepted
+        # too, since that is an easy thing to type into settings.
+        parsed = urlsplit(origin if "://" in origin else f"//{origin}")
+        if parsed.hostname:
+            hosts.add(parsed.hostname.lower().rstrip("."))
+    return hosts
+
+
+def _host_is_trusted(scope: Scope) -> bool:
+    host = _host_name(scope)
+    if host is None:
+        return False
+    if host == "localhost" or host in _EXTRA_TRUSTED_HOSTS or _is_ip_literal(host):
+        return True
+    return host in _cors_hosts()
+
+
+async def _send_403_host(send: Send, scope: Scope) -> None:
+    """Refuse a request whose Host is a name this server was not told about."""
+    host = _host_name(scope) or "(missing)"
+    body = _json.dumps(
+        {
+            "detail": f"Host '{host}' is not allowed. Add its origin to cors_origins in settings to allow it.",
+        }
+    ).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 403,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
 async def _send_401(send: Send) -> None:
     """Send a 401 Unauthorized JSON response via raw ASGI."""
     body = _json.dumps({"detail": "Unauthorized"}).encode("utf-8")
@@ -559,6 +651,13 @@ class _AuthMiddleware:
             return
 
         if not settings.network_enabled or not settings.auth_token:
+            # No token is in force, so the Host check is the only thing
+            # between a rebinding page and the API. It covers every path and
+            # method: refusing the page itself stops the attack before any of
+            # its scripts load.
+            if not _host_is_trusted(scope):
+                await _send_403_host(send, scope)
+                return
             await self.app(scope, receive, send)
             return
 
@@ -571,10 +670,13 @@ class _AuthMiddleware:
         # reverse proxy terminates TLS locally: every proxied request then
         # arrives from 127.0.0.1 and skips auth entirely. Operators in that
         # topology set trust_local_requests = false.
+        # A rebound page also arrives from loopback, so the bypass needs a
+        # trusted Host too. An untrusted one is not refused: it simply has to
+        # show the token like any remote caller.
         client = scope.get("client")
         from api.routers.health import is_local_client
 
-        if settings.trust_local_requests and client and is_local_client(client[0]):
+        if settings.trust_local_requests and client and is_local_client(client[0]) and _host_is_trusted(scope):
             await self.app(scope, receive, send)
             return
 
@@ -653,6 +755,14 @@ async def root():
             headers={
                 "Cross-Origin-Opener-Policy": "same-origin",
                 "Cross-Origin-Embedder-Policy": "credentialless",
+                # Clickjacking: another site must not be able to load the app
+                # in a hidden frame and steer clicks into it. index.html's
+                # meta CSP cannot say this (browsers ignore frame-ancestors
+                # there), so it has to be a header. Only this page gets it;
+                # files under /workspace/ keep their own headers.
+                "X-Frame-Options": "DENY",
+                "Content-Security-Policy": "frame-ancestors 'none'",
+                "X-Content-Type-Options": "nosniff",
             },
         )
     return JSONResponse({"message": "Pernix API", "docs": "/docs"})

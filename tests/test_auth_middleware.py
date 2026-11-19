@@ -102,8 +102,11 @@ async def test_comparison_is_constant_time():
 
 
 async def test_loopback_bypasses_by_default(network_mode):
+    # The bypass also needs a trusted Host (DNS rebinding guard); a browser
+    # on the same machine sends one like this.
+    local = [(b"host", b"localhost:8000")]
     for host in ("127.0.0.1", "::1"):
-        rec = await _call(_scope(client=(host, 5000)))
+        rec = await _call(_scope(client=(host, 5000), headers=local))
         assert rec.reached_inner, f"{host} should bypass when trust_local_requests is on"
 
 
@@ -138,7 +141,7 @@ async def test_public_paths_need_no_token(network_mode):
 async def test_auth_disabled_outside_network_mode(monkeypatch):
     monkeypatch.setattr("config.settings.network_enabled", False)
     monkeypatch.setattr("config.settings.auth_token", "tok")
-    rec = await _call(_scope())
+    rec = await _call(_scope(headers=[(b"host", b"localhost:8000")]))
     assert rec.reached_inner
 
 
