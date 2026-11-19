@@ -468,6 +468,21 @@ const SECTIONS = [
         ],
     },
     {
+        title: 'Scratch folder',
+        tab: 'storage',
+        description: 'The agent keeps throwaway files in tmp/ inside the workspace (its TMPDIR for bash, jobs, terminals and gates) rather than the system /tmp. The workspace survives rebuilds, so the idle sweep deletes each top-level entry of data/workspace/tmp once nothing inside it has changed for this many days.',
+        fields: [
+            {
+                key: 'workspace_tmp_retention_days',
+                label: 'Delete scratch untouched for (days)',
+                type: 'number',
+                min: 0,
+                max: 365,
+                hint: '0 never sweeps. Symlinks are removed as links; nothing outside the folder is touched.',
+            },
+        ],
+    },
+    {
         title: 'Notifications (webhooks)',
         tab: 'integrations',
         term: 'Internal name: webhook notifications. Settings keys are notify_webhook_*.',

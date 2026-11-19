@@ -985,6 +985,10 @@ def _newest_workspace_files(root, limit: int = 20, budget: int = WORKSPACE_SCAN_
                 for entry in entries:
                     if entry.name.startswith("."):
                         continue
+                    # The scratch folder holds throwaway files; listing them
+                    # would push the real deliverables off a 20-entry list.
+                    if entry.name == "tmp" and path == str(root):
+                        continue
                     seen += 1
                     if seen > budget:
                         break

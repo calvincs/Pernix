@@ -189,12 +189,20 @@ def _gate_env(venv_root: Path, home: Path) -> dict:
     """Split the same way build_shell_env splits it for bash and jobs: the
     toolchain is shared, so PATH keeps pointing at the containment root's venv,
     while HOME follows the session's working root."""
+    from core.tools.paths import scratch_tmpdir
+
     venv_bin = venv_root / ".venv" / "bin"
-    return {
+    env = {
         "PATH": f"{venv_bin}:/usr/local/bin:/usr/bin:/bin",
         "HOME": str(home),
         "LANG": "C.UTF-8",
     }
+    # The same scratch folder bash and jobs get, so a gate's mktemp lands
+    # where the sweep can age it out rather than in the server's /tmp.
+    scratch = scratch_tmpdir(venv_root)
+    if scratch:
+        env["TMPDIR"] = scratch
+    return env
 
 
 def check_gate_command(command: str) -> str | None:

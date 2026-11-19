@@ -564,6 +564,11 @@ class Settings:
     # default, and deliberately: the archive is what "not delete" means, so
     # a horizon on it is the user opting back in to losing transcripts.
     session_delete_archived_days: int = 0
+    # The agent's scratch folder, <workspace>/tmp (its TMPDIR), lives in the
+    # bind-mounted data dir and survives rebuilds, so snooze deletes its
+    # top-level entries once nothing in them has changed for this many days.
+    # 0 disables the sweep.
+    workspace_tmp_retention_days: int = 3
 
     # --- Space suggestions ---
     # Pernix scans the last N days of ordinary chats at idle and offers to

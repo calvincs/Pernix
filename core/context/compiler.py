@@ -287,6 +287,8 @@ All files go in the workspace, organized by project folder.
 - file_read/file_write/file_edit: paths relative to workspace root (e.g. "myproject/app.html")
 - glob: find files by pattern (e.g. "**/*.html")
 - bash: CWD is already the workspace root — use "myproject/file" not "workspace/myproject/file"
+- Scratch: throwaway files go in tmp/ in the workspace, not /tmp ($TMPDIR points there, so mktemp
+  uses it); clean up with rm -rf tmp/<dir>. Old entries are swept automatically.
 
 IMPORTANT: Tool output may be TRUNCATED if it exceeds the size limit. When you see
 "⚠ TRUNCATED" or "⚠ N lines remaining", you are missing data.
@@ -648,6 +650,9 @@ def _build_space_block(session_id: str) -> str:
         space = get_session_space(session_id)
         if not space:
             return ""
+        # Absolute: bash runs in the space folder, so a relative tmp/ would
+        # name the wrong folder, and the rm exemption refuses `$TMPDIR/...`.
+        scratch = Path(settings.workspace_dir).resolve() / "tmp"
         return (
             f"[SPACE]\n"
             f"This session belongs to the space \"{space['label']}\" (slug: {space['slug']}).\n"
@@ -656,6 +661,8 @@ def _build_space_block(session_id: str) -> str:
             f"files in it.\n"
             f"- It is NOT a sandbox: the rest of the workspace stays readable and writable "
             f"(existing files resolve wherever they live).\n"
+            f"- Scratch ($TMPDIR) is the shared {scratch}/, not a tmp/ in this folder: "
+            f"remove a scratch dir with rm -rf {scratch}/<dir>.\n"
             f"- Route memories for this space's work to {space_memory_prefix(space)}* files; "
             f"they are surfaced first in this space's searches."
         )

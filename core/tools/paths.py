@@ -86,6 +86,43 @@ def workspace_home() -> Path:
     return workspace()
 
 
+WORKSPACE_TMP_DIRNAME = "tmp"
+
+# Longest scratch path that is still exported as TMPDIR. Programs the agent
+# runs put unix sockets under TMPDIR (Python's multiprocessing forkserver and
+# managers use <TMPDIR>/pymp-XXXXXXXX/listener-XXXXXXXX, 33 more bytes), and a
+# socket path past ~100 bytes fails bind(). A deeper workspace keeps the
+# inherited TMPDIR instead of breaking those programs.
+_TMPDIR_MAX_LEN = 60
+
+
+def workspace_tmp(root: Path | None = None) -> Path:
+    """The agent's scratch folder, `<workspace>/tmp`, created on demand.
+
+    Inside the workspace on purpose: the workspace stays the harness's single
+    root, `rm -rf tmp/<dir>` passes the bash rm exemption, and the snooze
+    sweep ages old entries out. `root` defaults to workspace(), so a sandbox
+    override gets its own scratch folder; callers that run outside the
+    per-call ContextVar window pass the containment root explicitly.
+    """
+    base = workspace() if root is None else Path(root).resolve()
+    tmp = base / WORKSPACE_TMP_DIRNAME
+    try:
+        tmp.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.debug("workspace tmp %s unavailable: %s", tmp, e)
+    return tmp
+
+
+def scratch_tmpdir(root: Path | None = None) -> str | None:
+    """workspace_tmp() as a TMPDIR value for an agent-run child, or None when
+    it is not a usable directory or too deep for socket paths (see above)."""
+    tmp = workspace_tmp(root)
+    if tmp.is_symlink() or not tmp.is_dir() or len(str(tmp).encode()) > _TMPDIR_MAX_LEN:
+        return None
+    return str(tmp)
+
+
 def roots_for_context(workspace_override: str | None, workspace_home_dir: str | None) -> tuple[Path, Path]:
     """(containment root, default cwd) for a caller that runs OUTSIDE the
     per-call ContextVar window, computed from values handed to it explicitly.
@@ -517,4 +554,11 @@ def build_shell_env(workspace_root: Path | None = None, run_dir: Path | None = N
     # it matters most (field case c93232a0521b: a 30-minute search printed
     # progress the whole way and the timeout returned none of it).
     env["PYTHONUNBUFFERED"] = "1"
+    # Scratch goes to <workspace>/tmp, not /tmp: mktemp, tempfile and most
+    # tools honour TMPDIR, and the workspace copy is swept by age. Always the
+    # containment root's folder (never the space home), so every session
+    # shares one scratch tree. The server's own TMPDIR is untouched.
+    scratch = scratch_tmpdir(ws)
+    if scratch:
+        env["TMPDIR"] = scratch
     return env

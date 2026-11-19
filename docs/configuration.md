@@ -476,6 +476,12 @@ ledger afterwards, so the *Archived* count and the session total move on
 screen. The buttons are for trying a horizon and for catching up a box that has
 never swept; leaving the knobs set is what makes it happen on its own.
 
+**Scratch folder.** The agent's throwaway files go in `data/workspace/tmp/`, which is the `TMPDIR` of every bash call, job, terminal and gate (the server's own `TMPDIR` is unchanged). The workspace survives rebuilds, so snooze ages it out.
+
+| Setting | Default | Description |
+|---|---|---|
+| `workspace_tmp_retention_days` | `3` | Days a top-level entry of the agent's scratch folder `data/workspace/tmp/` (its `TMPDIR` for bash, jobs, terminals and gates) may go untouched before the snooze sweep deletes it. Judged by the newest mtime inside the entry; symlinks are unlinked, never followed. `0` never sweeps. Range 0–365. |
+
 **Compact database** rebuilds the file so the reclaimable space goes back to
 the disk (`PRAGMA optimize`, then `VACUUM`, then a WAL checkpoint so the main
 file actually shrinks rather than waiting for the next one). It is refused

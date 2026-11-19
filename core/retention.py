@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -574,3 +576,99 @@ async def prune_rlm_runs(retention_days: int | None = None) -> int:
     if deleted:
         logger.info("Snooze RLM cleanup: deleted %d old run(s)", deleted)
     return deleted
+
+
+# ---------------------------------------------------------------------------
+# Workspace scratch folder (<workspace>/tmp, the agent's TMPDIR)
+# ---------------------------------------------------------------------------
+
+
+def _newest_mtime(entry: Path, cutoff: float) -> float:
+    """Newest lstat mtime of `entry` and, for a real directory, of everything
+    under it. Never follows a symlink. Stops early once anything is newer
+    than `cutoff` — the answer ("keep it") is already known."""
+    newest = entry.lstat().st_mtime
+    if newest > cutoff or entry.is_symlink() or not entry.is_dir():
+        return newest
+    stack = [str(entry)]
+    while stack:
+        path = stack.pop()
+        try:
+            with os.scandir(path) as it:
+                for child in it:
+                    try:
+                        st = child.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if st.st_mtime > newest:
+                        newest = st.st_mtime
+                        if newest > cutoff:
+                            return newest
+                    if child.is_dir(follow_symlinks=False):
+                        stack.append(child.path)
+        except OSError:
+            continue  # vanished or unreadable mid-walk: judge on what was seen
+    return newest
+
+
+def prune_workspace_tmp(retention_days: int | None = None, root: Path | None = None) -> int:
+    """Delete top-level entries of the GLOBAL workspace scratch folder whose
+    newest mtime (the entry and everything inside it) is older than the
+    retention window. 0 days disables it. Returns the number removed.
+
+    Blocking filesystem work: callers run it off the event loop.
+
+    The folder lives in the bind-mounted data dir, so scratch survives every
+    rebuild unless something ages it out. Safety: the scratch folder itself
+    is never removed; a symlink is unlinked, never followed or descended
+    into; each target is re-checked to sit directly inside the folder before
+    it is deleted; races and permission errors skip the entry quietly.
+    """
+    days = int((retention_days if retention_days is not None else settings.workspace_tmp_retention_days) or 0)
+    if days <= 0:
+        return 0
+    if root is None:
+        from core.tools.paths import WORKSPACE_TMP_DIRNAME
+
+        root = Path(settings.workspace_dir) / WORKSPACE_TMP_DIRNAME
+    root = Path(root)
+    try:
+        # A symlinked scratch folder points somewhere else entirely: not ours.
+        if root.is_symlink() or not root.is_dir():
+            return 0
+        root = root.resolve()
+        names = os.listdir(root)
+    except OSError:
+        return 0
+    cutoff = time.time() - days * 86400
+    removed = 0
+    for name in names:
+        entry = root / name
+        try:
+            if _newest_mtime(entry, cutoff) > cutoff:
+                continue
+            # Containment, checked at delete time: the entry's real parent
+            # must be the scratch folder itself.
+            if entry.parent.resolve() != root or entry.name in ("", ".", ".."):
+                continue
+            if entry.is_symlink() or not entry.is_dir():
+                entry.unlink()  # a link goes as a link; its target is never touched
+            elif entry.resolve().parent == root:
+                shutil.rmtree(entry)
+            else:
+                continue
+            removed += 1
+        except FileNotFoundError:
+            continue  # someone else removed it first
+        except OSError as e:
+            logger.debug("Scratch sweep skipped %s: %s", entry, e)
+            continue
+    if removed:
+        logger.info(
+            "Scratch sweep: removed %d entr%s older than %dd from %s",
+            removed,
+            "y" if removed == 1 else "ies",
+            days,
+            root,
+        )
+    return removed

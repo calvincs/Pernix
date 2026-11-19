@@ -618,6 +618,12 @@ class SnoozeRunner:
             _announce(bus, "cleanup_rlm_runs", "Pruning old RLM run directories")
             await self._rung("cleanup_rlm_runs", self._cleanup_rlm_runs())
 
+        # Activity 12b: workspace scratch sweep (no LLM). <workspace>/tmp is
+        # the agent's TMPDIR and survives rebuilds; top-level entries nothing
+        # has touched for workspace_tmp_retention_days are deleted.
+        if not self._is_cancelled() and settings.workspace_tmp_retention_days > 0:
+            await self._rung("sweep_workspace_tmp", self._sweep_workspace_tmp(bus))
+
         # Activity 12c: Canary retention cleanup (no LLM). Prunes canary_runs
         # rows and the canary sessions behind them past canary_retention_days
         # and drains the .retired/ quarantine past canary_purge_after_days.
@@ -1513,6 +1519,27 @@ Output valid JSON only. No markdown fences. /no_think"""
         from core import retention
 
         self._bump("rlm_runs_pruned", await retention.prune_rlm_runs())
+
+    async def _sweep_workspace_tmp(self, bus=None) -> None:
+        """Activity 12b — scratch entries past workspace_tmp_retention_days.
+
+        At most every 6 hours (the retention unit is days), and the walk runs
+        on the background pool: a scratch tree can hold a cloned repo or a
+        node_modules, and stat-ing it inline would stall every SSE stream."""
+        from core import retention
+        from core.pools import run_background
+        from db import models as _db
+
+        try:
+            last = _db.get_snooze_state("last_workspace_tmp_sweep")
+            if last and (time.time() - float(last)) < 6 * 3600:
+                return
+        except Exception:
+            pass
+        if bus:
+            _announce(bus, "sweep_workspace_tmp", "Removing old scratch from the workspace tmp folder")
+        self._bump("workspace_tmp_pruned", await run_background(retention.prune_workspace_tmp))
+        _db.set_snooze_state("last_workspace_tmp_sweep", str(time.time()))
 
     # ------------------------------------------------------------------
     # Activity 9: Skill cooccurrence update (no LLM)

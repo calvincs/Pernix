@@ -264,6 +264,8 @@ _SETTING_BOUNDS = {
     # sweep that fills it.
     "session_archive_idle_days": (0, 3650),
     "session_delete_archived_days": (0, 3650),
+    # Scratch-folder sweep. 0 = never sweep.
+    "workspace_tmp_retention_days": (0, 365),
     # Space suggestions. The window has to be long enough for a habit to
     # show up across days and short enough that the prompt stays readable;
     # min_sessions/min_days are what "a habit" means, so they get real

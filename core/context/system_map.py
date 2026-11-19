@@ -49,6 +49,7 @@ data/sessions.db          all tables below (SQLite; WAL)
 data/memories/*.md        long-term memory (markdown = source of truth; _index.db is rebuildable)
 data/workspace/           your working directory (served at {base}/workspace/...)
 data/workspace/.jobs/     background-job logs + exit sidecars
+data/workspace/tmp/       scratch ($TMPDIR for bash/jobs/gates; use it, not /tmp); old entries swept by age
 data/workspace/rlm/       RLM run residue (trace.jsonl, payloads.jsonl, draft.txt)
 data/workspace/spaces/    per-space home folders (space sessions work here; runs' rlm/ nests inside)
 data/skills/              skills (SKILL.md + scripts/ + references/)

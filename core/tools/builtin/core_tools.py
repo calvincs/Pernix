@@ -600,6 +600,46 @@ def _rm_segments(command: str) -> list[list[str]] | None:
     return [["rm"] + tokens[1:] for tokens in cmds if os.path.basename(tokens[0]).lower() == "rm"]
 
 
+def _cd_may_leave_workspace(command: str) -> bool:
+    """True when a `cd`/`pushd`/`chdir` in the command could move the shell
+    outside the workspace, or to a place this scan cannot name.
+
+    The rm exemptions read a relative target as a path under the workspace.
+    That only holds while the shell is still there: `cd / && rm -rf home`
+    names a workspace folder on paper and the system's /home in the shell.
+    Each cd is followed in order from the workspace root; a target that is
+    interpolated, home-relative, `-`, a glob, or resolves outside the
+    workspace answers True. An unparseable command answers True as well.
+    """
+    from core.tools.paths import workspace
+
+    cmds: list[list[str]] = []
+    try:
+        if not _scan_commands(command, 0, [], cmds):
+            return True
+    except RecursionError:
+        return True
+    ws = workspace()
+    cur = ws
+    for tokens in cmds:
+        if os.path.basename(tokens[0]).lower() not in ("cd", "pushd", "chdir"):
+            continue
+        args = [t for t in tokens[1:] if t == "-" or not t.startswith("-")]
+        if not args:
+            cur = ws  # bare cd goes HOME, which the harness keeps inside the workspace
+            continue
+        t = args[0]
+        if t == "-" or t.startswith("~") or any(ch in t for ch in "$`*?[{"):
+            return True
+        try:
+            cur = (Path(t) if t.startswith("/") else cur / t).resolve()
+        except OSError:
+            return True
+        if not cur.is_relative_to(ws):
+            return True
+    return False
+
+
 def _rm_is_recursive_force(tokens: list[str]) -> bool:
     """True when ONE rm invocation carries both a recursive and a force flag.
 
@@ -634,6 +674,8 @@ def _rm_targets_are_safe_caches(command: str) -> bool:
     segments = [seg for seg in (_rm_segments(command) or []) if _rm_is_recursive_force(seg)]
     if not segments:
         return False  # parse failure or no rm -rf at all → don't take the safe path
+    if _cd_may_leave_workspace(command):
+        return False  # a relative cache name is only safe while still in the workspace
     for tokens in segments:
         targets = [tok for tok in tokens[1:] if not tok.startswith("-")]
         if not targets:
@@ -700,6 +742,7 @@ def _rm_targets_are_in_workspace(command: str) -> bool:
     if not segments:
         return False
     ws = workspace()
+    cd_escapes = _cd_may_leave_workspace(command)
     for tokens in segments:
         targets = [t for t in tokens[1:] if not t.startswith("-")]
         if not targets:
@@ -707,6 +750,8 @@ def _rm_targets_are_in_workspace(command: str) -> bool:
         for t in targets:
             if "$" in t or ".." in t.split("/"):
                 return False
+            if cd_escapes and not t.startswith("/"):
+                return False  # a relative name means nothing once the shell has left
             # The shell expands `~` (home) and `{a,b}` (brace lists) before rm
             # runs, so the literal text says nothing about the real target.
             if t.startswith("~") or "{" in t:
@@ -723,6 +768,23 @@ def _rm_targets_are_in_workspace(command: str) -> bool:
             if not (resolved.is_relative_to(ws) and resolved != ws):
                 return False
     return True
+
+
+def _scratch_rm_example() -> str:
+    """The scratch-folder target to show in the rm refusal, in a form the rm
+    exemption above accepts AND that names the right folder from the shell's
+    cwd. `$TMPDIR/x` is refused (no env interpolation), and from a space home
+    a relative `tmp/x` would name the space's own tmp/, so a space session is
+    shown the absolute path."""
+    try:
+        from core.tools.paths import WORKSPACE_TMP_DIRNAME, workspace, workspace_home
+
+        ws = workspace()
+        if workspace_home() == ws:
+            return f"{WORKSPACE_TMP_DIRNAME}/<dir>"
+        return f"{ws / WORKSPACE_TMP_DIRNAME}/<dir>"
+    except Exception:
+        return "tmp/<dir>"
 
 
 def _check_command_security(command: str) -> str | None:
@@ -779,7 +841,12 @@ def _check_command_security(command: str) -> str | None:
                     "denylisted because it can recursively destroy files. "
                     "Allowed exceptions: paths inside the agent workspace "
                     "(data/workspace), or 'rm -rf <cache>' where <cache> is one "
-                    "of " + ", ".join(sorted(_SAFE_CACHE_DIRS)) + ". For other "
+                    "of " + ", ".join(sorted(_SAFE_CACHE_DIRS)) + ". Throwaway "
+                    "directories belong in the workspace scratch folder tmp/ "
+                    "(TMPDIR points there, so mktemp -d uses it), not /tmp. "
+                    "Remove one with 'rm -rf " + _scratch_rm_example() + "' or "
+                    "the absolute path mktemp printed; a target spelled with $ "
+                    "is refused. For other "
                     "targets, delete files individually (e.g. 'rm file1 file2') "
                     "or use 'find ... -delete' for narrowly-scoped cleanup."
                 )
