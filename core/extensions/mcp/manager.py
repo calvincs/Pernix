@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -52,6 +53,27 @@ _CALL_FAILURE_BREAKER = 3
 _MAX_TOOLS_HARD = 500  # pagination sanity bound
 
 
+# A streamable-HTTP server that restarted, or that expired the session, answers
+# every later request with 404. The SDK passes the server's own JSON-RPC error
+# through when there is one ("Unknown mcp-session-id") and says "Session
+# terminated" when there is not, so the wording is all there is to match on.
+_SESSION_LOST_RE = re.compile(
+    r"session[\s\w-]*(unknown|terminated|expired|not found|invalid|closed)"
+    r"|(unknown|terminated|expired|invalid|no valid)[\s\w-]*session",
+    re.IGNORECASE,
+)
+
+
+def session_lost(e: BaseException) -> bool:
+    """True when the server says it no longer knows this session.
+
+    The held connection can never work again: only a fresh initialize gets a
+    new session id. Left alone, the server stayed "ready" and failed every
+    tool refresh for hours (box, 2026-11-21).
+    """
+    return bool(_SESSION_LOST_RE.search(describe_error(e)))
+
+
 class MCPUnavailable(RuntimeError):
     """The server can't take this call right now (disabled, degraded, closed)."""
 
@@ -81,7 +103,11 @@ def describe_error(e: BaseException) -> str:
     while isinstance(e, BaseExceptionGroup) and e.exceptions and depth < 5:
         e = e.exceptions[0]
         depth += 1
-    msg = str(e).strip()
+    # Transport errors quote the request URL, and some services carry their
+    # key in its query string. This text goes to notices and to the model.
+    from core.logging_setup import redact_url
+
+    msg = redact_url(str(e).strip())
     return msg if msg else type(e).__name__
 
 
@@ -262,7 +288,15 @@ class MCPConnection:
             )
         except asyncio.CancelledError:
             raise
-        except MCPError:
+        except MCPError as e:
+            if session_lost(e):
+                # The server rejected the request unprocessed. Reconnect now
+                # instead of failing two more calls to trip the breaker.
+                self._note_call_failure(transport=True)
+                raise MCPUnavailable(
+                    f"MCP server '{self.cfg.name}' ended the session ({describe_error(e)}); "
+                    "reconnecting in the background, call the tool again"
+                ) from e
             self._note_call_failure(transport=False)
             raise
         except Exception as e:
@@ -495,7 +529,13 @@ class MCPConnection:
             if self._suspend_requested or self._closing or self.status != "ready":
                 logger.debug("MCP server '%s' tool refresh dropped (suspend/close): %s", self.cfg.name, e)
             else:
-                logger.warning("MCP server '%s' tool refresh failed: %s", self.cfg.name, e)
+                logger.warning("MCP server '%s' tool refresh failed: %s", self.cfg.name, describe_error(e))
+                # The refresh is the only request an unused server sees, so it
+                # is also the only place a dead session shows up. Anything
+                # else (a slow or erroring tools/list) keeps the connection.
+                if session_lost(e):
+                    logger.info("MCP server '%s' lost its session; reconnecting", self.cfg.name)
+                    self.request_reconnect()
 
     async def _on_message(self, message) -> None:
         """SDK message handler: watch for tools/list_changed, ignore the rest."""
