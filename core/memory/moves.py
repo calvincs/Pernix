@@ -13,6 +13,9 @@ nobody has written yet. A sweep move is refused when the body:
   * moved within `memory_move_cooldown_days`;
   * would go back to the file its last move came from (any age);
   * moved `memory_move_breaker` times in the last 30 days.
+Rows imported at first deploy (reason "seed") are history read from the files,
+not moves a sweep made under the ledger. They hold the cooldown and reversal
+rules, and they do not count toward the breaker.
 A move into the entry type's home (routing.home_for) is exempt from the
 reversal and breaker rules — the home is a fixed point no sweep moves out of —
 but still waits out the cooldown.
@@ -30,6 +33,7 @@ from dataclasses import dataclass
 
 _WS = re.compile(r"\s+")
 _DAY = 86400
+SEED_REASON = "seed"
 
 
 def body_key(content: str) -> str:
@@ -42,7 +46,7 @@ class MoveHistory:
     last_src: str
     last_dst: str
     last_at: int
-    recent: int  # moves in the last 30 days
+    recent: int  # moves the ledger saw in the last 30 days (imported "seed" rows excluded)
 
 
 def load_history(conn, keys: list[str] | None = None) -> dict[str, MoveHistory]:
@@ -52,20 +56,22 @@ def load_history(conn, keys: list[str] | None = None) -> dict[str, MoveHistory]:
     if keys is not None and not keys:
         return out
     if keys is None:
-        rows = conn.execute("SELECT body_key, src, dst, at FROM memory_moves ORDER BY at ASC, id ASC").fetchall()
+        rows = conn.execute(
+            "SELECT body_key, src, dst, at, reason FROM memory_moves ORDER BY at ASC, id ASC"
+        ).fetchall()
     else:
         rows = []
         uniq = list(dict.fromkeys(keys))
         for i in range(0, len(uniq), 500):
             chunk = uniq[i : i + 500]
             rows += conn.execute(
-                "SELECT body_key, src, dst, at FROM memory_moves WHERE body_key IN (%s) ORDER BY at ASC, id ASC"
-                % ",".join("?" * len(chunk)),
+                "SELECT body_key, src, dst, at, reason FROM memory_moves WHERE body_key IN (%s) "
+                "ORDER BY at ASC, id ASC" % ",".join("?" * len(chunk)),
                 chunk,
             ).fetchall()
-    for key, src, dst, at in rows:
+    for key, src, dst, at, reason in rows:
         h = out.get(key)
-        recent = 1 if at >= now - 30 * _DAY else 0
+        recent = 1 if at >= now - 30 * _DAY and reason != SEED_REASON else 0
         if h is None:
             out[key] = MoveHistory(src, dst, at, recent)
         else:
@@ -113,7 +119,7 @@ def seed_from_markdown(conn, entries_with_meta: list[tuple[str, str, str, int]])
     cooldown and reversal rules to hold from the first cycle after deploy.
     """
     rows = [
-        (body_key(c), src, dst, int(at), "seed")
+        (body_key(c), src, dst, int(at), SEED_REASON)
         for c, src, dst, at in entries_with_meta
         if src and dst and src != dst and at
     ]
@@ -166,7 +172,8 @@ def stats(conn, *, hours: int = 24) -> dict:
         "SELECT COUNT(*) FROM memory_moves WHERE at >= ? AND reason != 'seed'", (now - hours * 3600,)
     ).fetchone()[0]
     at_breaker = conn.execute(
-        "SELECT COUNT(*) FROM (SELECT body_key FROM memory_moves WHERE at >= ? GROUP BY body_key HAVING COUNT(*) >= ?)",
+        "SELECT COUNT(*) FROM (SELECT body_key FROM memory_moves WHERE at >= ? AND reason != 'seed' "
+        "GROUP BY body_key HAVING COUNT(*) >= ?)",
         (now - 30 * _DAY, max(1, int(settings.memory_move_breaker))),
     ).fetchone()[0]
     return {"moves_24h": moved, "bodies_at_breaker": at_breaker}
