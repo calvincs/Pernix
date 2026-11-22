@@ -65,6 +65,16 @@ Drafts are kept per session in your browser and survive a reload or a switch, an
 
 ---
 
+## Pictures in the transcript
+
+When the agent makes or edits a picture it shows it with ordinary markdown, `![a dog on a beach](generated_images/dog.png)`, and the chat renders it as a thumbnail. Several pictures in a row sit side by side. Click a thumbnail (or press Enter on it) for the full-size viewer: the left and right arrow keys step through the pictures of that message, the two icons open the file in a new tab or download it, and Escape closes it.
+
+The path is a workspace path. `generated_images/dog.png`, `/workspace/generated_images/dog.png` and `/app/data/workspace/generated_images/dog.png` all point at the same file. Only PNG, JPEG, GIF, WebP and BMP files inside the workspace become thumbnails; a remote image is never loaded (the page's content security policy refuses it), and a picture whose file has been deleted shows as "image not found".
+
+An image you attach to a message appears under it the same way, so you can check what you sent.
+
+---
+
 ## The sidebar: session types, filtering, and finding things
 
 Not every session in the sidebar is a chat you started. Each carries a colored dot for its type, and the legend at the bottom of the sidebar shows the counts:

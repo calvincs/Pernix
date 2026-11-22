@@ -135,5 +135,110 @@ export function renderMarkdown(mdText) {
         a.setAttribute('target', '_blank');
         a.setAttribute('rel', 'noopener noreferrer');
     });
+    enhanceChatImages(container);
     return container;
+}
+
+// ── Pictures in a message ────────────────────────────────────────────────────
+//
+// A model that has made or edited a picture shows it the way it shows anything
+// else: `![a dog on a beach](generated_images/dog_s7.png)`. Three things stood
+// between that and a usable transcript. The path is relative to the WORKSPACE
+// but an <img> resolves it against the page, so it 404'd unless the model
+// happened to write the `/workspace/` prefix. The picture rendered at its
+// natural size, and a 2048 px render is wider than the column. And there was no
+// way to look at it properly.
+//
+// So a workspace image becomes a thumbnail button, and components/lightbox.js
+// opens it full size. Anything that is not a workspace image is left exactly
+// as the sanitizer returned it — the page CSP (`img-src 'self' data: blob:`)
+// already refuses a remote one, which is what keeps a markdown image from
+// being a way to send data out.
+
+const CHAT_IMAGE_EXT = /\.(?:png|jpe?g|gif|webp|bmp)$/i;
+const ATTACHED_REF = /\[attached:\s*([^\]]+)\]/g;
+
+/**
+ * The URL a workspace image is served from, or null when `src` is not one.
+ *
+ * Accepts the spellings a model actually writes: `dir/x.png`, `./dir/x.png`,
+ * `/workspace/dir/x.png`, `workspace/dir/x.png`, `/app/data/workspace/dir/x.png`.
+ * Refuses anything with a scheme, a protocol-relative URL, a `..` segment,
+ * another absolute path of this app (`/static/…`, `/api/…`), and any file that
+ * is not a raster image — SVG included, because it is a scripting context.
+ */
+export function workspaceImageSrc(src) {
+    if (typeof src !== 'string') return null;
+    let path = src.trim().split(/[?#]/)[0];
+    if (!path || path.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(path)) return null;
+    if (path.startsWith('/')) {
+        const m = /^\/(?:app\/data\/workspace|data\/workspace|workspace)\/(.+)$/.exec(path);
+        if (!m) return null;
+        path = m[1];
+    } else {
+        path = path.replace(/^(?:\.\/)+/, '').replace(/^(?:data\/)?workspace\//, '');
+    }
+    if (!CHAT_IMAGE_EXT.test(path)) return null;
+    const out = [];
+    for (const raw of path.split('/')) {
+        let seg = raw;
+        try { seg = decodeURIComponent(raw); } catch { /* a literal % in a name */ }
+        if (!seg || seg === '.' ) continue;
+        if (seg === '..' || seg.includes('/') || seg.includes('\\')) return null;
+        out.push(encodeURIComponent(seg));
+    }
+    return out.length ? '/workspace/' + out.join('/') : null;
+}
+
+/** The image files a user message carries as `[attached: name]` references,
+ *  as workspace URLs, in order, without repeats. */
+export function attachedImageSrcs(content) {
+    const out = [];
+    if (typeof content !== 'string') return out;
+    for (const m of content.matchAll(ATTACHED_REF)) {
+        const src = workspaceImageSrc(m[1].trim());
+        if (src && !out.includes(src)) out.push(src);
+    }
+    return out;
+}
+
+function _chatImageButton(src, alt) {
+    const img = el('img', { class: 'chat-image', src, alt: alt || '', loading: 'lazy', decoding: 'async' });
+    return el('button', {
+        class: 'chat-image-btn',
+        type: 'button',
+        'data-full': src,
+        title: alt || 'View image',
+        'aria-label': alt ? `View image: ${alt}` : 'View image',
+    }, [img]);
+}
+
+/** Turn every workspace <img> under `container` into a thumbnail button, and
+ *  lay a paragraph that holds nothing but two or more of them out as a row. */
+export function enhanceChatImages(container) {
+    container.querySelectorAll('img').forEach(img => {
+        if (img.closest('a, button')) return;
+        const src = workspaceImageSrc(img.getAttribute('src') || '');
+        if (!src) return;
+        img.replaceWith(_chatImageButton(src, (img.getAttribute('alt') || '').trim()));
+    });
+    container.querySelectorAll('p').forEach(p => {
+        const kids = Array.from(p.childNodes).filter(n =>
+            !(n.nodeType === 3 && !n.textContent.trim()) && n.nodeName !== 'BR');
+        if (kids.length < 2) return;
+        if (!kids.every(n => n.nodeType === 1 && n.classList.contains('chat-image-btn'))) return;
+        p.querySelectorAll('br').forEach(br => br.remove());
+        p.classList.add('chat-image-row');
+    });
+}
+
+/** A row of thumbnails for the images attached to a user message, or null. */
+export function attachedImageRow(content) {
+    const srcs = attachedImageSrcs(content);
+    if (!srcs.length) return null;
+    return el('div', { class: 'chat-image-row chat-attachments' }, srcs.map(src => {
+        let name = src.split('/').pop();
+        try { name = decodeURIComponent(name); } catch { /* keep the encoded name */ }
+        return _chatImageButton(src, name);
+    }));
 }
