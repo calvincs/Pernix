@@ -1252,6 +1252,14 @@ function _replayMessages(messages, { container = null } = {}) {
             // it AND closed the open tool group, so one round of five tools
             // replayed as five one-item groups with an empty bubble between
             // each. The live path folds these away; this is that fold.
+            //
+            // Its reasoning is not folded away: the live stream showed a
+            // thinking block above this round's tools or answer, and a reload
+            // shows the same one in the same place.
+            if (m.role === 'assistant' && m.reasoning) {
+                closeToolGroup();
+                _messagesInner().appendChild(buildThinkingBlock(m.reasoning));
+            }
             if (m.role === 'assistant' && !(m.content || '').trim()) continue;
             if (m.role === 'tool') {
                 const content = m.content || '';
@@ -3142,6 +3150,99 @@ function _finalizeStreamingBubble() {
 }
 
 // ---------------------------------------------------------------------------
+// Thinking blocks
+// ---------------------------------------------------------------------------
+//
+// A reasoning model streams its chain of thought as `stream.reasoning`, apart
+// from the answer (`stream.token`). It gets a block of its own in the
+// transcript, folded by default, sitting above the answer or the tool calls
+// it led to: the answer text never contains it, and a reader who wants it
+// opens it. The persisted assistant row carries the same text in `reasoning`,
+// and _replayMessages renders the same block on reload.
+let _thinkingEl = null;         // the block still receiving deltas, if any
+let _thinkingAttemptEl = null;  // this round's block, live or done — stream.reset removes it
+
+/** The summary line: "Thinking · 12s · 3.4k chars". Short on purpose. */
+function _thinkingLabel(chars, ms, live) {
+    const parts = [live ? 'Thinking\u2026' : 'Thinking'];
+    if (!live && ms >= 1000) parts.push(_humanizeMs(ms));
+    if (chars > 0) parts.push(chars >= 1000 ? `${(chars / 1000).toFixed(1)}k chars` : `${chars} chars`);
+    return parts.join(' \u00b7 ');
+}
+
+function _setThinkingSummary(block, live) {
+    const summary = block.querySelector('summary');
+    if (summary) summary.textContent = _thinkingLabel(block._chars || 0, block._ms || 0, live);
+}
+
+/** A folded <details> holding reasoning as plain text (it is not markdown,
+ *  and a live block is appended to one delta at a time). */
+function buildThinkingBlock(reasoning, { live = false } = {}) {
+    const body = text(reasoning || '');
+    const block = el('details', { class: live ? 'thinking thinking-live' : 'thinking' }, [
+        el('summary', { class: 'thinking-summary' }),
+        el('div', { class: 'thinking-body' }, [body]),
+    ]);
+    block._textNode = body;
+    block._chars = (reasoning || '').length;
+    block._ms = 0;
+    _setThinkingSummary(block, live);
+    return block;
+}
+
+function _appendThinking(delta) {
+    if (!_thinkingEl || !_thinkingEl.isConnected) {
+        closeToolGroup();
+        if (!state.streaming) {
+            state.streaming = true;
+            _showStopButton();
+        }
+        // The model has started; the scout line describes a finished step.
+        _clearScoutStatus();
+        _thinkingEl = buildThinkingBlock('', { live: true });
+        _thinkingEl._startedAt = Date.now();
+        _thinkingAttemptEl = _thinkingEl;
+        const inner = _messagesInner();
+        // The round's answer bubble may already be open (send() opens it
+        // before the first event). While it is empty the thinking goes above
+        // it, which is where it came from.
+        if (_streamingEl && _streamingEl.parentNode === inner && !_collected) {
+            inner.insertBefore(_thinkingEl, _streamingEl);
+        } else {
+            inner.appendChild(_thinkingEl);
+        }
+        scrollToBottom();
+    }
+    _thinkingEl._textNode.appendData(delta);
+    _thinkingEl._chars += delta.length;
+    _setThinkingSummary(_thinkingEl, true);
+}
+
+/** The answer (or a tool call) has started: the live block stops growing and
+ *  says how long it took. It stays this round's block for stream.reset. */
+function _endThinkingRun() {
+    if (!_thinkingEl) return;
+    _thinkingEl._ms = _thinkingEl._startedAt ? Date.now() - _thinkingEl._startedAt : 0;
+    _thinkingEl.classList.remove('thinking-live');
+    _setThinkingSummary(_thinkingEl, false);
+    _thinkingEl = null;
+}
+
+/** A round is over: what was shown stays in the transcript. */
+function _closeThinkingRound() {
+    _endThinkingRun();
+    _thinkingAttemptEl = null;
+}
+
+/** The attempt is being re-streamed (retry / fallback): its thinking goes
+ *  with its partial answer, or the reader sees two chains for one reply. */
+function _discardThinkingAttempt() {
+    if (_thinkingAttemptEl) _thinkingAttemptEl.remove();
+    _thinkingEl = null;
+    _thinkingAttemptEl = null;
+}
+
+// ---------------------------------------------------------------------------
 // Worker activity strip — live view of the fleet during a fan-out, instead
 // of an opaque "awaiting workers" wait. Click a worker to open its session.
 // ---------------------------------------------------------------------------
@@ -4168,6 +4269,7 @@ function handleEvent(event) {
         // The answer has started: whatever was queued is either in this turn
         // or is about to be, and the chip has said its piece.
         _setQueuedChip(null);
+        _endThinkingRun();
         closeToolGroup();
         // Recover streaming state if page was refreshed mid-stream
         if (!_streamingEl) {
@@ -4192,7 +4294,12 @@ function handleEvent(event) {
         _schedulePaint();
     }
 
+    else if (type === 'stream.reasoning' && event.content) {
+        _appendThinking(event.content);
+    }
+
     else if (type === 'stream.done') {
+        _closeThinkingRound();
         closeToolGroup();
         _clearScoutStatus();
         if (_activityTimer) { clearTimeout(_activityTimer); _activityTimer = null; }
@@ -4233,6 +4340,7 @@ function handleEvent(event) {
     }
 
     else if (type === 'stream.error') {
+        _closeThinkingRound();
         _clearScoutStatus();
         // Paint what did arrive before the turn broke. Without this the reader
         // was left with an empty assistant card above the error line even
@@ -4258,6 +4366,7 @@ function handleEvent(event) {
     }
 
     else if (type === 'tool.call') {
+        _closeThinkingRound();
         // Finalize any in-progress assistant message before showing tool results.
         // Each tool round's text gets its own div, matching the DB layout that
         // loadMessages() renders on page refresh.
@@ -4309,6 +4418,7 @@ function handleEvent(event) {
     }
 
     else if (type === 'tool.start') {
+        _closeThinkingRound();
         // Emitted BEFORE execution — without it the user gets no feedback
         // for the entire runtime of a slow bash/search call.
         if (!state.streaming) {
@@ -4769,6 +4879,7 @@ function handleEvent(event) {
         // rendered, or the viewer reads <partial><full answer> while the
         // database stores only the second one.
         _cancelStreamPaint();
+        _discardThinkingAttempt();
         _collected = '';
         if (_streamingEl) {
             const contentEl = _streamingEl.querySelector('.content');
@@ -4805,6 +4916,7 @@ function handleEvent(event) {
     }
 
     else if (type === 'stream.budget_exhausted') {
+        _closeThinkingRound();
         // Same silent-loss shape as stream.error: the turn ends, so whatever
         // streamed before the budget ran out has to be painted first.
         _finalizeStreamingBubble();
@@ -4907,6 +5019,7 @@ function handleEvent(event) {
 
     else if (type === 'turn.complete') {
         // Safety net: ensure button is always reset when turn finishes
+        _closeThinkingRound();
         _clearScoutStatus();
         _dropEmptyStreamingBubble();
         _setStopPending(false);
@@ -4927,6 +5040,7 @@ function handleEvent(event) {
     }
 
     else if (type === 'session.cancelled') {
+        _closeThinkingRound();
         for (const el of _injectedFor(state.sid)) {
             el.classList.remove('queued');
             el.querySelector('.queued-remove')?.remove();
