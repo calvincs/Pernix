@@ -478,6 +478,14 @@ async def update_settings(body: dict):
             continue
         if key == "push_urgency_floor" and value not in ("low", "normal", "high", "urgent"):
             continue
+        # Sent verbatim to the model server, which 400s on a value it does not
+        # know — so a typo is refused here instead of breaking every request.
+        if key in ("reasoning_effort", "reasoning_effort_background"):
+            from core.llm.reasoning import REASONING_EFFORTS
+
+            value = str(value or "").strip().lower()
+            if value and value not in REASONING_EFFORTS:
+                continue
         # Validate voice enums — a typo'd mode would silently kill the mic button
         if key == "voice_mode" and value not in (
             "off",

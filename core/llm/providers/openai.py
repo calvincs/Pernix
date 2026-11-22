@@ -15,6 +15,12 @@ Differences from the OpenRouter adapter it mirrors:
     the model is remembered in _needs_max_completion_tokens and the call
     retried once. This keeps older OpenAI-compatible servers (which reject
     the NEW param) working without configuration.
+  - A self-hosted server (anything that is not api.openai.com) gets the
+    reasoning-model treatment: reasoning is read from its own field and
+    emitted as REASONING events, prior reasoning of the same model is sent
+    back, `reasoning_effort` is sent when configured, and the output request
+    is the caller's budget plus reasoning headroom, bounded by the model's
+    window (core/llm/reasoning.py).
 """
 
 from __future__ import annotations
@@ -58,6 +64,19 @@ _CONTEXT_HINTS: dict[str, int] = {
 
 _VISION_PREFIXES = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "chatgpt-4o")
 
+# api.openai.com keeps the historical per-request output clamp. A self-hosted
+# server is bounded by its own window instead (see _clamp_to_window).
+_OPENAI_COM_OUTPUT_CAP = 16_000
+
+# Room left between the prompt estimate and the model window. The estimate is
+# Pernix's tokenizer (tiktoken cl100k or the char heuristic), not the served
+# model's, so it is padded proportionally as well as by a fixed amount.
+_WINDOW_MARGIN_TOKENS = 512
+_WINDOW_MARGIN_RATIO = 0.05
+# Smallest output request worth sending when the window is nearly full. Below
+# this the request is left to fail as a context overflow, which the agent
+# loop answers by compacting — a 50-token completion would only be cut off.
+_MIN_OUTPUT_TOKENS = 1_024
 # A failed /models fetch is retried after this long instead of being cached
 # as an empty list for the life of the process.
 _MODELS_RETRY_S = 30.0
@@ -151,19 +170,28 @@ class OpenAIProvider:
         stream: bool,
     ) -> dict:
         self_hosted = self.self_hosted
-        # Prior reasoning goes back to a self-hosted server, and only to the
-        # model that produced it; the provenance key never leaves the process,
-        # and api.openai.com defines neither field.
         if self_hosted:
+            # Prior reasoning goes back to the model that produced it; the
+            # provenance key never leaves the process.
             messages = reasoning_mod.wire_messages(messages, model)
+            effort = reasoning_mod.effort_for(model)
+            # max_tokens is shared between reasoning and the answer, so the
+            # caller's number is the answer budget and reasoning gets its own
+            # headroom on top; the window then bounds the sum. The flat 16K
+            # clamp used to apply here too, and with reasoning on it was the
+            # whole budget for both.
+            capped = self._clamp_to_window(messages, tools, model, max_tokens + reasoning_mod.output_headroom(effort))
         else:
             messages = reasoning_mod.strip_reasoning(messages)
+            effort = ""
+            capped = min(max_tokens, _OPENAI_COM_OUTPUT_CAP)
         payload: dict = {
             "model": model,
             "messages": messages,
             "stream": stream,
         }
-        capped = min(max_tokens, 16000)
+        if effort:
+            payload["reasoning_effort"] = effort
         if model in self._needs_max_completion_tokens:
             payload["max_completion_tokens"] = capped
         else:
@@ -184,6 +212,56 @@ class OpenAIProvider:
         if self_hosted:
             payload["stop"] = ["</think>"]
         return payload
+
+    def _known_window(self, model: str) -> int:
+        """The served window for `model` from the cached /models list, or 0.
+
+        Cache only — no network on the request path. The registry populates
+        the cache at startup and again on every refresh.
+        """
+        for entry in self._models_cache or []:
+            if entry.get("id") == model:
+                for field in self._CTX_FIELDS:
+                    try:
+                        ctx = int(entry.get(field) or 0)
+                    except (TypeError, ValueError):
+                        ctx = 0
+                    if ctx > 0:
+                        return ctx
+        return 0
+
+    def _clamp_to_window(self, messages: list[dict], tools: list[dict] | None, model: str, want: int) -> int:
+        """Bound an output request so prompt + max_tokens fits the window.
+
+        vLLM rejects a request whose prompt plus max_tokens exceeds
+        max_model_len. An unknown window leaves `want` alone.
+        """
+        window = self._known_window(model)
+        if window <= 0:
+            return want
+        body = json.dumps(messages, ensure_ascii=False, default=str)
+        tools_body = json.dumps(tools, ensure_ascii=False) if tools else ""
+        # Fast path: two characters a token is far below what any tokenizer
+        # packs into real text, so when even that fits there is nothing to
+        # count. Only a nearly full window pays for the tokenizer.
+        if (len(body) + len(tools_body)) // 2 + want + _WINDOW_MARGIN_TOKENS <= window:
+            return want
+        from core.context.tokens import get_estimator
+
+        estimator = get_estimator()
+        prompt = estimator.count_messages(messages) + (estimator.count(tools_body) if tools_body else 0)
+        room = window - int(prompt * (1 + _WINDOW_MARGIN_RATIO)) - _WINDOW_MARGIN_TOKENS
+        if room >= want:
+            return want
+        logger.info(
+            "Output request for %s cut %d -> %d to fit the %d-token window (prompt ~%d tokens)",
+            model,
+            want,
+            max(room, _MIN_OUTPUT_TOKENS),
+            window,
+            prompt,
+        )
+        return max(room, _MIN_OUTPUT_TOKENS)
 
     @staticmethod
     def _is_max_tokens_param_error(status: int, body: str) -> bool:

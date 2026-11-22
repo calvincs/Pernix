@@ -1,4 +1,4 @@
-"""Pernix — reasoning (thinking) tokens: echo-back to the model that wrote them.
+"""Pernix — reasoning (thinking) tokens: effort, output headroom, echo-back.
 
 A reasoning model served by vLLM (Inkling 2 Mini, 2026-11) returns its
 reasoning in a field of its own (`reasoning`, older servers
@@ -28,11 +28,69 @@ logger = logging.getLogger("pernix.llm.reasoning")
 REASONING_KEY = "reasoning"
 REASONING_MODEL_KEY = "reasoning_model"
 
+# The values Inkling (and vLLM's top-level `reasoning_effort`) accept. ""
+# means "omit the field", which leaves the model's own default in force
+# (Inkling: high).
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+# Output tokens added on top of what a caller asked for, because max_tokens is
+# shared between reasoning and the answer. Taken from the model card's
+# minimum-output guidance (>= 8K for none..medium, >= 16K for high, >= 32K
+# for xhigh/max); measured reasoning use is 0.3-3K typically, ~6K on code at
+# xhigh and ~17K on hard planning at xhigh. Adding it, rather than flooring
+# the request at it, keeps a caller's answer budget intact: a scout call that
+# asks for 1,500 tokens of JSON still gets 1,500 tokens after the model has
+# thought.
+_HEADROOM_BY_EFFORT = {
+    "none": 8_192,
+    "minimal": 8_192,
+    "low": 8_192,
+    "medium": 8_192,
+    "high": 16_384,
+    "xhigh": 32_768,
+    "max": 32_768,
+}
+_DEFAULT_EFFORT = "high"  # what the model runs at when the field is omitted
+
+_warned_invalid: set[str] = set()
+
 
 def is_self_hosted_openai(base_url: str | None) -> bool:
     """True for an OpenAI-compatible server that is not api.openai.com."""
     base = (base_url or "").strip()
     return bool(base) and "api.openai.com" not in base
+
+
+def _valid(value: str, setting: str) -> str:
+    value = (value or "").strip().lower()
+    if not value or value in REASONING_EFFORTS:
+        return value
+    # settings.json is hand-editable; a typo here would 400 every request.
+    if setting not in _warned_invalid:
+        _warned_invalid.add(setting)
+        logger.warning(
+            "Setting %s=%r is not one of %s — omitting reasoning_effort", setting, value, ", ".join(REASONING_EFFORTS)
+        )
+    return ""
+
+
+def effort_for(model: str) -> str:
+    """The reasoning_effort to send for `model`, or "" to omit the field.
+
+    Roles are told apart the way the Ollama think switch does it: the
+    Background setting applies when the model is settings.background_model
+    and not also the Primary. Backup follows Primary.
+    """
+    background = (settings.background_model or "").strip()
+    primary = (settings.llm_model or "").strip()
+    if model and model == background and model != primary:
+        return _valid(getattr(settings, "reasoning_effort_background", ""), "reasoning_effort_background")
+    return _valid(getattr(settings, "reasoning_effort", ""), "reasoning_effort")
+
+
+def output_headroom(effort: str) -> int:
+    """Extra output tokens to request so reasoning cannot eat the answer."""
+    return _HEADROOM_BY_EFFORT.get(effort or _DEFAULT_EFFORT, _HEADROOM_BY_EFFORT[_DEFAULT_EFFORT])
 
 
 def echo_enabled(model: str) -> bool:

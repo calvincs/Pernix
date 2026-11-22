@@ -67,6 +67,23 @@ const RESTART_ROUTER = 'Sizes a provider semaphore when the LLM router is built.
 const RESTART_TOOLS = 'Tool registration happens at startup. The runtime checks honour this '
     + 'immediately, but the agent-facing tools only appear or disappear after a restart.';
 
+// Sent as `reasoning_effort` to a self-hosted OpenAI-compatible server only
+// (vLLM serving a reasoning model). The server enforces the same list.
+const REASONING_EFFORT_OPTIONS = [
+    { value: '', label: 'Model default' },
+    { value: 'none', label: 'none' },
+    { value: 'minimal', label: 'minimal' },
+    { value: 'low', label: 'low' },
+    { value: 'medium', label: 'medium' },
+    { value: 'high', label: 'high' },
+    { value: 'xhigh', label: 'xhigh' },
+    { value: 'max', label: 'max' },
+];
+const REASONING_EFFORT_HINT = 'For a reasoning model on vLLM (or another OpenAI-compatible server that is not '
+    + 'api.openai.com). Model default omits the field — Inkling 2 Mini then runs at high. Higher effort costs '
+    + 'latency and output tokens; Pernix adds matching output headroom so the thinking cannot eat the answer. '
+    + 'Never sent to api.openai.com or OpenRouter.';
+
 const NETWORK_FIELDS = [
     { key: 'network_enabled', label: 'Network Access', type: 'bool', risk: 'security', restart: 'Changes the bind address and TLS setup — applied at startup.' },
     { key: 'ssl_mode', label: 'SSL Certificate', type: 'select', options: ['self_signed', 'custom'], restart: 'Applied at startup.' },
@@ -98,6 +115,8 @@ const SECTIONS = [
             { key: 'openrouter_cache_control', label: 'Anthropic Cache Breakpoints (via OpenRouter)', type: 'bool' },
             { key: 'openai_base_url', label: 'OpenAI URL (or any OpenAI-compatible server)', type: 'text' },
             { key: 'openai_max_concurrent', label: 'OpenAI Max Concurrent', type: 'number', min: 1, restart: RESTART_ROUTER },
+            { key: 'reasoning_effort', label: 'Reasoning Effort — Primary (self-hosted OpenAI-compatible)', type: 'select', options: REASONING_EFFORT_OPTIONS, hint: REASONING_EFFORT_HINT },
+            { key: 'reasoning_effort_background', label: 'Reasoning Effort — Background (self-hosted OpenAI-compatible)', type: 'select', options: REASONING_EFFORT_OPTIONS, hint: REASONING_EFFORT_HINT },
             { key: 'llm_session_timeout', label: 'Session LLM Timeout (seconds)', type: 'number', min: 0, restart: RESTART_ROUTER },
             {
                 key: 'fallback_burn_alert_share',

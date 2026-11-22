@@ -149,6 +149,16 @@ class Settings:
     # Models with no reasoning mode ignore the flag.
     ollama_think: bool = False  # Primary (llm_model) — agent turns
     ollama_think_background: bool = False  # Background (background_model)
+    # Reasoning effort for a self-hosted OpenAI-compatible server (vLLM),
+    # sent as the top-level `reasoning_effort` field: none | minimal | low |
+    # medium | high | xhigh | max. "" omits the field and leaves the model's
+    # own default in force (Inkling 2 Mini: high). Reasoning models cannot
+    # switch reasoning off entirely, so this trades depth for latency and
+    # output tokens; the output request grows with it (core/llm/reasoning.py).
+    # Never sent to api.openai.com or OpenRouter. Roles are told apart as
+    # for ollama_think above.
+    reasoning_effort: str = ""  # Primary (llm_model) — agent turns
+    reasoning_effort_background: str = ""  # Background (background_model)
 
     # --- Context ---
     # Context-auto (2026-08): the harness derives per-model limits from live
