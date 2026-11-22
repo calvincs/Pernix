@@ -125,6 +125,7 @@ def test_migration_keeps_history_unknown_and_resolves_legacy_alert():
         for col in ("requested_model", "routing_reason", "failure_reason"):
             conn.execute(f"ALTER TABLE token_usage DROP COLUMN {col}")
         conn.execute("DROP TABLE model_selection_events")
+        conn.execute("ALTER TABLE messages DROP COLUMN reasoning")  # v46, re-applied below
         conn.execute("UPDATE schema_meta SET value='44' WHERE key='schema_version'")
         _run_migrations(conn)
         row = conn.execute("SELECT * FROM token_usage").fetchone()

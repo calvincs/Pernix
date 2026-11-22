@@ -1655,6 +1655,7 @@ async def run_agent(
         # block behind busy_timeout, all of which froze every session's SSE
         # when run on the event loop.
         meta = kwargs.pop("metadata", None)
+        reasoning_model = kwargs.pop("reasoning_model", None)
         try:
             base = json.loads(meta) if meta else {}
         except Exception:
@@ -1672,6 +1673,13 @@ async def run_agent(
             latency = kwargs.get("latency_ms")
             if latency is not None:
                 base.setdefault("latency_ms", int(latency))
+            # Which model thought it: the compiler echoes stored reasoning
+            # only back to that same model. Usually equal to `model`, but the
+            # final-answer path names its own.
+            if kwargs.get("reasoning"):
+                base.setdefault("reasoning_model", reasoning_model or _stream_current_model)
+        else:
+            kwargs.pop("reasoning", None)
         if _turn_user_msg_id is not None:
             base.setdefault("parent_user_msg_id", _turn_user_msg_id)
         if base:
@@ -2077,6 +2085,9 @@ async def run_agent(
         _stream_current_model = outcome.model
         collected_content = outcome.content
         collected_tool_calls = outcome.tool_calls
+        # Stored with whichever assistant row this round produces, and sent
+        # back to the same model on later rounds (core/llm/reasoning.py).
+        collected_reasoning = outcome.reasoning
         _stream_finish_reason = outcome.finish_reason
         # Per-round assistant latency measured from the attempt that actually
         # answered, not the cumulative time across retries.
@@ -2143,6 +2154,19 @@ async def run_agent(
         # request. A failed/overflowed call leaves delivery pending for recovery.
         await _acknowledge_delivery(session, payload)
 
+        if _stream_finish_reason == "length" and not collected_content and not collected_tool_calls:
+            # Not an empty answer: the output budget ran out while the model
+            # was still thinking. Named here so the turn's log says why it
+            # ended with nothing to show.
+            logger.warning(
+                "Session %s round %d: %s hit max_tokens with no answer and no tool call "
+                "(%d reasoning chars) — reasoning consumed the output budget",
+                session_id,
+                tool_round,
+                _stream_current_model,
+                len(collected_reasoning or ""),
+            )
+
         # --- Length-truncation continuation ---
         if (
             _stream_finish_reason == "length"
@@ -2155,6 +2179,7 @@ async def run_agent(
                 session=session,
                 session_id=session_id,
                 content=collected_content,
+                reasoning=collected_reasoning,
                 tool_round=tool_round,
                 attempt=_length_continuation_count,
                 limit=LENGTH_CONTINUATION_LIMIT,
@@ -2194,7 +2219,7 @@ async def run_agent(
                 and _claims_unbacked_action(collected_content, did_tool_calls)
             ):
                 _action_claim_checked = True
-                await _save_turn_msg("assistant", collected_content)
+                await _save_turn_msg("assistant", collected_content, reasoning=collected_reasoning)
                 await asyncio.to_thread(
                     db.add_message,
                     session_id,
@@ -2224,7 +2249,7 @@ async def run_agent(
             )
             if _bad_refs:
                 _sources_checked = True
-                await _save_turn_msg("assistant", collected_content)
+                await _save_turn_msg("assistant", collected_content, reasoning=collected_reasoning)
                 await asyncio.to_thread(
                     db.add_message,
                     session_id,
@@ -2261,7 +2286,7 @@ async def run_agent(
                 and _announces_future_work(collected_content)
             ):
                 _forced_followups += 1
-                await _save_turn_msg("assistant", collected_content)
+                await _save_turn_msg("assistant", collected_content, reasoning=collected_reasoning)
                 _nudge_text = await asyncio.to_thread(
                     _build_followup_nudge, session_id, collected_content, _forced_followups, _followup_cap
                 )
@@ -2293,7 +2318,9 @@ async def run_agent(
             # cost. The tool-round save below already did this.
             _round_latency_ms = int((time.monotonic() - _round_started_at) * 1000)
             if collected_content:
-                await _save_turn_msg("assistant", collected_content, latency_ms=_round_latency_ms)
+                await _save_turn_msg(
+                    "assistant", collected_content, latency_ms=_round_latency_ms, reasoning=collected_reasoning
+                )
             logger.info(
                 "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=0 content_chars=%d "
                 "compiled_tokens=%d prompt_tokens=%d cache_read=%d (final)",
@@ -2423,6 +2450,7 @@ async def run_agent(
             collected_content or "",
             tool_calls=json.dumps(proposed_tool_calls) if proposed_tool_calls else None,
             latency_ms=_round_latency_ms,
+            reasoning=collected_reasoning,
         )
         # Now that the parent row exists, answer the calls it will never run.
         await gate.flush_rejections()
@@ -3558,6 +3586,7 @@ async def _continue_after_length_truncation(
     attempt: int,
     limit: int,
     save_turn_msg,
+    reasoning: str = "",
 ) -> None:
     """Let the model finish a response the max_tokens cap cut off.
 
@@ -3575,7 +3604,7 @@ async def _continue_after_length_truncation(
     )
     # Save the partial as the assistant message (no partial=1 flag — this
     # isn't an error path, the response IS valid, just unfinished).
-    await save_turn_msg("assistant", content)
+    await save_turn_msg("assistant", content, **({"reasoning": reasoning} if reasoning else {}))
     # The next round sees its own truncated assistant message in the
     # transcript and picks up from where it stopped.
     await asyncio.to_thread(
@@ -3698,7 +3727,10 @@ async def _stream_final_answer(
     )
     usage = final.usage or last_usage
     if final.content:
-        await save_turn_msg("assistant", final.content)
+        # Only named when there is any, so a model without reasoning saves
+        # exactly as before.
+        thought = {"reasoning": final.reasoning, "reasoning_model": final.model} if final.reasoning else {}
+        await save_turn_msg("assistant", final.content, **thought)
     if final.error is not None:
         session.error = str(final.error)
         session.termination_reason = "error"

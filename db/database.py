@@ -1327,6 +1327,19 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
                WHERE category = 'system.fallback_burn' AND resolved_at IS NULL""",
         ],
     ),
+    (
+        46,
+        "store a model's reasoning beside the answer it belongs to",
+        [
+            # A column, not metadata and not content. Content is what every
+            # reader treats as the answer — search, reflect, titles, memory,
+            # exports — and reasoning must reach none of them; metadata is
+            # parsed by a dozen readers that do not need a 60 KB chain of
+            # thought on every row. NULL on every older row and on every row
+            # whose model returned no reasoning. Not FTS-indexed.
+            "ALTER TABLE messages ADD COLUMN reasoning TEXT",
+        ],
+    ),
 ]
 
 

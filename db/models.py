@@ -1801,8 +1801,14 @@ def add_message(
     metadata: str | None = None,
     question_id: str | None = None,
     question_answer: str | None = None,
+    reasoning: str | None = None,
 ) -> int:
-    """Insert a message. Returns message ID."""
+    """Insert a message. Returns message ID.
+
+    `reasoning` is the model's thinking for an assistant row (schema v46). It
+    is stored apart from `content` and never indexed, so search, char_count
+    and every reader of the answer stay answer-only.
+    """
     with connect_sessions() as conn:
         if question_id is not None:
             answered = conn.execute(
@@ -1815,8 +1821,8 @@ def add_message(
         cur = conn.execute(
             """INSERT INTO messages (session_id, role, content, tool_call_id,
                tool_calls, char_count, token_count, partial, idempotency_key,
-               latency_ms, metadata, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               latency_ms, metadata, reasoning, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 role,
@@ -1829,6 +1835,7 @@ def add_message(
                 idempotency_key,
                 latency_ms,
                 metadata,
+                reasoning or None,
                 _now(),
             ),
         )
