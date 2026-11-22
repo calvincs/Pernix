@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — development
+
+No migration, no setting, no API change.
+
+- Pictures show in the chat. A workspace image in an answer
+  (`![a dog](generated_images/dog.png)`) is a thumbnail; several in a row
+  sit side by side. Click one for the full-size viewer: arrow keys step
+  through the pictures of that message, with open-in-tab and download.
+  The path may be workspace-relative or carry the `/workspace/` prefix.
+  Before, a relative path did not load and a large image ran wider than
+  the column.
+- An image you attach to a message shows under it as a thumbnail and opens
+  in the same viewer.
+- Only raster images inside the workspace are treated this way. Remote
+  images stay blocked by the page CSP, and SVG is left as it was.
+
 ## v3.4.2 — 2026-11-04
 
 Patch release on `main` as `v3.4.2`; application and API version: `3.4.2`.

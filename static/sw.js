@@ -61,6 +61,7 @@ const SHELL_ASSETS = [
     '/static/js/components/jobs-indicator.js',
     '/static/js/components/notification-bell.js',
     '/static/js/components/rlm-viewer.js',
+    '/static/js/components/lightbox.js',
     '/static/js/components/message-feedback.js',
     '/static/js/components/modals/settings.js',
     '/static/js/components/modals/timeline.js',

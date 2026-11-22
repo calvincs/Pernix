@@ -4,7 +4,7 @@ import { state, subscribe } from './store.js';
 import { get, post, del, patch, getAuthToken, setAuthToken, humanizeError } from './api.js';
 import { connectSSE, disconnectSSE, setStreamBusyCheck } from './sse.js';
 import { getPermission, requestPermission, connectGlobalNotifications, registerServiceWorker, subscribePush } from './notifications.js';
-import { el, text, clear, initMarked, renderMarkdown } from './render.js';
+import { el, text, clear, initMarked, renderMarkdown, attachedImageRow } from './render.js';
 import { initSigil } from './sigil.js';
 import { icon } from './icons.js';
 import { openSettings } from './components/modals/settings.js';
@@ -22,6 +22,7 @@ import {
 } from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel, EXPLORER_GROUPS } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
+import { initLightbox } from './components/lightbox.js';
 import { initMobile, isCompact, isTouch, closeSidebar, syncDrawerInert } from './mobile.js';
 import { initVoice, stopVoice } from './voice.js';
 import { announce, openOverlay } from './a11y.js';
@@ -132,6 +133,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     registerServiceWorker();
     initMarked();
+    initLightbox();
     initMobile();
     initSidebar(selectSession, deleteSession);
     // A hidden tab may give the session stream back, but never mid-turn: the
@@ -5542,6 +5544,11 @@ function appendMessage(role, content, meta = {}) {
         _announceSystem(content);
     } else if (content) {
         contentEl.appendChild(text(content));
+        // A dropped or pasted picture is shown, not just named: the
+        // `[attached: x.png]` text stays (it is what was sent), and the
+        // picture sits under it as a thumbnail that opens in the viewer.
+        const attached = role === 'user' ? attachedImageRow(content) : null;
+        if (attached) contentEl.appendChild(attached);
     }
     // Nothing is appended for empty content — not even a zero-length text
     // node — so `.content:empty` can style the waiting streaming bubble.
