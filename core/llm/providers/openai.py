@@ -57,6 +57,10 @@ _CONTEXT_HINTS: dict[str, int] = {
 
 _VISION_PREFIXES = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "chatgpt-4o")
 
+# A failed /models fetch is retried after this long instead of being cached
+# as an empty list for the life of the process.
+_MODELS_RETRY_S = 30.0
+
 
 # Both cache-token dialects now live in providers/_shared so the OpenRouter
 # adapter reads the OpenAI shape too; kept as a module-level name because it
@@ -78,6 +82,7 @@ class OpenAIProvider:
         self._client: httpx.AsyncClient | None = None
         self._quick_client: httpx.AsyncClient | None = None
         self._models_cache: list[dict] | None = None
+        self._models_retry_at = 0.0
         # Models that rejected max_tokens and require max_completion_tokens.
         self._needs_max_completion_tokens: set[str] = set()
 
@@ -101,10 +106,15 @@ class OpenAIProvider:
         return self._quick_client
 
     def _headers(self) -> dict:
-        return {
-            "Authorization": f"Bearer {self._config.api_key}",
-            "Content-Type": "application/json",
-        }
+        # No key, no Authorization header. "Bearer " with nothing after it is
+        # an illegal header value to httpx (trailing whitespace), so a keyless
+        # self-hosted server failed every request before it left the process
+        # — /v1/models included, which is how a vLLM model never reached the
+        # registry ("Failed to fetch OpenAI models: Illegal header value").
+        headers = {"Content-Type": "application/json"}
+        if self._config.api_key:
+            headers["Authorization"] = f"Bearer {self._config.api_key}"
+        return headers
 
     def _base_url(self) -> str:
         return self._config.base_url.rstrip("/")
@@ -119,8 +129,8 @@ class OpenAIProvider:
         # typically run keyless, and gating on OPENAI_API_KEY alone made the
         # provider silently vanish when the key was lost (2026-08-19: a
         # container rebuild dropped the app-written /app/.env and every chat
-        # detoured ollama → 404 → paid remote fallback). The Bearer header
-        # is sent either way; keyless self-hosted servers ignore it.
+        # detoured ollama → 404 → paid remote fallback). Without a key no
+        # Authorization header is sent at all (see _headers).
         if self._config.api_key:
             return True
         base = (self._config.base_url or "").strip()
@@ -434,19 +444,27 @@ class OpenAIProvider:
     async def _fetch_models(self) -> list[dict]:
         if self._models_cache is not None:
             return self._models_cache
+        # A failure is remembered briefly, not for the life of the process:
+        # caching [] made one failed fetch at startup (server still loading,
+        # a refused header) permanent, because the registry's lazy
+        # repopulate (budget.ensure_model_known) reuses provider caches.
+        if time.monotonic() < self._models_retry_at:
+            return []
         client = self._get_quick_client()
         try:
             resp = await client.get(f"{self._base_url()}/models", headers=self._headers())
             resp.raise_for_status()
             self._models_cache = resp.json().get("data", [])
         except Exception as e:
-            logger.warning("Failed to fetch OpenAI models: %s", e)
-            self._models_cache = []
+            logger.warning("Failed to fetch OpenAI models from %s: %s", self._base_url(), describe_exception(e))
+            self._models_retry_at = time.monotonic() + _MODELS_RETRY_S
+            return []
         return self._models_cache
 
     def clear_models_cache(self) -> None:
         """Invalidate the cached model list so next fetch hits the API."""
         self._models_cache = None
+        self._models_retry_at = 0.0
 
     # Self-hosted OpenAI-compatible servers advertise the real context window
     # in their /v1/models entries under various names (vLLM: max_model_len;

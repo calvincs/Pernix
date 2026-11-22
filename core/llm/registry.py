@@ -72,6 +72,15 @@ class ModelRegistry:
                     logger.warning("Failed to fetch %s models for registry: %s", provider.name, e)
                     continue
                 whitelist = whitelists.get(provider.name, set())
+                if not remote_models:
+                    # An available provider with nothing to offer is how a
+                    # self-hosted model went missing without a trace: every
+                    # lookup then fell back to the manual budgets.
+                    logger.warning(
+                        "%s is configured but listed no models for the registry%s",
+                        provider.name,
+                        f" (whitelist: {', '.join(sorted(whitelist))})" if whitelist else "",
+                    )
                 for m in remote_models:
                     # A model whitelisted for THIS provider always wins the
                     # slot; otherwise first remote to claim it keeps it.
