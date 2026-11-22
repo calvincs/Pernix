@@ -214,7 +214,7 @@ function _chatImageButton(src, alt) {
 }
 
 /** Turn every workspace <img> under `container` into a thumbnail button, and
- *  lay a paragraph that holds nothing but two or more of them out as a row. */
+ *  lay a run of two or more of them out as a grid of small tiles. */
 export function enhanceChatImages(container) {
     container.querySelectorAll('img').forEach(img => {
         if (img.closest('a, button')) return;
@@ -222,23 +222,47 @@ export function enhanceChatImages(container) {
         if (!src) return;
         img.replaceWith(_chatImageButton(src, (img.getAttribute('alt') || '').trim()));
     });
-    container.querySelectorAll('p').forEach(p => {
+    // A paragraph that holds nothing but pictures. Models put a blank line
+    // between images as often as not, which makes each its own paragraph, so
+    // neighbouring picture-only paragraphs are folded into one grid.
+    const onlyImages = (p) => {
         const kids = Array.from(p.childNodes).filter(n =>
             !(n.nodeType === 3 && !n.textContent.trim()) && n.nodeName !== 'BR');
-        if (kids.length < 2) return;
-        if (!kids.every(n => n.nodeType === 1 && n.classList.contains('chat-image-btn'))) return;
+        return kids.length > 0 && kids.every(n => n.nodeType === 1 && n.classList.contains('chat-image-btn'));
+    };
+    Array.from(container.querySelectorAll('p')).forEach(p => {
+        // parentNode, not isConnected: the container is not in the document yet.
+        if (!p.parentNode || !onlyImages(p)) return;
         p.querySelectorAll('br').forEach(br => br.remove());
-        p.classList.add('chat-image-row');
+        let next = p.nextElementSibling;
+        while (next && next.tagName === 'P' && onlyImages(next)) {
+            next.querySelectorAll('.chat-image-btn').forEach(b => p.appendChild(b));
+            const gone = next;
+            next = next.nextElementSibling;
+            gone.remove();
+        }
+        _markImageGrid(p);
     });
+}
+
+/** Two or more thumbnails become a grid of small square tiles: two across
+ *  for 2 or 4 pictures (2x1, 2x2), three across otherwise (3x1, 3x2, ...). */
+function _markImageGrid(node) {
+    const n = node.querySelectorAll('.chat-image-btn').length;
+    if (n < 2) return;
+    node.classList.add('chat-image-row');
+    if (n === 2 || n === 4) node.classList.add('chat-image-cols-2');
 }
 
 /** A row of thumbnails for the images attached to a user message, or null. */
 export function attachedImageRow(content) {
     const srcs = attachedImageSrcs(content);
     if (!srcs.length) return null;
-    return el('div', { class: 'chat-image-row chat-attachments' }, srcs.map(src => {
+    const row = el('div', { class: 'chat-attachments' }, srcs.map(src => {
         let name = src.split('/').pop();
         try { name = decodeURIComponent(name); } catch { /* keep the encoded name */ }
         return _chatImageButton(src, name);
     }));
+    _markImageGrid(row);
+    return row;
 }

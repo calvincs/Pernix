@@ -67,7 +67,7 @@ Drafts are kept per session in your browser and survive a reload or a switch, an
 
 ## Pictures in the transcript
 
-When the agent makes or edits a picture it shows it with ordinary markdown, `![a dog on a beach](generated_images/dog.png)`, and the chat renders it as a thumbnail. Several pictures in a row sit side by side. Click a thumbnail (or press Enter on it) for the full-size viewer: the left and right arrow keys step through the pictures of that message, the two icons open the file in a new tab or download it, and Escape closes it.
+When the agent makes or edits a picture it shows it with ordinary markdown, `![a dog on a beach](generated_images/dog.png)`, and the chat renders it as a thumbnail. Several pictures in a row form a grid of small square tiles (two across for 2 or 4 pictures, three across otherwise); the tile is cropped, the viewer shows the whole picture. Click a thumbnail (or press Enter on it) for the full-size viewer: the left and right arrow keys step through the pictures of that message, the two icons open the file in a new tab or download it, and Escape closes it.
 
 The path is a workspace path. `generated_images/dog.png`, `/workspace/generated_images/dog.png` and `/app/data/workspace/generated_images/dog.png` all point at the same file. Only PNG, JPEG, GIF, WebP and BMP files inside the workspace become thumbnails; a remote image is never loaded (the page's content security policy refuses it), and a picture whose file has been deleted shows as "image not found".
 

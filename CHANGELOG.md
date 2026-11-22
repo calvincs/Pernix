@@ -5,8 +5,9 @@
 No migration, no setting, no API change.
 
 - Pictures show in the chat. A workspace image in an answer
-  (`![a dog](generated_images/dog.png)`) is a thumbnail; several in a row
-  sit side by side. Click one for the full-size viewer: arrow keys step
+  (`![a dog](generated_images/dog.png)`) is a small thumbnail; several in a
+  row form a grid of square tiles, two across for 2 or 4 pictures and three
+  across otherwise. Click one for the full-size viewer: arrow keys step
   through the pictures of that message, with open-in-tab and download.
   The path may be workspace-relative or carry the `/workspace/` prefix.
   Before, a relative path did not load and a large image ran wider than
