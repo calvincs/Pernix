@@ -304,6 +304,27 @@ _SETTING_BOUNDS = {
 
 _RESTART_FIELDS = {"network_enabled", "ssl_mode", "ssl_cert_path", "ssl_key_path", "cors_origins"}
 
+# Settings a provider copies when the LLM router is built. Changing one
+# rebuilds the router (and refills its model registry). The per-provider
+# max_concurrent caps and llm_session_timeout are built into the router too,
+# but rebuilding for those would drop every running session's scheduler
+# state mid-turn, so the Settings UI marks them restart-required instead.
+_ROUTER_URL_FIELDS = {"llm_base_url", "openrouter_base_url", "openai_base_url"}
+
+# API keys the providers read from the environment when the router is built.
+_ROUTER_KEY_NAMES = {"OPENROUTER_API_KEY", "OPENAI_API_KEY"}
+
+
+async def _refresh_model_registry() -> None:
+    """Refill the model registry from the providers; never raises."""
+    try:
+        from core.llm.client import get_llm_client
+
+        await get_llm_client().refresh_registry()
+    except Exception:
+        pass  # Non-critical — next startup will pick it up
+
+
 # URL settings whose default is empty, so "" is a real value (feature off) rather
 # than a truncated write. Every other *_url with a non-empty current value keeps
 # the empty-string guard.
@@ -513,7 +534,13 @@ async def update_settings(body: dict):
 
     # If a provider URL changed, tear down the cached router so the next LLM
     # request builds a fresh one using the updated URL — no restart required.
-    if {"llm_base_url", "openrouter_base_url"} & set(updated):
+    # Each provider copies its base URL when the router is built, so a URL
+    # missing from this set is a URL the running process never sees:
+    # openai_base_url was, and moving the vLLM server to another port left
+    # every call dialing the old one (ConnectError on each, then the paid
+    # fallback) until the setting was put back.
+    reset = bool(_ROUTER_URL_FIELDS & set(updated))
+    if reset:
         try:
             from core.llm.client import reset_router
 
@@ -523,15 +550,11 @@ async def update_settings(body: dict):
 
     # If the curated model lists or the Ollama window cap changed, refresh
     # the model registry so GET /api/models and per-session budget
-    # derivation reflect it immediately.
-    if {"openrouter_models", "openai_models", "ollama_num_ctx_cap"} & set(updated):
-        try:
-            from core.llm.client import get_llm_client
-
-            client = get_llm_client()
-            await client.refresh_registry()
-        except Exception:
-            pass  # Non-critical — next startup will pick it up
+    # derivation reflect it immediately. A reset router needs it as much: its
+    # registry starts empty, and an empty registry routes a bare model name
+    # to Ollama and budgets every model off the manual context_budget.
+    if reset or {"openrouter_models", "openai_models", "ollama_num_ctx_cap"} & set(updated):
+        await _refresh_model_registry()
 
     # mcp_enabled is hot both ways: on → start the manager (connects the
     # configured servers, registers tools); off → stop it (stdio children
@@ -630,6 +653,17 @@ async def set_api_key(body: dict):
         del os.environ[key_name]
     # Round-trip .env on disk so the key isn't lost on restart. Failures are
     # surfaced — the caller should know if persistence didn't take.
+    # The providers read their key once, when the router is built: without a
+    # rebuild a new OPENAI_API_KEY changed nothing until a restart, and a
+    # cleared one kept being sent.
+    if key_name in _ROUTER_KEY_NAMES:
+        try:
+            from core.llm.client import reset_router
+
+            await reset_router()
+        except Exception:
+            pass  # Non-critical — restart will always recover
+        await _refresh_model_registry()
     try:
         write_env_var(key_name, value or None)
     except OSError as e:

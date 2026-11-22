@@ -913,3 +913,67 @@ async def test_run_job_now_falls_back_to_disk_then_404s(monkeypatch, tmp_path):
     assert "cron_trigger" not in seen["meta"]
     assert "paused" not in seen["meta"]
     assert seen["meta"]["name"] == "ondisk"
+
+
+def _record_router_rebuilds(monkeypatch) -> list[str]:
+    calls: list[str] = []
+
+    async def fake_reset():
+        calls.append("reset")
+
+    class _Client:
+        async def refresh_registry(self):
+            calls.append("refresh")
+
+    monkeypatch.setattr("core.llm.client.reset_router", fake_reset)
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: _Client())
+    return calls
+
+
+async def test_openai_base_url_change_rebuilds_the_router_and_refills_the_registry(monkeypatch):
+    """Regression (2026-11-21): only llm_base_url and openrouter_base_url reset
+    the cached router, so moving the vLLM server from :8000 to :8001 left the
+    OpenAI provider dialing the old port — a ConnectError on every call and a
+    silent failover to the paid fallback until the URL was put back. The
+    rebuilt router's registry starts empty, so it is refilled too: an empty
+    registry routes a bare model name to Ollama."""
+    from api.routers import health
+    from config import settings
+
+    calls = _record_router_rebuilds(monkeypatch)
+    monkeypatch.setattr(settings, "openai_base_url", "http://llm.example.internal:8000/v1")
+    app = _make_app(health.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/settings", json={"openai_base_url": "http://llm.example.internal:8001/v1"})
+        assert "openai_base_url" in resp.json()["updated"]
+        assert calls == ["reset", "refresh"]
+
+        calls.clear()
+        await client.post("/api/settings", json={"openai_models": ["inkling-2-mini"]})
+        assert calls == ["refresh"]  # a curated list refreshes without a rebuild
+
+        calls.clear()
+        await client.post("/api/settings", json={"llm_model": "inkling-2-mini"})
+        assert calls == []
+
+
+async def test_a_provider_api_key_change_rebuilds_the_router(monkeypatch):
+    """The providers read OPENAI_API_KEY / OPENROUTER_API_KEY when the router is
+    built; a key set in the UI did nothing until a restart."""
+    from api.routers import health
+
+    calls = _record_router_rebuilds(monkeypatch)
+    monkeypatch.setattr("config.write_env_var", lambda *a, **kw: None)
+    # setenv records the prior state, so the endpoint's os.environ writes are
+    # undone after the test.
+    monkeypatch.setenv("OPENAI_API_KEY", "before")
+    monkeypatch.setenv("TAVILY_API_KEY", "before")
+    app = _make_app(health.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/settings/apikey", json={"key": "OPENAI_API_KEY", "value": "after"})
+        assert resp.json()["is_set"] is True
+        assert calls == ["reset", "refresh"]
+
+        calls.clear()
+        await client.post("/api/settings/apikey", json={"key": "TAVILY_API_KEY", "value": "x"})
+        assert calls == []  # not a router key
