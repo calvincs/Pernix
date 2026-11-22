@@ -146,6 +146,7 @@ class OpenRouterProvider:
             model=model,
             provider=self.name,
             finish_reason=finish,
+            reasoning=msg.get("reasoning") or msg.get("reasoning_content") or "",
         )
 
     # ------------------------------------------------------------------
@@ -306,9 +307,11 @@ class OpenRouterProvider:
                             emitted_output = True
                             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
 
+                    # Surfaced for display and storage only; it is never
+                    # answer content and never failover-fence output.
                     reasoning = delta.get("reasoning") or delta.get("reasoning_content")
                     if reasoning:
-                        logger.debug("OpenRouter reasoning delta (%d chars) model=%s", len(reasoning), model)
+                        yield StreamEvent(type=StreamEventType.REASONING, reasoning=reasoning)
 
                     content = delta.get("content")
                     if content:

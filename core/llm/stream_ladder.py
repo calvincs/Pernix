@@ -136,6 +136,9 @@ class StreamOutcome:
 
     content: str = ""
     tool_calls: list[dict] = field(default_factory=list)
+    # The model's reasoning for this attempt, kept apart from `content`: it is
+    # stored beside the answer and shown folded, never read as the answer.
+    reasoning: str = ""
     error: str | None = None
     finish_reason: str | None = None
     # The model that served the last attempt — the fallback, if the ladder
@@ -254,6 +257,7 @@ async def stream_with_failover(
 
     while True:
         content = ""
+        reasoning = ""
         tool_calls: list[dict] = []
         err: str | None = None
         finish_reason: str | None = None
@@ -282,6 +286,12 @@ async def stream_with_failover(
                 if event.type == StreamEventType.TOKEN and event.content:
                     content += event.content
                     emit({"type": "stream.token", "content": event.content})
+
+                elif event.type == StreamEventType.REASONING and event.reasoning:
+                    # Its own event type, so no client can paint thinking into
+                    # the answer. stream.reset clears it with the partial.
+                    reasoning += event.reasoning
+                    emit({"type": "stream.reasoning", "content": event.reasoning})
 
                 elif event.type == StreamEventType.TOOL_CALL and event.tool_calls:
                     _merge_tool_call_deltas(tool_calls, event.tool_calls)
@@ -347,6 +357,7 @@ async def stream_with_failover(
         outcome = StreamOutcome(
             content=content,
             tool_calls=tool_calls,
+            reasoning=reasoning,
             error=err,
             finish_reason=finish_reason,
             model=current_model,

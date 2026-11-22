@@ -8,6 +8,10 @@ from enum import Enum
 
 class StreamEventType(Enum):
     TOKEN = "token"
+    # A slice of the model's reasoning, carried apart from the answer: vLLM
+    # (and OpenRouter, and Ollama with think=true) return it in its own field,
+    # and nothing that reads TOKEN content may ever see it.
+    REASONING = "reasoning"
     TOOL_CALL = "tool_call"
     USAGE = "usage"
     DONE = "done"
@@ -45,6 +49,9 @@ class ChatResponse:
     model: str
     provider: str
     finish_reason: str  # stop | tool_calls | length
+    # The model's reasoning for this response, when the provider returned
+    # it separately. Never part of `content`.
+    reasoning: str = ""
 
 
 @dataclass
@@ -57,6 +64,7 @@ class StreamEvent:
     usage: TokenUsage | None = None
     error: str | None = None
     finish_reason: str | None = None  # populated on DONE: stop | tool_calls | length | None
+    reasoning: str | None = None  # populated on REASONING
 
 
 @dataclass

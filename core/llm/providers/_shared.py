@@ -27,12 +27,21 @@ def parse_usage(usage_data: dict | None) -> TokenUsage:
     """
     usage_data = usage_data or {}
     details = usage_data.get("prompt_tokens_details") or {}
+    # Reasoning models report how much of completion_tokens was thinking
+    # (vLLM and OpenAI: completion_tokens_details.reasoning_tokens). Kept in
+    # `extra` so logs can tell a budget spent thinking from one spent
+    # answering; nothing bills on it.
+    extra = {}
+    reasoning_tokens = (usage_data.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    if isinstance(reasoning_tokens, int) and reasoning_tokens > 0:
+        extra["reasoning_tokens"] = reasoning_tokens
     return TokenUsage(
         prompt_tokens=usage_data.get("prompt_tokens", 0),
         completion_tokens=usage_data.get("completion_tokens", 0),
         total_tokens=usage_data.get("total_tokens", 0),
         cache_read_tokens=details.get("cached_tokens", 0) or usage_data.get("cache_read_input_tokens", 0) or 0,
         cache_write_tokens=usage_data.get("cache_creation_input_tokens", 0) or 0,
+        extra=extra,
     )
 
 

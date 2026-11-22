@@ -237,6 +237,7 @@ class OllamaProvider:
             model=model,
             provider=self.name,
             finish_reason="tool_calls" if tool_calls else "stop",
+            reasoning=msg.get("thinking") or "",
         )
 
     # ------------------------------------------------------------------
@@ -344,14 +345,14 @@ class OllamaProvider:
                         _tc_seq += len(raw_tcs)
                         yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=tool_calls)
 
-                    # Reasoning deltas (think=true). Not surfaced as tokens —
-                    # the reasoning chain is not the answer and the OpenRouter
-                    # adapter drops it the same way — but data keeps flowing
-                    # on the socket, so the read timeout stays quiet while the
-                    # model thinks.
+                    # Reasoning deltas (think=true). Never tokens — the
+                    # reasoning chain is not the answer — but surfaced as
+                    # REASONING so the transcript can show it folded away.
+                    # Data keeps flowing on the socket either way, so the read
+                    # timeout stays quiet while the model thinks.
                     thinking = msg.get("thinking")
                     if thinking:
-                        logger.debug("Ollama reasoning delta (%d chars) model=%s", len(thinking), model)
+                        yield StreamEvent(type=StreamEventType.REASONING, reasoning=thinking)
 
                     # Content
                     content = msg.get("content", "")

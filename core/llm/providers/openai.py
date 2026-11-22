@@ -230,6 +230,7 @@ class OpenAIProvider:
         msg = data["choices"][0].get("message", {})
         content = msg.get("content") or ""
         finish = data["choices"][0].get("finish_reason", "stop")
+        reasoning = msg.get("reasoning") or msg.get("reasoning_content") or ""
 
         tool_calls = None
         raw_tcs = msg.get("tool_calls")
@@ -244,13 +245,18 @@ class OpenAIProvider:
             ]
             finish = "tool_calls"
 
+        usage = parse_usage(data.get("usage"))
+        if finish == "length" and not content and not tool_calls:
+            _warn_reasoning_exhausted(model, len(reasoning), usage)
+
         return ChatResponse(
             content=content,
             tool_calls=tool_calls,
-            usage=parse_usage(data.get("usage")),
+            usage=usage,
             model=model,
             provider=self.name,
             finish_reason=finish,
+            reasoning=reasoning,
         )
 
     # ------------------------------------------------------------------
@@ -278,6 +284,11 @@ class OpenAIProvider:
         emitted_output = False
         failing_over = False
         last_finish_reason: str | None = None
+        # For the reasoning-ate-the-budget warning at the end of the stream.
+        reasoning_chars = 0
+        content_seen = False
+        tools_seen = False
+        last_usage = None
         # Index-based accumulator for streaming tool_call deltas (same
         # contract as the OpenRouter adapter: flush on finish_reason,
         # [DONE], and in finally as a safety net).
@@ -334,7 +345,10 @@ class OpenAIProvider:
                     if raw == "[DONE]":
                         flushed = _flush_tool_calls()
                         if flushed:
+                            tools_seen = True
                             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
+                        if last_finish_reason == "length" and not content_seen and not tools_seen:
+                            _warn_reasoning_exhausted(model, reasoning_chars, last_usage)
                         done_sent = True
                         yield StreamEvent(type=StreamEventType.DONE, finish_reason=last_finish_reason)
                         return
@@ -373,7 +387,8 @@ class OpenAIProvider:
 
                     usage_data = chunk.get("usage")
                     if usage_data:
-                        yield StreamEvent(type=StreamEventType.USAGE, usage=parse_usage(usage_data))
+                        last_usage = parse_usage(usage_data)
+                        yield StreamEvent(type=StreamEventType.USAGE, usage=last_usage)
 
                     choices = chunk.get("choices", [])
                     if not choices:
@@ -402,11 +417,25 @@ class OpenAIProvider:
                         flushed = _flush_tool_calls()
                         if flushed:
                             emitted_output = True
+                            tools_seen = True
                             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
+
+                    # vLLM streams reasoning as delta.reasoning (older builds:
+                    # reasoning_content), and one delta can carry a reasoning
+                    # tail AND the first answer token, so both are read from
+                    # the same chunk. Reasoning is not output for the failover
+                    # fence: a stream that dies while the model is still
+                    # thinking has given the caller no answer yet, and the
+                    # ladder's reset clears the thinking it showed.
+                    thought = delta.get("reasoning") or delta.get("reasoning_content")
+                    if thought:
+                        reasoning_chars += len(thought)
+                        yield StreamEvent(type=StreamEventType.REASONING, reasoning=thought)
 
                     content = delta.get("content")
                     if content:
                         emitted_output = True
+                        content_seen = True
                         yield StreamEvent(type=StreamEventType.TOKEN, content=content)
         except GeneratorExit:
             return
@@ -430,8 +459,11 @@ class OpenAIProvider:
                 try:
                     flushed = _flush_tool_calls()
                     if flushed:
+                        tools_seen = True
                         yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
                     if not done_sent:
+                        if last_finish_reason == "length" and not content_seen and not tools_seen:
+                            _warn_reasoning_exhausted(model, reasoning_chars, last_usage)
                         done_sent = True
                         yield StreamEvent(type=StreamEventType.DONE, finish_reason=last_finish_reason)
                 except GeneratorExit:
@@ -553,3 +585,21 @@ class OpenAIProvider:
             await self._quick_client.aclose()
             self._quick_client = None
         self._models_cache = None
+
+
+def _warn_reasoning_exhausted(model: str, reasoning_chars: int, usage) -> None:
+    """Say so when the output budget ran out before the answer started.
+
+    finish_reason=length with no content and no tool call is not an empty
+    answer: the model spent max_tokens thinking. Left silent it reads as a
+    model that replied with nothing.
+    """
+    details = getattr(usage, "extra", None) or {}
+    logger.warning(
+        "%s hit max_tokens before answering: finish_reason=length, no content, %d reasoning chars "
+        "(completion_tokens=%s, reasoning_tokens=%s) — reasoning consumed the output budget",
+        model,
+        reasoning_chars,
+        getattr(usage, "completion_tokens", "?"),
+        details.get("reasoning_tokens", "?"),
+    )

@@ -42,7 +42,7 @@ let _recoveryAbort = null;
 // of shipping. Add the name here when that test tells you to.
 const EVENT_TYPES = [
     // Stream lifecycle
-    'stream.token', 'stream.done', 'stream.error',
+    'stream.token', 'stream.reasoning', 'stream.done', 'stream.error',
     // Replay control frame: the server's answer to a cursor, carrying whether
     // the replay it just performed was complete (see api/streaming.py).
     'stream.resume',
