@@ -28,6 +28,7 @@ from typing import AsyncGenerator
 import httpx
 
 from config import settings
+from core.llm import reasoning as reasoning_mod
 from core.llm.errors import FailoverError, FailoverReason, classify_http_error
 from core.llm.providers._shared import describe_exception, http_status_failover, parse_usage, stream_failover
 from core.llm.types import (
@@ -116,6 +117,10 @@ class OpenAIProvider:
             headers["Authorization"] = f"Bearer {self._config.api_key}"
         return headers
 
+    @property
+    def self_hosted(self) -> bool:
+        return reasoning_mod.is_self_hosted_openai(self._config.base_url)
+
     def _base_url(self) -> str:
         return self._config.base_url.rstrip("/")
 
@@ -145,6 +150,14 @@ class OpenAIProvider:
         temperature: float | None,
         stream: bool,
     ) -> dict:
+        self_hosted = self.self_hosted
+        # Prior reasoning goes back to a self-hosted server, and only to the
+        # model that produced it; the provenance key never leaves the process,
+        # and api.openai.com defines neither field.
+        if self_hosted:
+            messages = reasoning_mod.wire_messages(messages, model)
+        else:
+            messages = reasoning_mod.strip_reasoning(messages)
         payload: dict = {
             "model": model,
             "messages": messages,
@@ -168,7 +181,7 @@ class OpenAIProvider:
         # Self-hosted Qwen with thinking off sometimes ends a finished answer
         # with a stray `</think>` where its stop token belongs, then writes the
         # answer again. Everything past that tag is noise, so end there.
-        if "api.openai.com" not in (self._config.base_url or ""):
+        if self_hosted:
             payload["stop"] = ["</think>"]
         return payload
 

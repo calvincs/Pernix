@@ -13,6 +13,7 @@ import httpx
 from config import settings
 from core.llm.errors import FailoverError, FailoverReason, classify_http_error
 from core.llm.providers._shared import describe_exception, http_status_failover, parse_usage, stream_failover
+from core.llm.reasoning import strip_reasoning
 from core.llm.types import (
     ChatResponse,
     HealthStatus,
@@ -94,7 +95,9 @@ class OpenRouterProvider:
         model = self._model(model)
         payload: dict = {
             "model": model,
-            "messages": messages,
+            # OpenRouter defines no request field for prior reasoning, and a
+            # fallback hop to it must not carry the primary's.
+            "messages": strip_reasoning(messages),
             "max_tokens": min(max_tokens, self._output_cap(model)),
             "stream": False,
         }
@@ -164,7 +167,7 @@ class OpenRouterProvider:
         model = self._model(model)
         payload: dict = {
             "model": model,
-            "messages": messages,
+            "messages": strip_reasoning(messages),
             "max_tokens": min(max_tokens, self._output_cap(model)),
             "stream": True,
         }

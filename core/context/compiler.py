@@ -17,6 +17,7 @@ from pathlib import Path
 from config import settings
 from core.context.compaction import apply_view_pruning, exclude_orphans
 from core.context.tokens import get_estimator
+from core.llm import reasoning as reasoning_mod
 from core.llm.types import extract_tool_call_fields
 from db import models as db
 
@@ -1003,19 +1004,32 @@ _text_token_cache: dict[int, int] = {}
 _TEXT_TOKEN_CACHE_MAX = 64
 
 
+def _count_with_reasoning(msg: dict, estimator) -> int:
+    # Echoed reasoning is prompt like any other: a reasoning model's turn can
+    # carry more thinking than answer, and a budget that skipped it would
+    # overflow the window it thought it had balanced. Only entries that will
+    # actually be sent carry the key (see compile_context).
+    reasoning = msg.get(reasoning_mod.REASONING_KEY)
+    extra = estimator.count(reasoning) if isinstance(reasoning, str) and reasoning else 0
+    return estimator.count_message(msg) + extra
+
+
 def _count_message_cached(msg: dict, estimator) -> int:
     db_id = msg.get("_db_id")
     content = msg.get("content")
     if db_id is None or not isinstance(content, str):
-        return estimator.count_message(msg)
+        return _count_with_reasoning(msg, estimator)
     # Include content/tool-call hashes in the key: message ids restart when
     # the DB is rebuilt (and across test databases), so id alone could alias
     # two different rows. str hashing is ~100x cheaper than a tiktoken encode.
+    # The reasoning hash is there because trim sheds it from a row that is
+    # otherwise unchanged.
     tc = msg.get("tool_calls")
-    key = (db_id, hash(content), hash(str(tc)) if tc else 0)
+    reasoning = msg.get(reasoning_mod.REASONING_KEY)
+    key = (db_id, hash(content), hash(str(tc)) if tc else 0, hash(reasoning) if reasoning else 0)
     cached = _msg_token_cache.get(key)
     if cached is None:
-        cached = estimator.count_message(msg)
+        cached = _count_with_reasoning(msg, estimator)
         if len(_msg_token_cache) >= _MSG_TOKEN_CACHE_MAX:
             _msg_token_cache.clear()
         _msg_token_cache[key] = cached
@@ -1386,6 +1400,12 @@ def compile_context(
 
     attach_budget = int(settings.max_inline_attach_bytes or MAX_INLINE_ATTACH_BYTES)
 
+    # Stored reasoning rides along only where the provider will send it back
+    # (a self-hosted OpenAI-compatible server) and only for the model that
+    # produced it. Decided once here so that what is attached is exactly what
+    # is counted against the budget.
+    echo_reasoning = reasoning_mod.echo_enabled(model_name)
+
     # Convert DB rows to chat format
     for idx, msg in enumerate(history):
         raw_content = msg["content"] or ""
@@ -1443,6 +1463,13 @@ def compile_context(
                     tool_names = None
             except (json.JSONDecodeError, TypeError):
                 pass
+
+        if echo_reasoning and msg["role"] == "assistant" and msg.get("reasoning"):
+            meta = _delivery_meta(msg)
+            source = meta.get("reasoning_model") or meta.get("model")
+            if source and source == model_name:
+                entry[reasoning_mod.REASONING_KEY] = msg["reasoning"]
+                entry[reasoning_mod.REASONING_MODEL_KEY] = source
 
         # Internal metadata used by trim-notice generation and pin protection.
         # These keys are stripped before LLM dispatch (see _strip_private_fields).
@@ -1575,6 +1602,7 @@ def _trim_history(
     the agent can recover via session_read(msg_id) / search_sessions.
 
     Phase A: Prune old tool results (view transform — already done by caller)
+    Phase R: Shed echoed reasoning oldest-first (messages stay, thinking goes)
     Phase B: Drop assistant+tool groups oldest-first (skip pinned, prefer middle)
     Phase C: Last resort — drop pinned oldest-first
     """
@@ -1583,6 +1611,25 @@ def _trim_history(
 
     def _total():
         return sum(_count_message_cached(m, estimator) for m in messages[1:])
+
+    # Phase R: an old turn's reasoning is the cheapest thing in the window to
+    # lose — the answer and the tool calls it led to stay, and the model can
+    # think again. Shed it before any message is dropped, oldest first.
+    if _total() > budget:
+        shed = 0
+        for i in range(1, len(messages)):
+            m = messages[i]
+            if m.get("role") == "assistant" and m.get(reasoning_mod.REASONING_KEY):
+                if _total() <= budget:
+                    break
+                messages[i] = {
+                    k: v
+                    for k, v in m.items()
+                    if k not in (reasoning_mod.REASONING_KEY, reasoning_mod.REASONING_MODEL_KEY)
+                }
+                shed += 1
+        if shed:
+            logger.info("Context trim shed the reasoning of %d assistant message(s) before dropping any", shed)
 
     def _snapshot(msg: dict, preview_limit: int = 80) -> dict:
         content = msg.get("content") or ""
