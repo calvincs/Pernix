@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased — development
+
+Schema v46 (one column, forward-only). New settings: `reasoning_effort`,
+`reasoning_effort_background`. New SSE event: `stream.reasoning`.
+
+- Reasoning models on a self-hosted OpenAI-compatible server (Inkling 2 Mini
+  on vLLM). The reasoning is read apart from the answer (`reasoning`, or
+  `reasoning_content` on older servers), stored with the assistant message
+  in the new `messages.reasoning` column, and sent back to the same model on
+  later requests, tool rounds included, as the model expects. It is never
+  sent to a different model, to api.openai.com or to OpenRouter. Search,
+  reflect, titles, memory, summaries and exports still read the answer
+  only. Context trim drops old reasoning before it drops any message.
+- The chat shows the thinking as a folded "Thinking" block above the answer
+  or the tool calls it led to: live while it streams, and again on reload.
+  OpenRouter and Ollama (`ollama_think`) reasoning shows the same way.
+- No 16K output clamp on self-hosted servers. Each request asks for
+  `max_tokens` plus reasoning headroom for the effort (8K up to `medium`,
+  16K for `high` or the default, 32K for `xhigh`/`max`). The total is cut
+  to fit the model window from `/v1/models` (`max_model_len`), so prompt
+  plus output never exceeds it. A small one-shot budget (scout, titles,
+  JSON helpers) is no longer eaten by reasoning. api.openai.com keeps the
+  16K clamp.
+- `reasoning_effort` / `reasoning_effort_background` (Settings → LLM
+  Providers) send `reasoning_effort` to a self-hosted server. Empty (the
+  default) omits it and the model's own default applies.
+- A response cut off while the model was still thinking
+  (`finish_reason=length`, no content) is logged as a warning that names the
+  cause, instead of passing as an empty answer.
+- A keyless self-hosted server's models reach the model registry with
+  their real window. The adapter sent `Authorization: Bearer ` with no key,
+  which httpx rejects, and cached the failed `/models` fetch as an empty
+  list until restart. Budgets then fell back to `context_budget` and
+  `max_tokens`. No header is sent without a key now, and a failed fetch is
+  retried after 30 s.
+- Changing `openai_base_url` in Settings takes effect at once. Only the
+  Ollama and OpenRouter URLs used to rebuild the LLM router, so the OpenAI
+  provider kept the old URL: ConnectError on every call, then the paid
+  fallback. Setting `OPENAI_API_KEY` or `OPENROUTER_API_KEY` in Settings
+  rebuilds it too. Every rebuild now re-reads the model list. Before, a
+  rebuilt router's registry stayed empty until restart, and bare model
+  names went to Ollama.
+
 ## v3.4.2 — 2026-11-04
 
 Patch release on `main` as `v3.4.2`; application and API version: `3.4.2`.

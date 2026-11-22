@@ -477,6 +477,7 @@ Every event includes `seq` (sequence number), `session_id`, and `timestamp`. The
 | `scout.start` | Scout (planning) phase began. |
 | `scout.done` | Scout completed. Fields include `approach` (the plan summary), `tools`, `skills`, `memory`, `model`, `from_cache`, `latency_ms`, `scout_model` (the model scout actually ran on). |
 | `stream.token` | One streamed text token from the agent. Fields: `content`. |
+| `stream.reasoning` | A slice of the model's reasoning, separate from the answer. The web UI shows it folded. The persisted assistant row carries the whole text in `reasoning`. Fields: `content`. |
 | `stream.done` | The model finished generating for this round. Fields: `finish_reason`. |
 | `stream.fallback` | Retries were exhausted and the turn switched to the Backup model. Fields: `model`. |
 | `turn.complete` | The full agent turn is finished (fires after post-hooks). |

@@ -86,17 +86,20 @@ Setup:
 2. List the models you want in `openai_models` (Settings) or `OPENAI_MODELS` in `.env` (comma-separated, e.g. `gpt-4o,gpt-4o-mini`). This is what routes bare names to the provider.
 3. In Settings, set `llm_model` (or any role) to one of those names.
 
-For a self-hosted OpenAI-compatible server, additionally point `openai_base_url` at it (e.g. `http://localhost:8000/v1` for vLLM, `http://localhost:1234/v1` for LM Studio) and whitelist the model names it serves. The server still needs *some* `OPENAI_API_KEY` value set for the provider to activate — most local servers accept any string.
+For a self-hosted OpenAI-compatible server, additionally point `openai_base_url` at it (e.g. `http://localhost:8000/v1` for vLLM, `http://localhost:1234/v1` for LM Studio) and whitelist the model names it serves. No `OPENAI_API_KEY` is needed for a keyless server: a base URL other than api.openai.com activates the provider, and no `Authorization` header is sent without a key. The model and its window (`max_model_len`) are read from the server's `/v1/models`. Changing `openai_base_url` in Settings takes effect at once (the router is rebuilt and the model list re-read).
 
 | Setting | Default | Notes |
 |---|---|---|
 | `openai_base_url` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint |
 | `openai_max_concurrent` | `4` | Max simultaneous requests to this provider |
 | `openai_models` | empty list | Whitelist; routes bare names here and curates the UI picker |
+| `reasoning_effort` / `reasoning_effort_background` | empty | Self-hosted servers only: `reasoning_effort` per role; empty = model default |
+
+**Reasoning models on vLLM** (for example Inkling 2 Mini). The thinking is shown folded in the chat, stored with the message, and sent back to the same model on the next request, as the model expects. Each request asks for `max_tokens` plus reasoning headroom for the chosen effort, cut to fit the model window. See `reasoning_effort` in [configuration.md](../configuration.md).
 
 Resolution and fallback work like OpenRouter's: a whitelisted bare name routes here (on a name collision with a local model, Ollama wins unless the name is whitelisted), and rate-limit/overload/timeout failures fall back to your local `fallback_model` with the same message sanitization. Cached prompt tokens reported by the API (`prompt_tokens_details.cached_tokens`) surface as cache reads in the cost tooltip.
 
-Without `OPENAI_API_KEY`, this provider is invisible to Pernix.
+Without `OPENAI_API_KEY` and with the default api.openai.com URL, this provider is invisible to Pernix.
 
 ---
 
