@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import logging
 import os
 import shutil
+import time
 import unicodedata
 from pathlib import Path
 
@@ -12,6 +16,8 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from config import settings
 from core.pools import run_background
+
+logger = logging.getLogger("pernix.api.workspace")
 
 router = APIRouter(tags=["workspace"])
 
@@ -209,6 +215,123 @@ async def serve_workspace_file(path: str):
             "Access-Control-Expose-Headers": "X-File-Mtime",
         },
     )
+
+
+# --- Video preview ------------------------------------------------------------
+# A phone records HEVC (H.265). Chrome and Firefox on Linux have no decoder for
+# it, so the Explorer player gave sound and a black picture. The player asks
+# here for an H.264 copy, which every browser plays. The copy is made once and
+# kept in the cache; the file in the workspace is not changed.
+
+_VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".mkv", ".webm", ".avi", ".ogg"}
+_PREVIEW_MAX_EDGE = 1920
+_PREVIEW_TIMEOUT_S = 1800
+_PREVIEW_KEEP_DAYS = 14
+_preview_jobs: dict[str, asyncio.Task] = {}
+_preview_failed: dict[str, str] = {}
+_preview_slot: asyncio.Semaphore | None = None
+
+
+def _preview_dir() -> Path:
+    return Path(settings.workspace_dir).resolve().parent / "cache" / "video_preview"
+
+
+def _preview_target(file_path: Path) -> Path:
+    st = file_path.stat()
+    key = hashlib.sha256(f"{file_path}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:32]
+    return _preview_dir() / f"{key}.mp4"
+
+
+def _preview_command(src: Path, dst: Path) -> list[str]:
+    # ffmpeg applies the rotation tag itself, so the copy is upright. The
+    # longer edge is brought down to 1920: a 4K phone clip is 20 MB a second.
+    edge = _PREVIEW_MAX_EDGE
+    scale = f"scale='if(gt(a,1),min({edge},iw),-2)':'if(gt(a,1),-2,min({edge},ih))'"
+    return [
+        "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+        "-i", str(src),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", scale,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        "-f", "mp4", str(dst),
+    ]  # fmt: skip
+
+
+async def _make_preview(src: Path, target: Path) -> None:
+    global _preview_slot
+    if _preview_slot is None:
+        _preview_slot = asyncio.Semaphore(1)  # one conversion at a time
+    key = target.name
+    tmp = target.with_suffix(".part")
+    try:
+        async with _preview_slot:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            cutoff = time.time() - _PREVIEW_KEEP_DAYS * 86400
+            for old in target.parent.iterdir():
+                try:
+                    if old.stat().st_mtime < cutoff:
+                        old.unlink()
+                except OSError:
+                    pass
+            proc = await asyncio.create_subprocess_exec(
+                *_preview_command(src, tmp),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, err = await asyncio.wait_for(proc.communicate(), timeout=_PREVIEW_TIMEOUT_S)
+            except (TimeoutError, asyncio.CancelledError):
+                proc.kill()
+                raise
+            if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+                raise RuntimeError((err or b"").decode(errors="replace").strip()[-300:] or "ffmpeg failed")
+            tmp.replace(target)
+    except Exception as e:  # noqa: BLE001 — the player shows the reason
+        _preview_failed[key] = "the conversion took too long" if isinstance(e, TimeoutError) else str(e)[:300]
+        logger.warning("video preview failed for %s: %s", src.name, _preview_failed[key])
+    finally:
+        tmp.unlink(missing_ok=True)
+        _preview_jobs.pop(key, None)
+
+
+@router.get("/api/workspace/video-preview")
+async def video_preview(path: str = Query(...), probe: bool = Query(False)):
+    """An H.264 copy of a workspace video, for a browser that cannot play the original.
+
+    probe=1 answers with the state only: ready, converting or failed. The
+    first call starts the conversion. Without probe the copy itself is served
+    once it is ready (202 until then).
+    """
+    workspace = Path(settings.workspace_dir).resolve()
+    file_path = (workspace / path).resolve()
+    if not file_path.is_relative_to(workspace):
+        raise HTTPException(403, detail="Path traversal blocked")
+    if not file_path.is_file():
+        raise HTTPException(404, detail="File not found")
+    if file_path.suffix.lower() not in _VIDEO_EXTS:
+        raise HTTPException(400, detail="Not a video file")
+    if shutil.which("ffmpeg") is None:
+        return JSONResponse({"status": "failed", "detail": "ffmpeg is not installed on the server"}, status_code=200)
+    target = _preview_target(file_path)
+    key = target.name
+    if target.is_file():
+        if probe:
+            return {"status": "ready"}
+        return FileResponse(
+            target,
+            media_type="video/mp4",
+            headers={"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"},
+        )
+    if key in _preview_failed and key not in _preview_jobs:
+        detail = _preview_failed[key]
+        if not probe:
+            _preview_failed.pop(key, None)  # a direct request may try again
+        return JSONResponse({"status": "failed", "detail": detail}, status_code=200 if probe else 422)
+    if key not in _preview_jobs:
+        _preview_jobs[key] = asyncio.create_task(_make_preview(file_path, target))
+    return JSONResponse({"status": "converting"}, status_code=200 if probe else 202)
 
 
 def _stale(file_path: Path, base_mtime) -> float | None:

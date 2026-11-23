@@ -1339,6 +1339,50 @@ function _closeViewerFor(path) {
     _state.viewMode = 'tree';
     return true;
 }
+
+/**
+ * Some browsers cannot decode some videos (an iPhone HEVC clip in Chrome or
+ * Firefox on Linux): the sound plays over a black picture, or the video fails
+ * to load. When that happens, ask the server for an H.264 copy and play that.
+ * The poll belongs to the preview that was on screen when it started. It stops
+ * as soon as any other preview takes over or the player leaves the page.
+ */
+function _watchVideoFormat(video, file, viewer) {
+    const gen = _previewSeq;
+    let started = false;
+    const q = `/api/workspace/video-preview?path=${encodeURIComponent(file.path)}`;
+    const gone = () => _previewSuperseded(gen) || !video.isConnected;
+    const fallback = () => {
+        if (started || gone()) return;
+        started = true;
+        const line = el('div', { class: 'fp-binary-hint fp-video-status', role: 'status' }, [
+            text('This browser cannot play this video’s format. Making a copy it can play…'),
+        ]);
+        viewer.appendChild(line);
+        const poll = async () => {
+            if (gone()) return;
+            let res;
+            try { res = await get(`${q}&probe=1`); } catch (e) { res = { status: 'failed', detail: e.message }; }
+            if (gone()) return;
+            if (res.status === 'ready') {
+                video.src = q;   // a new src loads paused at the start
+                line.remove();
+            } else if (res.status === 'failed') {
+                // The download button in the header still gets the original.
+                line.textContent = `Could not make a playable copy: ${res.detail || 'unknown error'}`;
+            } else {
+                setTimeout(poll, 2000);
+            }
+        };
+        poll();
+    };
+    video.addEventListener('loadedmetadata', () => {
+        if (video.getAttribute('src') === file.content && video.videoWidth === 0) fallback();
+    });
+    video.addEventListener('error', () => {
+        if (video.getAttribute('src') === file.content) fallback();
+    });
+}
 // ── end preview ownership ──────────────────────────────────────────────────
 
 async function viewFile(path, source = 'workspace') {
@@ -1482,6 +1526,7 @@ function renderViewer(container) {
     } else if (file.type === 'video') {
         const video = el('video', { src: file.content, controls: '', style: 'max-width: 100%' });
         viewer.appendChild(video);
+        _watchVideoFormat(video, file, viewer);
     } else if (file.type === 'audio') {
         const audio = el('audio', { src: file.content, controls: '', style: 'width: 100%' });
         viewer.appendChild(audio);
