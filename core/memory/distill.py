@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 
 from config import settings
+from core.llm import reasoning as reasoning_mod
 from core.llm.jsonx import extract_json
 
 logger = logging.getLogger("pernix.memory.distill")
@@ -422,14 +423,15 @@ async def distill_session(
         # one fixed prompt), so one more call usually gets a readable answer.
         for _attempt in range(DISTILL_READ_ATTEMPTS):
             try:
-                response = await client.chat(
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": chunk.text},
-                    ],
-                    model=model,
-                    max_tokens=2000,
-                )
+                with reasoning_mod.background_work():
+                    response = await client.chat(
+                        messages=[
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": chunk.text},
+                        ],
+                        model=model,
+                        max_tokens=2000,
+                    )
                 text = response.content.strip()
             except Exception as e:
                 logger.warning("Distillation LLM call failed on chunk %d/%d: %s", index + 1, len(chunks), e)

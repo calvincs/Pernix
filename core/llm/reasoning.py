@@ -19,7 +19,9 @@ server that has not been checked for it.
 
 from __future__ import annotations
 
+import contextvars
 import logging
+from contextlib import contextmanager
 
 from config import settings
 
@@ -74,16 +76,42 @@ def _valid(value: str, setting: str) -> str:
     return ""
 
 
+# Set while background work runs (the snooze cycle, distill, titles). With one
+# model for both roles the model name cannot tell a merge job from an agent
+# turn, so the caller says which it is.
+_BACKGROUND_WORK: contextvars.ContextVar[bool] = contextvars.ContextVar("pernix_background_llm_work", default=False)
+
+
+@contextmanager
+def background_work():
+    """Mark the LLM calls made inside the block as background work.
+
+    They then take reasoning_effort_background. A task or thread started
+    inside the block inherits the mark.
+    """
+    token = _BACKGROUND_WORK.set(True)
+    try:
+        yield
+    finally:
+        _BACKGROUND_WORK.reset(token)
+
+
 def effort_for(model: str) -> str:
     """The reasoning_effort to send for `model`, or "" to omit the field.
 
-    Roles are told apart the way the Ollama think switch does it: the
-    Background setting applies when the model is settings.background_model
-    and not also the Primary. Backup follows Primary.
+    The Background setting applies to a call made inside background_work(),
+    and, as for the Ollama think switch, to a call whose model is
+    settings.background_model and not also the Primary. Backup follows
+    Primary.
+
+    Before background_work() existed, a setup with one model for both roles
+    had no way to lower the effort of background calls. A memory merge then
+    ran at the model's default (high) and spent its whole output on
+    reasoning: the reply came back empty and the merge was thrown away.
     """
     background = (settings.background_model or "").strip()
     primary = (settings.llm_model or "").strip()
-    if model and model == background and model != primary:
+    if _BACKGROUND_WORK.get() or (model and model == background and model != primary):
         return _valid(getattr(settings, "reasoning_effort_background", ""), "reasoning_effort_background")
     return _valid(getattr(settings, "reasoning_effort", ""), "reasoning_effort")
 

@@ -43,6 +43,7 @@ from datetime import datetime, timedelta, timezone
 
 from config import settings
 from core import notices
+from core.llm import reasoning as reasoning_mod
 from core.pools import run_background
 
 logger = logging.getLogger("pernix.snooze")
@@ -482,9 +483,11 @@ class SnoozeRunner:
         self._stats["active_rung"] = label
         logger.info("Snooze activity %s starting", label)
         try:
-            if label in RUNG_TIMEOUTS:
-                return await asyncio.wait_for(coro, timeout=RUNG_TIMEOUTS[label])
-            return await coro
+            # Every snooze activity is background work for the model.
+            with reasoning_mod.background_work():
+                if label in RUNG_TIMEOUTS:
+                    return await asyncio.wait_for(coro, timeout=RUNG_TIMEOUTS[label])
+                return await coro
         except asyncio.CancelledError:
             raise
         except Exception as e:

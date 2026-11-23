@@ -169,8 +169,11 @@ class Settings:
     # own default in force (Inkling 2 Mini: high). Reasoning models cannot
     # switch reasoning off entirely, so this trades depth for latency and
     # output tokens; the output request grows with it (core/llm/reasoning.py).
-    # Never sent to api.openai.com or OpenRouter. Roles are told apart as
-    # for ollama_think above.
+    # Never sent to api.openai.com or OpenRouter. Background applies to the
+    # snooze cycle (memory merges, dream), distill and titles, whichever model
+    # they run on, and to any call on a separate background_model. At the
+    # default (high) a memory merge can spend its whole output on reasoning
+    # and return nothing; "low" is the value to use for Background.
     reasoning_effort: str = ""  # Primary (llm_model) — agent turns
     reasoning_effort_background: str = ""  # Background (background_model)
 

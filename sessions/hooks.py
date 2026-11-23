@@ -261,17 +261,19 @@ async def _auto_title(session_id: str, emit=None) -> None:
             "SUBTITLE: <subtitle>"
         )
 
+        from core.llm import reasoning as reasoning_mod
         from core.llm.client import chat_with_backup
 
-        response = await chat_with_backup(
-            client,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context},
-            ],
-            model=model,
-            max_tokens=300,
-        )
+        with reasoning_mod.background_work():
+            response = await chat_with_backup(
+                client,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": context},
+                ],
+                model=model,
+                max_tokens=300,
+            )
         raw = _strip_thinking(response.content)
         title = ""
         subtitle = ""
