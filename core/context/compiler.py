@@ -94,6 +94,54 @@ MAX_INLINE_ATTACH_BYTES = 32 * 1024 * 1024
 _attach_block_cache: dict[tuple, dict] = {}
 _ATTACH_CACHE_MAX = 8
 
+_PIL_SAVE_FORMAT = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG", ".webp": "WEBP"}
+
+
+def _fit_image(data: bytes, ext: str, max_edge: int) -> tuple[bytes, str | None]:
+    """Shrink a picture so its longer edge is at most `max_edge` pixels.
+
+    A phone photo is 12 megapixels or more. A vision model turns pixels into
+    tokens, and a self-hosted server sets a hard token limit for one picture:
+    it answers 400 for a larger one, and the turn then leaves the selected
+    model. No task here needs the full size, so the picture is fitted before
+    it is sent.
+
+    The stored orientation tag is applied to the pixels first. A re-encoded
+    file carries no tag, so without this step a portrait photo arrives on its
+    side.
+
+    Returns (bytes, mime). mime is None when the bytes are the original ones:
+    the picture already fits, the limit is 0 (off), the file is animated, or
+    it cannot be decoded.
+    """
+    if max_edge <= 0:
+        return data, None
+    try:
+        import io
+
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(data)) as img:
+            if max(img.size) <= max_edge or getattr(img, "is_animated", False):
+                return data, None
+            if img.format == "JPEG":
+                # Decode at a reduced scale: several times faster on a large photo.
+                img.draft(img.mode, (max_edge, max_edge))
+            img = ImageOps.exif_transpose(img)
+            img.thumbnail((max_edge, max_edge), Image.LANCZOS)
+            fmt = _PIL_SAVE_FORMAT.get(ext, "PNG")
+            if fmt == "JPEG" and img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            out = io.BytesIO()
+            if fmt == "JPEG":
+                img.save(out, fmt, quality=90)
+            else:
+                img.save(out, fmt)
+            return out.getvalue(), f"image/{fmt.lower()}"
+    except Exception as e:  # noqa: BLE001 — a bad file is sent as it is
+        logger.warning("could not fit image to %d px (%s); sending the original", max_edge, e)
+        return data, None
+
 
 def _extract_attached_filenames(text: str) -> list[str]:
     """Return the filenames referenced by [attached: ...] markers in text."""
@@ -150,7 +198,7 @@ def _expand_user_message_with_attachments(text: str, budget: int) -> tuple[list[
         # — without memoization a 19MB WAV is re-read and re-base64'd (~25MB
         # of string churn on the event loop) once per round for the whole
         # turn. Key on (path, mtime, size) so an edited file re-encodes.
-        cache_key = (str(src), st.st_mtime_ns, st.st_size)
+        cache_key = (str(src), st.st_mtime_ns, st.st_size, getattr(settings, "image_max_edge", 0))
         block = _attach_block_cache.get(cache_key)
         if block is None:
             # ~33% overhead for base64. Check against remaining budget.
@@ -169,8 +217,11 @@ def _expand_user_message_with_attachments(text: str, budget: int) -> tuple[list[
             except OSError as e:
                 logger.warning("attachment read failed for %s: %s", src, e)
                 continue
-            b64 = base64.b64encode(data).decode()
             mime = _MIME_MAP.get(ext, "image/jpeg")
+            if ext in _IMAGE_EXTENSIONS:
+                data, fitted_mime = _fit_image(data, ext, int(getattr(settings, "image_max_edge", 0) or 0))
+                mime = fitted_mime or mime
+            b64 = base64.b64encode(data).decode()
             block = {
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{b64}"},

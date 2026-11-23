@@ -134,6 +134,12 @@ class Settings:
     openai_models: list = field(default_factory=list)
     # Force supports_vision=True for models where auto-detection misses multimodal capability.
     vision_model_overrides: list = field(default_factory=list)
+    # Longest edge, in pixels, of a picture sent to a vision model. A larger
+    # picture is scaled down first (the file on disk is not changed). A
+    # self-hosted server rejects a picture above its per-image token limit, and
+    # a rejected call fails over to the backup model. 2048 fits the 2,704-token
+    # limit of Inkling 2 Mini on vLLM (one token per 40x40 pixels). 0 = off.
+    image_max_edge: int = 2048
     # Force supports_audio=True for models where auto-detection misses audio capability.
     # Audio-capable Ollama models (gemma4, nemotron3, …) accept WAV bytes via the
     # same `images[]` field; the server dispatches by RIFF/WAVE magic bytes.

@@ -518,3 +518,79 @@ def test_vision_key_scan_without_override(monkeypatch):
 
     info = asyncio.run(provider.get_model_info("llama3:8b"))
     assert info.supports_vision is False
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-23: a picture is fitted to image_max_edge before it is sent
+# ---------------------------------------------------------------------------
+
+
+def _decode_block(block: dict):
+    import io
+
+    from PIL import Image
+
+    url = block["image_url"]["url"]
+    head, b64 = url.split(",", 1)
+    return head, Image.open(io.BytesIO(base64.b64decode(b64)))
+
+
+def test_large_picture_is_scaled_to_the_edge_limit(tmp_path, monkeypatch):
+    """A 12-megapixel photo went out at full size; the model server answered
+    400 (too many image tokens) and the turn left the selected model."""
+    from PIL import Image
+
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    monkeypatch.setattr("config.settings.image_max_edge", 2048)
+    Image.new("RGB", (4032, 3024), (200, 30, 30)).save(tmp_path / "photo.jpg", quality=90)
+    blocks, _ = _expand_user_message_with_attachments("see [attached: photo.jpg]", 32 * 1024 * 1024)
+    head, img = _decode_block(blocks[1])
+    assert head == "data:image/jpeg;base64"
+    assert img.size == (2048, 1536)
+
+
+def test_small_picture_is_sent_unchanged(tmp_path, monkeypatch):
+    from PIL import Image
+
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    monkeypatch.setattr("config.settings.image_max_edge", 2048)
+    Image.new("RGB", (800, 600), (0, 0, 0)).save(tmp_path / "small.png")
+    raw = (tmp_path / "small.png").read_bytes()
+    blocks, _ = _expand_user_message_with_attachments("see [attached: small.png]", 32 * 1024 * 1024)
+    assert blocks[1]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(raw).decode()
+
+
+def test_edge_limit_zero_turns_scaling_off(tmp_path, monkeypatch):
+    from PIL import Image
+
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    monkeypatch.setattr("config.settings.image_max_edge", 0)
+    Image.new("RGB", (3000, 1000), (0, 0, 0)).save(tmp_path / "wide.png")
+    blocks, _ = _expand_user_message_with_attachments("see [attached: wide.png]", 32 * 1024 * 1024)
+    _, img = _decode_block(blocks[1])
+    assert img.size == (3000, 1000)
+
+
+def test_scaled_photo_keeps_its_upright_orientation(tmp_path, monkeypatch):
+    """A phone stores a portrait photo as landscape pixels plus a rotate tag.
+    The scaled copy has no tag, so the rotation must be in its pixels."""
+    from PIL import Image
+
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    monkeypatch.setattr("config.settings.image_max_edge", 1000)
+    img = Image.new("RGB", (4000, 3000), (10, 10, 10))
+    exif = Image.Exif()
+    exif[0x0112] = 6  # rotate 90 degrees to view upright
+    img.save(tmp_path / "portrait.jpg", exif=exif)
+    blocks, _ = _expand_user_message_with_attachments("see [attached: portrait.jpg]", 32 * 1024 * 1024)
+    _, out = _decode_block(blocks[1])
+    assert out.size == (750, 1000)
+
+
+def test_undecodable_picture_is_sent_as_it_is(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    monkeypatch.setattr("config.settings.image_max_edge", 2048)
+    raw = b"\xff\xd8\xff\xe0" + b"x" * 2000
+    (tmp_path / "broken.jpg").write_bytes(raw)
+    blocks, _ = _expand_user_message_with_attachments("see [attached: broken.jpg]", 32 * 1024 * 1024)
+    assert blocks[1]["image_url"]["url"] == "data:image/jpeg;base64," + base64.b64encode(raw).decode()
