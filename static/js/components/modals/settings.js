@@ -108,6 +108,7 @@ const SECTIONS = [
         fields: [
             { key: 'llm_base_url', label: 'Ollama Base URL', type: 'text' },
             { key: 'llm_max_concurrent', label: 'Ollama Max Concurrent', type: 'number', min: 1, max: 20, restart: RESTART_ROUTER },
+            { key: 'ollama_chat_enabled', label: 'Ollama Serves Chat Models', type: 'bool', hint: 'Turn off when Ollama is for embeddings only. Its chat models are then not offered to the agent or listed here.' },
             { key: 'ollama_think', label: 'Ollama Reasoning — Primary', type: 'bool' },
             { key: 'ollama_think_background', label: 'Ollama Reasoning — Background', type: 'bool' },
             { key: 'openrouter_base_url', label: 'OpenRouter URL', type: 'text' },

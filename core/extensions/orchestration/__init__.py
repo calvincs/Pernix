@@ -141,6 +141,12 @@ def spawn_worker(
             if provider == "ollama" and "/" not in model:
                 # Bare name routed to Ollama — check if Ollama actually has it
                 info = registry.get_model_info(model)
+                if not info and not getattr(settings, "ollama_chat_enabled", True):
+                    known = ", ".join(sorted(m.id for m in registry.all_models())[:30])
+                    return (
+                        f"Error: Model '{model}' is not available. Leave `model` empty to use the "
+                        f"default model, or pick one of: {known}."
+                    )
                 if not info:
                     return (
                         f"Error: Model '{model}' not found in Ollama or OpenRouter. "

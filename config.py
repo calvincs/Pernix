@@ -153,6 +153,14 @@ class Settings:
     # tokens, which is worth it for agent turns and rarely worth it for
     # scout/titles/dream. Off everywhere preserves the old behavior.
     # Models with no reasoning mode ignore the flag.
+    # Whether Ollama serves chat models. Set False when the Ollama server is
+    # there for embeddings only (for example a CPU-only instance beside a
+    # GPU server that hosts the chat model). Its models then stay out of the
+    # model registry, so the agent cannot pick one for a worker, call_model
+    # or a model switch, and the UI does not list them. A large chat model on
+    # such a server takes minutes per reply and its calls time out.
+    # Embeddings are not affected.
+    ollama_chat_enabled: bool = True
     ollama_think: bool = False  # Primary (llm_model) — agent turns
     ollama_think_background: bool = False  # Background (background_model)
     # Reasoning effort for a self-hosted OpenAI-compatible server (vLLM),

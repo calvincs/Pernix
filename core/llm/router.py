@@ -490,10 +490,12 @@ class ProviderRouter:
         appear in the dropdown without restarting. OpenRouter uses the cached
         registry to avoid a remote API call on every settings open.
         """
-        try:
-            ollama_live = await self._ollama.list_models()
-        except Exception:
-            ollama_live = []
+        ollama_live = []
+        if getattr(settings, "ollama_chat_enabled", True):
+            try:
+                ollama_live = await self._ollama.list_models()
+            except Exception:
+                ollama_live = []
 
         if self.registry.populated:
             cached_or = {m.id: m for m in self.registry.all_models() if m.provider != "ollama"}

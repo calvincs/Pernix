@@ -58,10 +58,14 @@ class ModelRegistry:
             whitelists = self._remote_whitelists()
 
             ollama_models: list[ModelInfo] = []
-            try:
-                ollama_models = await ollama_provider.list_models()
-            except Exception as e:
-                logger.warning("Failed to fetch Ollama models for registry: %s", e)
+            if not getattr(settings, "ollama_chat_enabled", True):
+                # An embeddings-only Ollama: its chat models are not offered.
+                logger.info("Ollama chat is off (ollama_chat_enabled=false): its models stay out of the registry")
+            else:
+                try:
+                    ollama_models = await ollama_provider.list_models()
+                except Exception as e:
+                    logger.warning("Failed to fetch Ollama models for registry: %s", e)
 
             for provider in remote_providers:
                 if not getattr(provider, "available", False):
