@@ -102,10 +102,12 @@ class FakeLLMClient:
         session_created_at=float("inf"),
         session_priority=2,
         response_format=None,
+        tool_choice=None,
     ):
         self.calls.append(
             {
                 "messages": messages,
+                "tool_choice": tool_choice,
                 "tools": tools,
                 "model": model,
                 "session_id": session_id,

@@ -160,8 +160,9 @@ class OllamaProvider:
         max_tokens: int = 4096,
         temperature: float | None = None,
         response_format: dict | None = None,
+        tool_choice: dict | str | None = None,
     ) -> ChatResponse:
-        # response_format is accepted for interface parity and not forwarded:
+        # response_format and tool_choice are accepted for interface parity and not forwarded:
         # Ollama serves embeddings only on this deployment.
         # Always use native /api/chat — it supports think=False to suppress
         # reasoning chains from thinking models, and handles all message types.

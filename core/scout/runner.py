@@ -19,6 +19,7 @@ from typing import Callable
 import httpx
 
 from config import settings
+from core.llm import reasoning as reasoning_mod
 from core.llm.errors import FailoverError, FailoverReason
 from core.llm.semaphore import PRIORITY_BACKGROUND, PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
 from core.llm.types import TokenUsage
@@ -520,6 +521,9 @@ _SCOUT_TOOLS = [
 # Last-round tool surface: submit_report only. Scout has run out of rounds to
 # search, but must still be able to deliver what it already has.
 _SCOUT_SUBMIT_ONLY = [t for t in _SCOUT_TOOLS if t["function"]["name"] == "submit_report"]
+# Sent with the submit-only tool list. A server that enforces it returns a
+# submit_report call; one that does not is covered by _correct_missed_submit.
+_SUBMIT_TOOL_CHOICE = {"type": "function", "function": {"name": "submit_report"}}
 
 
 # ---------------------------------------------------------------------------
@@ -1798,6 +1802,7 @@ async def _run_scout_llm(
     # a revision request and let scout submit once more. Hard-capped at 1.
     revisions_used = 0
     rounds_used = 0  # LLM rounds actually spent (observability — scout.done)
+    last_response = None
 
     for round_num in range(max_rounds):
         rounds_used = round_num + 1
@@ -1821,15 +1826,21 @@ async def _run_scout_llm(
                 }
             )
 
-        response = await client.chat(
-            messages=messages,
-            model=model,
-            max_tokens=4096,
-            tools=tools,
-            session_id=session_id,
-            session_created_at=session_created_at,
-            session_priority=session_priority,
-        )
+        # Scout is background work for the model: it takes the background
+        # reasoning effort. At the default effort a reasoning model thought for
+        # 4-8K tokens before a report of under 1K.
+        with reasoning_mod.background_work():
+            response = await client.chat(
+                messages=messages,
+                model=model,
+                max_tokens=4096,
+                tools=tools,
+                tool_choice=_SUBMIT_TOOL_CHOICE if tools is _SCOUT_SUBMIT_ONLY else None,
+                session_id=session_id,
+                session_created_at=session_created_at,
+                session_priority=session_priority,
+            )
+        last_response = response
 
         # Accumulate token usage
         total_usage.prompt_tokens += response.usage.prompt_tokens
@@ -1965,6 +1976,23 @@ async def _run_scout_llm(
         if report is not None:
             break
 
+    # The model answered, and the answer was not a report: it called a tool
+    # that scout does not offer (bash), or it wrote prose about what it would
+    # do. Tell it what went wrong and ask once more. A blind retry of the whole
+    # scout repeats the same mistake about as often, and after two of those
+    # the request goes to the backup model.
+    if last_response is not None and (report is None or _is_degenerate_report(report)):
+        corrected, usage = await _correct_missed_submit(
+            client, model, messages, last_response, session_id, session_created_at, session_priority
+        )
+        rounds_used += 1
+        total_usage.prompt_tokens += usage.prompt_tokens
+        total_usage.completion_tokens += usage.completion_tokens
+        total_usage.total_tokens += usage.total_tokens
+        if corrected is not None and not _is_degenerate_report(corrected):
+            logger.info("Scout submitted its report after one correction")
+            report = corrected
+
     # If no report was produced — or the model produced a structurally empty
     # one — degrade to the deterministic fallback rather than an empty stub.
     # An empty stub is worse than no scout at all: it strips identity, rules,
@@ -1995,6 +2023,84 @@ async def _run_scout_llm(
     report.scout_tokens = total_usage
     report.scout_rounds = rounds_used
     return report
+
+
+async def _correct_missed_submit(
+    client,
+    model: str,
+    messages: list[dict],
+    response,
+    session_id: str,
+    session_created_at: float,
+    session_priority: int,
+) -> tuple[ScoutReport | None, TokenUsage]:
+    """Ask once more for submit_report after a reply that was not a report.
+
+    The reply is put back in the conversation with the reason it could not be
+    used, so the model corrects that reply and does not start again.
+    Returns (report or None, token usage of the call).
+    """
+    follow_up = list(messages)
+    calls = list(response.tool_calls or [])
+    if calls:
+        follow_up.append(
+            {
+                "role": "assistant",
+                "content": response.content or "",
+                "tool_calls": [
+                    {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
+                    for tc in calls
+                ],
+            }
+        )
+        for tc in calls:
+            follow_up.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": (
+                        f"Error: the tool '{tc.name}' does not exist here. You are the scout: you plan, "
+                        "you do not do the task. The only tool is submit_report. Call submit_report now "
+                        "with your plan for the agent."
+                    ),
+                }
+            )
+    else:
+        follow_up.append({"role": "assistant", "content": response.content or ""})
+        follow_up.append(
+            {
+                "role": "user",
+                "content": (
+                    "[FORMAT ERROR] Your last response was prose, and prose cannot be used. "
+                    "Call the submit_report tool now and put your findings in its fields."
+                ),
+            }
+        )
+    try:
+        with reasoning_mod.background_work():
+            retry = await client.chat(
+                messages=follow_up,
+                model=model,
+                max_tokens=4096,
+                tools=_SCOUT_SUBMIT_ONLY,
+                tool_choice=_SUBMIT_TOOL_CHOICE,
+                session_id=session_id,
+                session_created_at=session_created_at,
+                session_priority=session_priority,
+            )
+    except Exception as e:  # noqa: BLE001 — the caller falls back as before
+        logger.warning("Scout correction call failed: %r", e)
+        return None, TokenUsage()
+    for tc in retry.tool_calls or []:
+        if tc.name == "submit_report":
+            try:
+                args = json.loads(tc.arguments) if tc.arguments else {}
+            except json.JSONDecodeError:
+                args = {}
+            return _extract_report(args), retry.usage
+    if retry.content:
+        return _parse_scout_response(retry.content), retry.usage
+    return None, retry.usage
 
 
 def _parse_scout_response(text: str) -> ScoutReport:

@@ -91,6 +91,7 @@ class OpenRouterProvider:
         max_tokens: int = 4096,
         temperature: float | None = None,
         response_format: dict | None = None,
+        tool_choice: dict | str | None = None,
     ) -> ChatResponse:
         model = self._model(model)
         payload: dict = {
@@ -107,6 +108,8 @@ class OpenRouterProvider:
             payload["temperature"] = temperature
         if response_format:
             payload["response_format"] = response_format
+        if tool_choice and tools:
+            payload["tool_choice"] = tool_choice
 
         client = self._get_client()
         resp = await client.post(

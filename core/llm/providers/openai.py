@@ -280,6 +280,7 @@ class OpenAIProvider:
         temperature: float | None = None,
         _retried: bool = False,
         response_format: dict | None = None,
+        tool_choice: dict | str | None = None,
     ) -> ChatResponse:
         model = self._model(model)
         payload = self._build_payload(messages, model, max_tokens, tools, temperature, stream=False)
@@ -288,6 +289,10 @@ class OpenAIProvider:
         # parallel probes (prose, `{}`, empty); with this set, 11 of 12 parsed.
         if response_format:
             payload["response_format"] = response_format
+        # Ask for one named tool. A model that is given a single tool can
+        # still answer in prose or call a tool it was not offered.
+        if tool_choice and tools:
+            payload["tool_choice"] = tool_choice
 
         client = self._get_client()
         resp = await client.post(
@@ -306,6 +311,7 @@ class OpenAIProvider:
                 temperature=temperature,
                 _retried=True,
                 response_format=response_format,
+                tool_choice=tool_choice,
             )
         resp.raise_for_status()
         data = resp.json()

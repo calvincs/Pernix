@@ -245,12 +245,15 @@ class LLMClient:
         session_created_at: float = float("inf"),
         session_priority: int = PRIORITY_BACKGROUND,
         response_format: dict | None = None,
+        tool_choice: dict | str | None = None,
     ) -> ChatResponse:
         """Non-streaming chat. Semaphore managed per-provider by router."""
         model = model or settings.llm_model
         max_tokens = max_tokens or derive_max_output(model)
 
-        extra = {"response_format": response_format} if response_format else {}
+        extra: dict = {"response_format": response_format} if response_format else {}
+        if tool_choice:
+            extra["tool_choice"] = tool_choice
         response = await self.router.chat(
             messages,
             tools=tools,

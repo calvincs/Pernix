@@ -420,8 +420,87 @@ async def test_one_round_that_calls_a_search_tool_degrades_instead_of_looping(mo
 
     fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("search_memory", {"query": "x"})])], rounds=1)
     report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
-    assert len(fake.calls) == 1
+    # One round plus one correction (2026-11-23), then the fallback. No loop.
+    assert len(fake.calls) == 2
     assert report.from_fallback is True and report.fallback_reason == "degraded"
+
+
+# --- 2026-11-23: a reply that is not a report gets one correction -------------
+# A reasoning model given the one-round scout prompt acted as the agent: it
+# called bash, which scout does not offer, or wrote prose about its plan. Each
+# miss cost a second full scout and then a call to the backup model.
+
+
+async def test_submit_only_round_asks_for_the_submit_tool_by_name(monkeypatch):
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("submit_report", _GOOD_REPORT)])], rounds=1)
+    await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert fake.calls[0]["tool_choice"] == {"type": "function", "function": {"name": "submit_report"}}
+
+
+async def test_search_rounds_do_not_force_a_tool(monkeypatch):
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("submit_report", _GOOD_REPORT)])], rounds=6)
+    await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert fake.calls[0]["tool_choice"] is None
+
+
+async def test_a_call_to_a_tool_scout_does_not_have_is_corrected_once(monkeypatch):
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(
+        monkeypatch,
+        [
+            _resp(tool_calls=[_call("bash", {"command": "ls"}, "c1")]),
+            _resp(tool_calls=[_call("submit_report", _GOOD_REPORT, "c2")]),
+        ],
+        rounds=1,
+    )
+    report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert len(fake.calls) == 2
+    assert report.from_fallback is False
+    second = fake.calls[1]["messages"]
+    assert second[-2]["tool_calls"][0]["function"]["name"] == "bash"
+    assert second[-1]["role"] == "tool" and "submit_report" in second[-1]["content"]
+    assert _tool_names(fake.calls[1]["tools"]) == ["submit_report"]
+
+
+async def test_a_prose_reply_is_corrected_once(monkeypatch):
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(
+        monkeypatch,
+        [
+            _resp(content="I have enough context. I will submit the report now."),
+            _resp(tool_calls=[_call("submit_report", _GOOD_REPORT, "c2")]),
+        ],
+        rounds=1,
+    )
+    report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert len(fake.calls) == 2
+    assert report.from_fallback is False
+    assert "FORMAT ERROR" in fake.calls[1]["messages"][-1]["content"]
+
+
+async def test_scout_runs_at_the_background_reasoning_effort(monkeypatch):
+    from core.llm import reasoning
+    from core.scout.runner import _run_scout_llm
+
+    fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("submit_report", _GOOD_REPORT)])], rounds=1)
+    monkeypatch.setattr(settings, "reasoning_effort", "high")
+    monkeypatch.setattr(settings, "reasoning_effort_background", "low")
+    seen = []
+    real = fake.chat
+
+    async def chat(*a, **k):
+        seen.append(reasoning.effort_for("test-model"))
+        return await real(*a, **k)
+
+    fake.chat = chat
+    await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
+    assert seen == ["low"]
 
 
 async def test_six_rounds_keep_the_search_tools_and_the_round_budget(monkeypatch):
@@ -452,10 +531,12 @@ async def test_six_rounds_offer_submit_only_on_the_last_round(monkeypatch):
 
     fake = _scout_env(monkeypatch, [_resp(tool_calls=[_call("search_skills", {"query": "x"})])], rounds=6)
     report = await _run_scout_llm("count the errors", SessionBrief(session_id="s", is_fresh=True))
-    assert len(fake.calls) == 6
+    # Six rounds, then one correction (2026-11-23) that also offers submit only.
+    assert len(fake.calls) == 7
     assert all("search_skills" in _tool_names(c["tools"]) for c in fake.calls[:5])
     assert _tool_names(fake.calls[5]["tools"]) == ["submit_report"]
-    assert report.from_fallback is True and report.scout_rounds == 6
+    assert _tool_names(fake.calls[6]["tools"]) == ["submit_report"]
+    assert report.from_fallback is True and report.scout_rounds == 7
 
 
 def test_scout_max_rounds_is_clamped_and_bounded(monkeypatch):
