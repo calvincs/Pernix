@@ -140,7 +140,6 @@ def call_model(
         if not img.exists():
             return f"Error: Image not found: {image_path}"
 
-        img_b64 = base64.b64encode(img.read_bytes()).decode()
         ext = img.suffix.lower().lstrip(".")
         mime = {
             "jpg": "image/jpeg",
@@ -149,6 +148,13 @@ def call_model(
             "gif": "image/gif",
             "webp": "image/webp",
         }.get(ext, "image/jpeg")
+        # Same fit as a picture in the conversation. A tall contact sheet at
+        # full size got a 400 from one provider and empty replies from another.
+        from core.context.compiler import _fit_image
+
+        data, fitted_mime = _fit_image(img.read_bytes(), f".{ext}", int(getattr(settings, "image_max_edge", 0) or 0))
+        mime = fitted_mime or mime
+        img_b64 = base64.b64encode(data).decode()
 
         messages.append(
             {
@@ -176,7 +182,20 @@ def call_model(
         if fb_class is None:
             return f"(primary {text} [{_TRANSIENT}]; answered by fallback {fallback_model})\n{fb_text}"
         return f"Error: {text} [{_TRANSIENT}]; fallback {fb_text} [{fb_class}]"
-    return f"Error: {text} [{_TRANSIENT}]"
+    return f"Error: {text} [{_TRANSIENT}]{_timeout_hint(text, model)}"
+
+
+def _timeout_hint(text: str, model: str) -> str:
+    """What to do after a timeout. "[transient]" alone read as "try again":
+    an agent called a model that could not answer in time six times, two
+    minutes each."""
+    if "timeout" not in text.lower():
+        return ""
+    return (
+        f"\nThe model '{model}' did not answer in time. Another try with the same model and "
+        "the same input will most likely time out again. Use a different model "
+        "(list_available_models), or send a smaller input."
+    )
 
 
 def switch_model(model: str, reason: str = "", scope: str = "turn", _context: dict | None = None) -> str:
@@ -325,7 +344,9 @@ def register(reg) -> None:
         },
         tags=tags + ["call", "query", "ask", "vision", "image"],
         timeout=300,
-        parallel_safe=False,
+        # One remote request with no shared state. Run one by one, three calls
+        # that each timed out at 120 s held the round for six minutes.
+        parallel_safe=True,
         safety_level="safe",
         **common,
     )

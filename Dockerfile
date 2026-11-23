@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssl ffmpeg python3.12-venv \
+    && apt-get install -y --no-install-recommends openssl ffmpeg python3.12-venv tesseract-ocr \
     && rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED \
     && rm -rf /var/lib/apt/lists/*
 

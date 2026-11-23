@@ -20,6 +20,7 @@ path end to end.
 from __future__ import annotations
 
 import logging
+import threading
 
 from config import settings
 from db import models as db
@@ -30,6 +31,31 @@ logger = logging.getLogger(__name__)
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 _NOTE_PREFIX = "[view_image]"
+
+# Pictures one round may queue when settings.image_max_per_prompt is 0 (no
+# server limit). Each one costs prompt tokens, so the number stays small.
+_DEFAULT_ROUND_CAP = 4
+# view_image calls of one round can run at the same time; they share one note.
+_note_lock = threading.Lock()
+
+
+def _round_cap() -> int:
+    return int(getattr(settings, "image_max_per_prompt", 0) or 0) or _DEFAULT_ROUND_CAP
+
+
+def _open_round_note(session_id: str) -> dict | None:
+    """The view_image note this round already wrote, if it is still the newest message.
+
+    A reply from the model or a tool result after it means a new round began.
+    """
+    try:
+        rows = db.get_messages(session_id, last=1)
+    except Exception:
+        return None
+    last = rows[-1] if rows else None
+    if last and last.get("role") == "user" and (last.get("content") or "").startswith(_NOTE_PREFIX):
+        return last
+    return None
 
 
 def view_image(path: str, _context: dict | None = None) -> str:
@@ -64,6 +90,41 @@ def view_image(path: str, _context: dict | None = None) -> str:
             "Downscale the render (smaller figure, lower DPI) and retry."
         )
 
+    # Only the newest user message has its pictures sent. Each call used to
+    # write its own note, so five calls in one round showed the last picture
+    # only, and every call still answered "Image queued": the agent then
+    # described four pictures it never saw. The calls of one round now share
+    # one note, up to the cap, and a call over the cap says so.
+    cap = _round_cap()
+    with _note_lock:
+        open_note = _open_round_note(session_id)
+        if open_note is not None:
+            queued = open_note["content"].count("[attached:")
+            if f"[attached: {resolved}]" in open_note["content"]:
+                return f"Image queued: {resolved} is already queued for your next round."
+            if queued >= cap:
+                return (
+                    f"Error: '{path}' is NOT queued. A round can show {cap} picture(s) and {queued} "
+                    "are queued already. Look at those first, then call view_image for this one "
+                    "in a later round."
+                )
+            db.update_message_content(open_note["id"], open_note["content"] + f"\n[attached: {resolved}]")
+            logger.info("view_image queued %s (%d bytes) for session %s", resolved, size, session_id[:12])
+            return _queued_text(resolved, size, queued + 1, cap)
+        return _queue_new_note(session_id, resolved, size, cap)
+
+
+def _queued_text(resolved, size: int, position: int, cap: int) -> str:
+    return (
+        f"Image queued: {resolved} ({size} bytes), picture {position} of at most {cap} this round. "
+        "From your NEXT round it appears as an actual image in your context, attached to a "
+        "'[view_image]' note. Only the pictures queued in your most recent round are visible; "
+        "older ones revert to text markers, so call view_image again to look at one again. "
+        "If the active model cannot accept images, the reference stays text."
+    )
+
+
+def _queue_new_note(session_id: str, resolved, size: int, cap: int) -> str:
     note = (
         f"{_NOTE_PREFIX} Harness-injected on the agent's own request via the "
         "view_image tool — not a human message. The agent asked to look at "
@@ -90,13 +151,7 @@ def view_image(path: str, _context: dict | None = None) -> str:
         pass  # stamp what we can — injected:True alone unblocks the filter
     db.add_message(session_id, "user", note, metadata=_json.dumps(meta))
     logger.info("view_image queued %s (%d bytes) for session %s", resolved, size, session_id[:12])
-    return (
-        f"Image queued: {resolved} ({size} bytes). From your NEXT round it appears "
-        "as an actual image in your context, attached to a '[view_image]' note. "
-        "Only the most recent such note carries live image bytes (older ones "
-        "revert to text markers) — call view_image again after re-rendering. "
-        "If the active model cannot accept images, the reference stays text."
-    )
+    return _queued_text(resolved, size, 1, cap)
 
 
 def register(reg) -> None:
@@ -109,6 +164,9 @@ def register(reg) -> None:
             "with the path — the actual image enters your context on the next "
             "round. Visual structure (paths, symmetry, alignment, shapes) is "
             "often obvious in a picture and invisible in coordinate printouts. "
+            "Several calls in one round arrive together, up to a small limit; "
+            "a call over the limit returns an error and that picture is not shown. "
+            "A picture is visible for one round: call again for a second look. "
             "Supported: .png .jpg .jpeg .gif .webp."
         ),
         parameters={

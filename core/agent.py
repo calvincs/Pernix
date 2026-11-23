@@ -611,7 +611,10 @@ _SEMANTIC_DEDUP_TOOLS = {"call_model"}
 # still correct for any caller that does cache a shell result, and because the
 # mutation-epoch bump they pair with is what keeps edit-then-rerun from
 # reading as a tool cycle.
-_CROSS_ROUND_DEDUP_EXCLUDED = {"file_read", "glob"}
+# view_image: a picture stays visible for one round only, so a second look at
+# the same file is a real request. The cached "Image queued" answer left the
+# agent without the picture and with a warning that it was repeating itself.
+_CROSS_ROUND_DEDUP_EXCLUDED = {"file_read", "glob", "view_image"}
 
 # Tools that mutate workspace files. When one of these succeeds, any cached bash
 # result may no longer reflect reality (the agent just changed a file that a

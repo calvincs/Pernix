@@ -530,6 +530,51 @@ def _worker_idle_seconds(w) -> int:
         return 0
 
 
+# A worker counts as slow on its model when it waits this long with nothing
+# back, or when its replies so far took this long each on average.
+_SLOW_MODEL_WAIT_S = 180
+_SLOW_MODEL_PER_REPLY_S = 300
+
+
+def _model_progress(wid: str, worker_obj, row: dict | None, idle: int) -> list[str]:
+    """Status parts that say how a running worker is doing with its model.
+
+    "processing | idle 322s" did not say why. Three workers ran on a model
+    that needed about 20 minutes per reply; the parent could not see that,
+    waited 36 minutes on them and got nothing. The line now names a model the
+    parent chose, counts the replies, and says what to do when the model is
+    too slow.
+    """
+    parts: list[str] = []
+    try:
+        model = (getattr(worker_obj, "model_override", None) or (row or {}).get("model_override") or "").strip()
+        replies = sum(1 for m in db.get_messages(wid) if m.get("role") == "assistant")
+        created = (row or {}).get("created_at") or ""
+        age = 0
+        if created:
+            from datetime import datetime, timezone
+
+            age = max(0, int((datetime.now(timezone.utc) - datetime.fromisoformat(created)).total_seconds()))
+        if model:
+            parts.append(f"model {model}")
+        parts.append(f"{replies} model repl{'y' if replies == 1 else 'ies'} in {age}s")
+        if worker_obj is not None and _worker_has_live_process(worker_obj):
+            return parts
+        slow = (replies == 0 and idle >= _SLOW_MODEL_WAIT_S) or (
+            replies > 0 and idle >= _SLOW_MODEL_WAIT_S and age / replies >= _SLOW_MODEL_PER_REPLY_S
+        )
+        if slow and model:
+            parts.append(
+                f"SLOW MODEL: '{model}' is too slow for this worker. More waiting will not help. "
+                "Call cancel_worker, then spawn it again without `model`, or do this part yourself"
+            )
+        elif slow:
+            parts.append("no reply from the model for a long time; check it with get_worker_transcript")
+    except Exception as e:  # noqa: BLE001 — a status line must never fail the check
+        logger.debug("worker model progress skipped for %s: %s", wid, e)
+    return parts
+
+
 def check_workers(_context: dict | None = None, _filter_ids: list | None = None) -> str:
     """Check status of all workers spawned by this session.
 
@@ -633,6 +678,7 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
         if v2 not in (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_USER):
             # A live subprocess is work in progress, not silence.
             parts.append("running subprocess" if _worker_has_live_process(worker_obj) else f"idle {idle}s")
+            parts.extend(_model_progress(wid, worker_obj, _row, idle))
 
         lines.append(f"- {wid} \"{title}\": {' | '.join(parts)}")
 
