@@ -176,9 +176,18 @@ def _expand_user_message_with_attachments(text: str, budget: int) -> tuple[list[
 
     blocks: list[dict] = [{"type": "text", "text": text}]
     spent = 0
+    # A self-hosted server can limit the pictures in one prompt and answers
+    # 400 for one more, which sends the turn to the backup model. The first
+    # N go in; the model is told the names of the rest.
+    max_images = int(getattr(settings, "image_max_per_prompt", 0) or 0)
+    images_in = 0
+    images_left_out: list[str] = []
     for fname in filenames:
         ext = Path(fname).suffix.lower()
         if ext not in _IMAGE_EXTENSIONS and ext not in _AUDIO_EXTENSIONS:
+            continue
+        if max_images and ext in _IMAGE_EXTENSIONS and images_in >= max_images:
+            images_left_out.append(fname)
             continue
         # Reject path traversal — `[attached: ../../etc/some.jpg]` must not
         # read outside the allowed roots even if the extension gate passes.
@@ -242,6 +251,16 @@ def _expand_user_message_with_attachments(text: str, budget: int) -> tuple[list[
             continue
         blocks.append(block)
         spent += block["_b64_len"]
+        if block.get("_kind") == "image":
+            images_in += 1
+    if images_left_out:
+        blocks[0] = {
+            "type": "text",
+            "text": text
+            + f"\n[Only the first {max_images} picture(s) are shown here: the model server takes at most "
+            + f"{max_images} per prompt. Not shown: {', '.join(images_left_out)}. "
+            + "Use view_image to look at one of them.]",
+        }
     return blocks, spent
 
 

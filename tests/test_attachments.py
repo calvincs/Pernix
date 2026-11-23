@@ -594,3 +594,31 @@ def test_undecodable_picture_is_sent_as_it_is(tmp_path, monkeypatch):
     (tmp_path / "broken.jpg").write_bytes(raw)
     blocks, _ = _expand_user_message_with_attachments("see [attached: broken.jpg]", 32 * 1024 * 1024)
     assert blocks[1]["image_url"]["url"] == "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+
+
+def test_pictures_over_the_per_prompt_limit_are_named_not_sent(tmp_path, monkeypatch):
+    """Three pictures in one message got a 400 from a server that takes two,
+    and the turn failed over to the backup model (2026-11-23)."""
+    from PIL import Image
+
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    monkeypatch.setattr("config.settings.image_max_per_prompt", 2)
+    for name in ("a.png", "b.png", "c.png"):
+        Image.new("RGB", (64, 64), (0, 0, 0)).save(tmp_path / name)
+    blocks, _ = _expand_user_message_with_attachments(
+        "align these [attached: a.png] [attached: b.png] [attached: c.png]", 32 * 1024 * 1024
+    )
+    assert [b["_filename"] for b in blocks[1:]] == ["a.png", "b.png"]
+    assert "Not shown: c.png" in blocks[0]["text"] and "view_image" in blocks[0]["text"]
+
+
+def test_no_per_prompt_limit_by_default(tmp_path, monkeypatch):
+    from PIL import Image
+
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    monkeypatch.setattr("config.settings.image_max_per_prompt", 0)
+    for name in ("a.png", "b.png", "c.png"):
+        Image.new("RGB", (64, 64), (0, 0, 0)).save(tmp_path / name)
+    text = "align these [attached: a.png] [attached: b.png] [attached: c.png]"
+    blocks, _ = _expand_user_message_with_attachments(text, 32 * 1024 * 1024)
+    assert len(blocks) == 4 and blocks[0]["text"] == text

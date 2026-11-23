@@ -140,6 +140,11 @@ class Settings:
     # a rejected call fails over to the backup model. 2048 fits the 2,704-token
     # limit of Inkling 2 Mini on vLLM (one token per 40x40 pixels). 0 = off.
     image_max_edge: int = 2048
+    # Most pictures sent in one prompt. The first N of a message go in and the
+    # model is told the names of the rest, which it can open with view_image.
+    # Set it to the server's own limit (vLLM --limit-mm-per-prompt); one
+    # picture over that limit is a 400 and a failover. 0 = no limit.
+    image_max_per_prompt: int = 0
     # Force supports_audio=True for models where auto-detection misses audio capability.
     # Audio-capable Ollama models (gemma4, nemotron3, …) accept WAV bytes via the
     # same `images[]` field; the server dispatches by RIFF/WAVE magic bytes.
